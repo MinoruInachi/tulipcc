@@ -26,12 +26,12 @@ name: Tab5 firmware release
 # dry_run input forces that behaviour on dev_tab5 too — use it for the first run,
 # before you are ready to publish.
 #
-# Reproducibility caveat: dependencies.lock is gitignored repo-wide (.gitignore:5),
-# so the IDF component manager re-resolves espressif/m5stack_tab5 and its
-# dependency tree on every CI run. A component release inside the manifest's
-# version ranges can therefore change the build without a commit here. If a CI
-# build ever diverges from a local one, diff tulip/esp32p4/dependencies.lock from
-# the run's logs against your local copy first.
+# tulip/esp32p4/dependencies.lock is committed (negated back in .gitignore), so
+# the component manager installs the exact versions the port was built and tested
+# against instead of re-resolving. It is load-bearing, not tidiness: a run
+# without it floated espressif/esp_lvgl_port from 2.8.0~1 to 2.9.0, which fails
+# to compile against IDF v5.5.4. Regenerate it by building locally and committing
+# the result, never by deleting it to "let CI sort it out".
 
 # Deliberately workflow_dispatch-only for now. GitHub will not accept a
 # workflow_dispatch for a workflow that is not on the default branch (dev_tab5

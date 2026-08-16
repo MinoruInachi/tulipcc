@@ -3,6 +3,12 @@ __pycache__
 tulip/macos/gon_config.json
 esp-idf/components/bootloader/subproject/dependencies.lock
 dependencies.lock
+# ...except the Tab5's, which is committed on purpose. Without it the component
+# manager re-resolves on every CI run and can pick a component that does not
+# build against the pinned IDF -- esp_lvgl_port floated 2.8.0~1 -> 2.9.0, whose
+# esp_lcd_dpi_panel_event_callbacks_t needs a field IDF v5.5.4 does not have.
+# Committing the lock is what Espressif recommends for applications anyway.
+!tulip/esp32p4/dependencies.lock
 tulip/esp32s3/dist
 tulip/esp32s3/build
 tulip/esp32s3/tulip-sys.bin
