@@ -11,6 +11,7 @@
 #include "py/stream.h"
 #ifndef __EMSCRIPTEN__
 #include "amy.h"
+#include "sequencer.h"
 #endif
 #ifndef __EMSCRIPTEN__
 #include "amy_midi.h"
@@ -38,6 +39,12 @@ STATIC mp_obj_t tulip_amy_ticks_ms(size_t n_args, const mp_obj_t *args) {
     return mp_obj_new_int(amy_sysclock());
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_amy_ticks_ms_obj, 0, 0, tulip_amy_ticks_ms);
+
+// AMY's sequencer tick counter, used to schedule notes at an absolute tick.
+STATIC mp_obj_t tulip_amy_sequencer_ticks(size_t n_args, const mp_obj_t *args) {
+    return mp_obj_new_int_from_uint(sequencer_ticks());
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_amy_sequencer_ticks_obj, 0, 0, tulip_amy_sequencer_ticks);
 
 // Smoothed fraction of real time AMY spends rendering (0..1); ~1.0 means overloaded.
 STATIC mp_obj_t tulip_amy_render_load(size_t n_args, const mp_obj_t *args) {
@@ -1885,6 +1892,7 @@ STATIC const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_amy_send), MP_ROM_PTR(&tulip_amy_send_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_send_sysex), MP_ROM_PTR(&tulip_amy_send_sysex_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_ticks_ms), MP_ROM_PTR(&tulip_amy_ticks_ms_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_sequencer_ticks), MP_ROM_PTR(&tulip_amy_sequencer_ticks_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_render_load), MP_ROM_PTR(&tulip_amy_render_load_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_set_render_load_threshold), MP_ROM_PTR(&tulip_amy_set_render_load_threshold_obj) },
     { MP_ROM_QSTR(MP_QSTR_pcm_load_file), MP_ROM_PTR(&tulip_pcm_load_file_obj) },
