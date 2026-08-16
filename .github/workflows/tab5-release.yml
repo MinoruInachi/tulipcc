@@ -1,0 +1,189 @@
+name: Tab5 firmware release
+
+# Continuous Tab5 (ESP32-P4 / M5Stack Tab5) release on push to dev_tab5: build the
+# TAB5 board and publish to the rolling 'tab5' GitHub release.
+#
+# This is the fork's port (MinoruInachi/tulipcc); it is NOT built by
+# shorepine/tulipcc and does not participate in the upstream release flow.
+# Modelled on tulip-release.yml, with two deliberate differences:
+#
+#  1. The rolling 'tab5' release is kept NOT latest (--latest=false), so it never
+#     displaces the upstream releases/latest semantics this fork inherits. Note
+#     that GitHub still serves whatever non-draft, non-prerelease release is
+#     newest at releases/latest when no release is explicitly marked latest —
+#     --latest=false only stops this one from *taking* the mark, it cannot leave
+#     releases/latest empty.
+#
+#  2. No 'drums' partition, so fs_create.py emits no tulip-drums.bin here. TAB5
+#     does not build amy_connector.c, so nothing mmaps the gamma9001 banks.
+#
+# tulip.upgrade() on a Tab5 fetches from THIS release: get_latest_release() in
+# tulip/shared/py/tulip.py maps board "TAB5" to the fork repo and the 'tab5' tag.
+# That makes the asset names load-bearing — see the publish step.
+#
+# Publishing is gated on dev_tab5, so a workflow_dispatch from any other branch is
+# a safe dry run: everything builds, nothing is uploaded to the release. The
+# dry_run input forces that behaviour on dev_tab5 too — use it for the first run,
+# before you are ready to publish.
+#
+# Reproducibility caveat: dependencies.lock is gitignored repo-wide (.gitignore:5),
+# so the IDF component manager re-resolves espressif/m5stack_tab5 and its
+# dependency tree on every CI run. A component release inside the manifest's
+# version ranges can therefore change the build without a commit here. If a CI
+# build ever diverges from a local one, diff tulip/esp32p4/dependencies.lock from
+# the run's logs against your local copy first.
+
+# Deliberately workflow_dispatch-only for now. GitHub will not accept a
+# workflow_dispatch for a workflow that is not on the default branch (dev_tab5
+# here), so this file has to land there before it can be exercised at all -- and
+# a push trigger would make that very landing publish a release, with no chance
+# to check the CI build first. Run it by hand with dry_run once, then add:
+#
+#   push:
+#     branches: [ "dev_tab5" ]
+#     paths:
+#       - 'amy'
+#       - 'micropython'
+#       - 'tulip/esp32p4/**'
+#       - 'tulip/shared/**'
+#       # /sys is built from these, so a change to either reships the image.
+#       - 'tulip/fs/tulip/**'
+#       - 'tulip/fs_create.py'
+#       - 'lv_binding_micropython_tulip/**'
+#       - '.github/workflows/tab5-release.yml'
+#       - '.github/tab5-release-notes.md'
+#
+# That commit's own push is then the first real release run.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build only; do not publish to the rolling tab5 release'
+        type: boolean
+        default: false
+
+concurrency:
+  group: tab5-firmware-release      # serialize releases; never cancel a half-done one
+  cancel-in-progress: false
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write                # create + clobber the 'tab5' release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # amy + micropython (and micropython's nested submodules) are needed to
+          # build. Both point at MinoruInachi forks on branch dev_tulipcc_tab5;
+          # both are public, so the default GITHUB_TOKEN can clone them.
+          # lv_binding_micropython_tulip and its vendored pycparser are ordinary
+          # tracked directories, not submodules — nothing extra to fetch for the
+          # LVGL binding generation step in tulip/esp32p4/main/CMakeLists.txt.
+          submodules: recursive
+
+      - name: Build TAB5 firmware + assemble images
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          # Must match what the port is developed against; dependencies.lock
+          # records idf 5.5.4 and espressif/usb 1.5.0 requires idf >= 5.5.3.
+          esp_idf_version: v5.5.4
+          target: esp32p4
+          path: tulip/esp32p4
+          # Same shape as tulip-release.yml: build, then fs_create.py builds the
+          # /sys and /user littlefs images from the partition table and merges
+          # everything into tulip/esp32p4/dist/. `tab5` maps to the esp32p4 port
+          # directory, the esp32p4 chip, and the `tulip` asset prefix, so the
+          # published names match the ESP32-S3 ones.
+          command: >-
+            python -m pip install littlefs-python &&
+            idf.py -DMICROPY_BOARD=TAB5 build &&
+            cd .. &&
+            python fs_create.py tab5
+
+      - name: Stage release assets
+        # dist/ is root-owned (created inside the esp-idf-ci-action container),
+        # so nothing can be written there from here — stage into RUNNER_TEMP and
+        # add the date-coded copy in one place.
+        id: stage
+        run: |
+          set -euo pipefail
+          DATE_CODE="$(date -u +%Y%m%d)"
+          echo "date_code=${DATE_CODE}" >> "$GITHUB_OUTPUT"
+          # tulip-full: everything, flashed at 0x0 (bootloader, partition table,
+          # otadata, app, /sys, /user).
+          # tulip-firmware: app only, for the ota_0 offset.
+          # tulip-sys: the /sys littlefs image, what tulip.upgrade() fetches.
+          cp tulip/esp32p4/dist/tulip-full-TAB5.bin \
+             tulip/esp32p4/dist/tulip-firmware-TAB5.bin \
+             tulip/esp32p4/dist/tulip-sys.bin \
+             "${RUNNER_TEMP}/"
+          # Date-coded copy of the full image, so a downloaded file can be traced
+          # to a build. One dated copy lives on the release at a time.
+          cp tulip/esp32p4/dist/tulip-full-TAB5.bin \
+             "${RUNNER_TEMP}/tulip-full-TAB5-${DATE_CODE}.bin"
+          ls -l "${RUNNER_TEMP}"/tulip-*.bin
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tab5-firmware
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/tulip-full-TAB5.bin
+            ${{ runner.temp }}/tulip-firmware-TAB5.bin
+            ${{ runner.temp }}/tulip-sys.bin
+
+      - name: Publish to the rolling 'tab5' release
+        if: github.ref == 'refs/heads/dev_tab5' && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DATE_CODE: ${{ steps.stage.outputs.date_code }}
+        run: |
+          set -euo pipefail
+          # Create the rolling release once, at the fixed tag 'tab5'. Kept
+          # non-latest — see the header comment.
+          if ! gh release view tab5 >/dev/null 2>&1; then
+            gh release create tab5 \
+              --target "$GITHUB_SHA" \
+              --latest=false \
+              --title "Tulip for M5Stack Tab5 (rolling)" \
+              --notes "Rolling Tab5 build. Placeholder notes; the publish step rewrites this with the built commit."
+          fi
+          # Stable asset names — tulip.upgrade() looks up
+          # tulip-firmware-<board>.bin and tulip-sys.bin by exact name (see
+          # get_latest_release() in tulip/shared/py/tulip.py), and the docs'
+          # download links point at these. Do not rename them.
+          gh release upload --clobber tab5 \
+            "${RUNNER_TEMP}/tulip-full-TAB5.bin" \
+            "${RUNNER_TEMP}/tulip-firmware-TAB5.bin" \
+            "${RUNNER_TEMP}/tulip-sys.bin"
+          # Prune older date codes, then upload today's. Same-day rebuilds clobber
+          # the same name.
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/tab5" --jq '.assets[].name' \
+            | { grep -E '^tulip-full-TAB5-[0-9]{8}\.bin$' || true; } \
+            | { grep -v "${DATE_CODE}" || true; } \
+            | while read -r stale; do gh release delete-asset tab5 "$stale" --yes; done
+          gh release upload --clobber tab5 \
+            "${RUNNER_TEMP}/tulip-full-TAB5-${DATE_CODE}.bin"
+          AMY_SHA="$(git -C amy rev-parse HEAD)"
+          MPY_SHA="$(git -C micropython rev-parse HEAD)"
+          # Notes live in .github/tab5-release-notes.md so they can be edited as
+          # prose. Rendered here by substituting the @PLACEHOLDER@ tokens; every
+          # substituted value is hex, digits, or a URL with no '|', so '|' is a
+          # safe sed delimiter. The rendered body records the exact released
+          # commit and submodule pins, so a downloaded image can always be traced
+          # back to sources.
+          sed -e "s|@DATE_CODE@|${DATE_CODE}|g" \
+              -e "s|@COMMIT@|${GITHUB_SHA}|g" \
+              -e "s|@RUN_ID@|${GITHUB_RUN_ID}|g" \
+              -e "s|@RUN_URL@|${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}|g" \
+              -e "s|@AMY_SHA@|${AMY_SHA}|g" \
+              -e "s|@MPY_SHA@|${MPY_SHA}|g" \
+              .github/tab5-release-notes.md > "${RUNNER_TEMP}/notes.md"
+          if grep -q '@[A-Z_]\+@' "${RUNNER_TEMP}/notes.md"; then
+            echo "::error::unsubstituted placeholder left in the release notes"
+            grep -n '@[A-Z_]\+@' "${RUNNER_TEMP}/notes.md"
+            exit 1
+          fi
+          gh release edit tab5 --latest=false --notes-file "${RUNNER_TEMP}/notes.md"

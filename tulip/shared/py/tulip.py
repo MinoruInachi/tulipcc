@@ -207,7 +207,18 @@ def desktop_copy_sys(dest):
         os.system(cmd)
 
 
-def get_latest_release(pr=None):
+# Where upgrade() looks for firmware: (GitHub repo, rolling release tag) per
+# board. Tulip and AMYboard release continuously from shorepine/tulipcc to their
+# own rolling tag. TAB5 is a fork port -- it is not built upstream, so it OTAs
+# from the fork's own rolling 'tab5' release (.github/workflows/tab5-release.yml)
+# instead. Boards not listed here use the default.
+_RELEASE_REPOS = {
+    "AMYBOARD": ("shorepine/tulipcc",    "amyboard"),
+    "TAB5":     ("MinoruInachi/tulipcc", "tab5"),
+}
+_DEFAULT_RELEASE_REPO = ("shorepine/tulipcc", "tulip")
+
+def get_latest_release(pr=None, repo=None, tag=None):
     import json
     from upysh import rm
     # A specific PR's firmware comes from that PR's Vercel preview bundle, not a
@@ -218,6 +229,10 @@ def get_latest_release(pr=None):
             base = 'https://amyboard-pr-%d.vercel.app/firmware' % pr
             return ('%s/amyboard-firmware-AMYBOARD.bin' % base, 'pr-%d' % pr,
                     '%s/amyboard-sys.bin' % base, 'pr-%d' % pr)
+        if board() == "TAB5":
+            # The fork has no Vercel PR previews, so there is nothing to fetch.
+            print("upgrade(pr=...) is not available on Tab5; only the rolling release is published.")
+            return (None, None, None, None)
         base = 'https://tulip-pr-%d.vercel.app/firmware' % pr
         return ('%s/tulip-firmware-%s.bin' % (base, board()), 'pr-%d' % pr,
                 '%s/tulip-sys.bin' % base, 'pr-%d' % pr)
@@ -226,10 +241,11 @@ def get_latest_release(pr=None):
     # releases/latest (the monthly combined release). Only TULIP4_R11 firmware is
     # published to the 'tulip' release; the developer-only boards (TDECK/N16R8/
     # N32R8) aren't there, so their upgrade() finds nothing and returns None.
-    if board() == "AMYBOARD":
-        release_api = 'https://api.github.com/repos/shorepine/tulipcc/releases/tags/amyboard'
-    else:
-        release_api = 'https://api.github.com/repos/shorepine/tulipcc/releases/tags/tulip'
+    # repo/tag override the board's default source, so a Tab5 can be pointed at
+    # another fork's rolling release without reflashing.
+    (default_repo, default_tag) = _RELEASE_REPOS.get(board(), _DEFAULT_RELEASE_REPO)
+    release_api = 'https://api.github.com/repos/%s/releases/tags/%s' % (
+        repo or default_repo, tag or default_tag)
     url_save(release_api,'releases_temp.json')
     j = json.load(open('releases_temp.json','r'))
     rm('releases_temp.json')
@@ -250,9 +266,10 @@ def get_latest_release(pr=None):
         return (mine['browser_download_url'], mine['updated_at'], sys['browser_download_url'], sys['updated_at'])
     return (None, None, None, None)
 
-def upgrade(pr=None):
+def upgrade(pr=None, repo=None, tag=None):
     # pr=N OTAs to PR #N's firmware (from tulip-pr-<N>/amyboard-pr-<N>.vercel.app);
     # otherwise the rolling release for this board. Pros can test a PR build directly.
+    # repo/tag point at a different GitHub release than this board's default.
     import time, sys, os
     import tuliprequests as urequests
     try:
@@ -268,7 +285,13 @@ def upgrade(pr=None):
 
     # Ensures we are on a OTA partition
     ota_partition = Partition(esp32.Partition.RUNNING).get_next_update()
-    sys_partition = Partition.find(Partition.TYPE_DATA, label="system")[0]
+    # Firmware built before the partition table grew a 'system' partition has no
+    # /sys to write, and find() returns an empty list rather than raising.
+    sys_partitions = Partition.find(Partition.TYPE_DATA, label="system")
+    if(not sys_partitions):
+        print("This build has no 'system' partition, so it can't be upgraded over the air. Reflash over USB.")
+        return
+    sys_partition = sys_partitions[0]
 
     if(ota_partition is None or (not ota_partition.info()[4].startswith('ota'))):
         print("You are not using OTA partitions.")
@@ -280,7 +303,7 @@ def upgrade(pr=None):
     # Checks for a new firmware from Github, asks if you want to upgrade to it
     sec_size = 4096
 
-    (latest_mine_url, latest_mine_date, latest_sys_url, latest_sys_date) = get_latest_release(pr)
+    (latest_mine_url, latest_mine_date, latest_sys_url, latest_sys_date) = get_latest_release(pr, repo, tag)
     if(latest_mine_url is None):
         print("Could not find firmware and system folder for board %s" % (board()))
         return
