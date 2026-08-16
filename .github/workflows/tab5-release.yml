@@ -33,28 +33,20 @@ name: Tab5 firmware release
 # to compile against IDF v5.5.4. Regenerate it by building locally and committing
 # the result, never by deleting it to "let CI sort it out".
 
-# Deliberately workflow_dispatch-only for now. GitHub will not accept a
-# workflow_dispatch for a workflow that is not on the default branch (dev_tab5
-# here), so this file has to land there before it can be exercised at all -- and
-# a push trigger would make that very landing publish a release, with no chance
-# to check the CI build first. Run it by hand with dry_run once, then add:
-#
-#   push:
-#     branches: [ "dev_tab5" ]
-#     paths:
-#       - 'amy'
-#       - 'micropython'
-#       - 'tulip/esp32p4/**'
-#       - 'tulip/shared/**'
-#       # /sys is built from these, so a change to either reships the image.
-#       - 'tulip/fs/tulip/**'
-#       - 'tulip/fs_create.py'
-#       - 'lv_binding_micropython_tulip/**'
-#       - '.github/workflows/tab5-release.yml'
-#       - '.github/tab5-release-notes.md'
-#
-# That commit's own push is then the first real release run.
 on:
+  push:
+    branches: [ "dev_tab5" ]
+    paths:
+      - 'amy'
+      - 'micropython'
+      - 'tulip/esp32p4/**'
+      - 'tulip/shared/**'
+      # /sys is built from these, so a change to either reships the image.
+      - 'tulip/fs/tulip/**'
+      - 'tulip/fs_create.py'
+      - 'lv_binding_micropython_tulip/**'
+      - '.github/workflows/tab5-release.yml'
+      - '.github/tab5-release-notes.md'
   workflow_dispatch:
     inputs:
       dry_run:
