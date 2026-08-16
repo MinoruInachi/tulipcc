@@ -95,7 +95,17 @@ jobs:
           # everything into tulip/esp32p4/dist/. `tab5` maps to the esp32p4 port
           # directory, the esp32p4 chip, and the `tulip` asset prefix, so the
           # published names match the ESP32-S3 ones.
+          #
+          # clang is the host C preprocessor the LVGL binding generation runs on
+          # (find_program(TAB5_C_PREPROCESSOR clang REQUIRED) in
+          # tulip/esp32p4/main/CMakeLists.txt). It comes for free on macOS but is
+          # not in the espressif/idf image, so install it when it is missing --
+          # guarded, in case a future image ships one. The action wraps this
+          # whole string in single quotes, so it must not contain any.
           command: >-
+            if ! command -v clang > /dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends clang;
+            fi &&
             python -m pip install littlefs-python &&
             idf.py -DMICROPY_BOARD=TAB5 build &&
             cd .. &&
