@@ -33,7 +33,7 @@ def draw_background(app):
     tulip.bg_png(pix_dir+'water.png',0,440)
 
     # Copy this column across the screen
-    for i in range((sw*2)/32):
+    for i in range((sw*2)//32):
         tulip.bg_blit(0,280,32,190,i*32,280)
 
     # put some empty spots along the brick
@@ -103,7 +103,7 @@ def game_loop(app):
         app.d["ry"] = 380-(app.d["f"]-app.d["jump"])*app.rabbit_speed
     else:
         app.d["ry"] = 380
-    if(tulip.keys()[1]==0x29): # esc
+    if(hasattr(tulip, "keys") and tulip.keys()[1]==0x29): # esc
         app.d["run"] = 0
     # Update the sprite position
     if(app.d["rx"] < 0):

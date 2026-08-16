@@ -182,6 +182,8 @@ class Joy:
 # Z = B, X = A, A = Y, S = X, enter = START, ' = SELECT, Q = L1, W = R1, arrows = DPAD
 def joyk():
     jmask = 0
+    if not hasattr(tulip, "keys"):
+        return jmask
     key_scans = tulip.keys()[1:5] # get up to four keys held at once
     for k in key_scans:
         if(k == 79): jmask = jmask | Joy.RIGHT
@@ -261,6 +263,14 @@ def run(module_string):
     if(module_string.endswith(".py")):
         module_string = module_string[:-3]
 
+    # A file path must be imported from its containing directory. Python import
+    # syntax accepts module names, not paths such as "ex/parallax".
+    module_dir = None
+    path_separator = module_string.rfind("/")
+    if path_separator != -1 and tulip.exists(module_string + ".py"):
+        module_dir = module_string[:path_separator] or "/"
+        module_string = module_string[path_separator + 1:]
+
     # First, if we're already running, don't run again. Causes some problems
     if module_string in ui.running_apps:
         # Switch to it
@@ -269,12 +279,14 @@ def run(module_string):
 
     # Second, see if we need to delete a running import, for reload
     try:
-        exec('del sys.modules["%s"]' % (module_string))
+        del sys.modules[module_string]
     except KeyError:
         pass # ok!
 
     # Let's find out what this is. In order, we go: cwd, frozen modules, /sys/app, /ex
-    if(tulip.is_folder(module_string)):
+    if module_dir is not None:
+        cd(module_dir)
+    elif(tulip.is_folder(module_string)):
         cd(module_string)
     elif(tulip.exists(tulip.root_dir()+"sys/ex/"+module_string+".py")):
         cd(tulip.root_dir()+"sys/ex")
@@ -309,9 +321,9 @@ def run(module_string):
         else:
             # This was a package but not an app, and we're done. so clean up.
             # Delete the modules we imported
-            for imported_module in sys.modules.keys():
+            for imported_module in list(sys.modules.keys()):
                 if imported_module not in before_run:
-                    exec('del sys.modules["%s"]' % (imported_module))
+                    del sys.modules[imported_module]
             ui.repl_screen.present()
 
         # Go back to where you were

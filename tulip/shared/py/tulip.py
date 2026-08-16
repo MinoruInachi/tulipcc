@@ -10,6 +10,35 @@ if board() != 'AMYBOARD' and board() != "AMYBOARD_WEB" and board() != "AMYBOARD_
     from ui import *
     from editor import edit
 
+# Python-side defer for boards where C defer is a no-op stub (e.g. TAB5 bring-up).
+# On all other boards the imported C defer is used directly.
+_defer_queue = []
+_c_defer = defer
+
+def defer(cb, arg, ms):
+    if board() == 'TAB5':
+        import time
+        _defer_queue.append((cb, arg, time.ticks_ms() + ms))
+    else:
+        _c_defer(cb, arg, ms)
+
+def _process_defers():
+    if not _defer_queue:
+        return
+    import time
+    now = time.ticks_ms()
+    i = 0
+    while i < len(_defer_queue):
+        (cb, arg, at_ms) = _defer_queue[i]
+        if time.ticks_diff(at_ms, now) <= 0:
+            _defer_queue.pop(i)
+            try:
+                cb(arg)
+            except Exception as e:
+                print("defer cb err:", e)
+        else:
+            i += 1
+
 def sys():
     return root_dir()+"sys/"
 
@@ -342,11 +371,12 @@ def battery(n=5):
     return x
 
 def reload(module):
+    import sys
     thing = module
     if(type(thing)!=str): # this is a module, convert to a str
         thing = module.__name__
     try:
-        exec('del sys.modules["%s"]' % (thing))
+        del sys.modules[thing]
     except KeyError:
         pass # it's ok
     if(not is_folder(thing)):
@@ -421,6 +451,8 @@ def ip():
         import network
     except ImportError:
         return "127.0.0.1" # we are on local and it's ok
+    if (not hasattr(network, 'WLAN')) or (not hasattr(network, 'STA_IF')):
+        return None
     sta_if = network.WLAN(network.STA_IF)
     if(sta_if.isconnected()):
         return sta_if.ifconfig()[0]
@@ -437,13 +469,27 @@ def set_time():
 
 def wifi(ssid, passwd, wait_timeout=10):
     import network, time
+    if (not hasattr(network, 'WLAN')) or (not hasattr(network, 'STA_IF')):
+        print("wifi is not available on this build")
+        return None
     sta_if = network.WLAN(network.STA_IF)
     sta_if.active(True)
+    if board() == "TAB5":
+        if sta_if.isconnected() and sta_if.config('ssid') == ssid:
+            return sta_if.ifconfig()[0]
+        # ESP-Hosted may auto-connect using its saved config when STA starts.
+        # Stop that attempt before applying the explicitly requested config.
+        try:
+            sta_if.disconnect()
+        except OSError:
+            pass
     sta_if.connect(ssid, passwd)
-    sleep = 0
-    while((sta_if.isconnected() is False) and sleep < wait_timeout):
-        sleep = sleep + 1
-        time.sleep(1)
+    # Association is a few seconds and lands at no particular moment, so a 1s
+    # poll used to round the wait up by half a second on average, and by nearly
+    # a full second whenever the AP answered just after a tick.
+    deadline = time.ticks_add(time.ticks_ms(), int(wait_timeout * 1000))
+    while (not sta_if.isconnected()) and time.ticks_diff(deadline, time.ticks_ms()) > 0:
+        time.sleep_ms(50)
     return ip()
 
 

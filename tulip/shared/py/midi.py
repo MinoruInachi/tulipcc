@@ -121,8 +121,9 @@ def add_default_synths():
     # GeneralMidi Drums. Drum kits are single-voice (amy#913): the one voice
     # is a container holding one dedicated osc per drum sound.
     config.add_synth(channel=10, synth=DrumSynth(num_voices=1))
-    # Default Juno synth on Channel 1.
-    config.add_synth(channel=1, synth=PatchSynth(patch=0, num_voices=6))
+    # Patch 0's sub oscillator masks the fundamental on TAB5's speaker.
+    default_patch = 34 if tulip.board() == "TAB5" else 0
+    config.add_synth(channel=1, synth=PatchSynth(patch=default_patch, num_voices=6))
     config.insert_arpeggiator(channel=1, arpeggiator=arpeggiator)
 
 
