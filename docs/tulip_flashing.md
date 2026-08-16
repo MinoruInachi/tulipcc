@@ -24,7 +24,13 @@ If you've got an unflashed Tulip, just finished a DIY, or somehow messed up the 
 
 **If you made your own Tulip** (a DIY `N16R8`/`N32R8` board, or a [T-Deck](../tulip/tdeck/README.md)): these are developer-only boards now, so we no longer ship prebuilt binaries for them. [Build and flash the firmware yourself](#compile-and-flash-tulipcc-for-esp32-s3) for your board — it's quick and documented below.
 
-The [M5Stack Tab5](tab5_porting.md) is not supported by the current TulipCC ESP32-S3 build. It uses an ESP32-P4 main SoC and a 1280×720 MIPI-DSI display with an integrated ST7123/ST7121 touch stack, so it needs a separate esp32p4 bring-up before it can run Tulip natively.
+**If you have an [M5Stack Tab5](tab5_porting.md)**, download the full image from the [rolling `tab5` release](https://github.com/MinoruInachi/tulipcc/releases/tag/tab5): [tulip-full-TAB5.bin](https://github.com/MinoruInachi/tulipcc/releases/download/tab5/tulip-full-TAB5.bin). The Tab5 runs an ESP32-P4 rather than an ESP32-S3, so it is built from a separate `tulip/esp32p4` tree and released separately — the `tulip` release above does not contain a Tab5 image, and this one is published from the fork that carries the port, not from `shorepine/tulipcc`. Flash it with `--chip esp32p4`:
+
+```bash
+% esptool.py --chip esp32p4 write_flash 0x0 tulip-full-TAB5.bin
+```
+
+`tulip.upgrade()` works on the Tab5 after that first flash, and reads the same rolling `tab5` release.
 
 Connect your Tulip to your computer with a USB cable. **Note**: Many Tulip-capable boards have two USB ports, one called UART, TTL or Serial, and one called NATIVE, JTAG, or Host. You should use the UART one if available and try the NATIVE one if not. For example, on the Tulip CC, you can use either USB port, but if you use the NATIVE port you have to hold down the BOOT button while attaching the USB cable. We recommend flashing using the top UART USB connector. On the T-Deck, you only have access to the NATIVE port, and you may need to hold down the BOOT button (the trackball button) while you turn it on. If you've tried both ports and the following commands can't find a serial port to flash to, ensure that you've [installed a driver.](https://github.com/WCHSoftGroup/ch34xser_macos)
 
@@ -126,6 +132,37 @@ idf.py -DMICROPY_BOARD=[X] flash
 ```
 
 [To debug using GDB or profile code, see our new guide on live debugging of the ESP32S3.](tulip_debug.md)
+
+
+## Compile and flash TulipCC for the M5Stack Tab5 (ESP32-P4)
+
+The Tab5 builds from `tulip/esp32p4` instead of `tulip/esp32s3`, and needs **ESP-IDF 5.5.4**, not the 5.4.1 used above — install it alongside the other one rather than in place of it:
+
+```bash
+cd ~/esp
+git clone -b v5.5.4 --recursive https://github.com/espressif/esp-idf.git esp-idf-v5.5.4
+cd esp-idf-v5.5.4
+./install.sh esp32p4
+source export.sh
+```
+
+Then build and assemble the images. `MICROPY_BOARD` is `TAB5`, and `fs_create.py` takes `tab5` rather than `tulip` — it builds the same `/sys` contents, but from the esp32p4 tree and for the esp32p4 chip:
+
+```bash
+cd ~/tulipcc/tulip/esp32p4
+idf.py -DMICROPY_BOARD=TAB5 build
+cd ..
+python fs_create.py tab5
+```
+
+That writes `tulip/esp32p4/dist/tulip-full-TAB5.bin` (everything, for offset `0x0`), `tulip-firmware-TAB5.bin` (the app alone, for `0x10000`) and `tulip-sys.bin`. Add `flash` to the `fs_create.py` line to write the full image straight to a connected Tab5.
+
+The first install has to be the full image, because it lays down the partition table. After that, `idf.py -DMICROPY_BOARD=TAB5 flash` writes only the app and leaves your files in `/user` alone.
+
+Two things differ from the ESP32-S3 build:
+
+ * The LVGL bindings are generated with `clang` as the C preprocessor, so it has to be on your `PATH` (it already is on macOS).
+ * `tulip/esp32p4/dependencies.lock` is committed on purpose and pins all 29 managed components. Don't delete it to resolve a build problem — a floating `esp_lvgl_port` does not compile against IDF 5.5.4.
 
 
 ## Questions
