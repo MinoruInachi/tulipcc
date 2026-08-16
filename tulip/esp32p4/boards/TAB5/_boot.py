@@ -4,6 +4,17 @@ import sys
 import time
 import vfs
 
+# First statement of the first thing that runs in a MicroPython session, on
+# purpose. A soft reset rebuilds the GC heap but leaves LVGL rooted in the old
+# one, so this turns Ctrl-D and machine.soft_reset() into a real reset instead --
+# see tulip_restart_if_soft_reset() in modtulip_tab5.c for why re-initialising
+# LVGL is not the answer. It does not return on a soft reset, and does nothing on
+# a cold boot. Keep it ahead of the mount and the display bring-up below: the
+# frame ISR starts scheduling LVGL work again within a frame of the reset.
+import _tulip
+
+_tulip.restart_if_soft_reset()
+
 # _boot runs with __main__'s globals (see parse_compile_execute() in pyexec.c), so
 # this is what puts ls/cd/cat/mkdir/rm and friends in the REPL namespace. The shared
 # _boot.py does the same for every other board; without it the Tab5 REPL had none of

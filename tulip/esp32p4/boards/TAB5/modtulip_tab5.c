@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "../../../../amy/src/amy.h"
 
 #include "../../../shared/display.h"
@@ -960,6 +961,36 @@ static mp_obj_t tulip_display_ready(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(tulip_display_ready_obj, tulip_display_ready);
 
+// A soft reset (Ctrl-D, machine.soft_reset()) rebuilds the MicroPython heap but
+// leaves every C static standing, and that combination is fatal here. LVGL's
+// lv_global_t is deliberately allocated from the GC heap so the collector can
+// reach widgets through it (see lv_global_tab5.h and lv_mem_tab5.c), but the
+// guards that would re-run lv_init() -- s_tab5_lvgl_initialized below, and
+// mp_lv_roots / mp_lv_roots_initialized in the generated binding -- all live in
+// BSS. gc_init() therefore frees lv_global_t out from under LVGL while every
+// pointer to it survives, and the first frame after the reset has
+// tulip_frame_isr() schedule lv_task_handler(), which reads a callback out of
+// the now-reused struct and jumps into it. It panics with a different address
+// every time, because it depends on what the heap handed out in the meantime.
+//
+// Re-initialising LVGL instead is not enough: the display, touch, audio and USB
+// host stacks are all built once from tab5_board_startup() and hold the same
+// kind of state, and setup_lvgl() would leak its PSRAM draw buffer on every
+// reset. A soft reset that only restarts the interpreter is not coherent on this
+// board, so make it a real reset. _boot.py calls this before anything else, and
+// s_tab5_lvgl_initialized is exactly the "a previous session got as far as
+// bringing LVGL up" flag we need -- if it is false there is nothing dangling.
+static mp_obj_t tulip_restart_if_soft_reset(void) {
+    if (s_tab5_lvgl_initialized) {
+        // Keep the frame ISR from scheduling LVGL work in the window before the
+        // restart actually takes effect.
+        s_tab5_lvgl_running = false;
+        esp_restart();
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_restart_if_soft_reset_obj, tulip_restart_if_soft_reset);
+
 static mp_obj_t tulip_ui_init(void) {
     if (!s_tab5_lvgl_initialized && bg != NULL) {
         setup_lvgl();
@@ -1439,6 +1470,7 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_touch_callback), MP_ROM_PTR(&tulip_touch_callback_obj) },
     { MP_ROM_QSTR(MP_QSTR_frame_callback), MP_ROM_PTR(&tulip_frame_callback_obj) },
     { MP_ROM_QSTR(MP_QSTR_display_ready), MP_ROM_PTR(&tulip_display_ready_obj) },
+    { MP_ROM_QSTR(MP_QSTR_restart_if_soft_reset), MP_ROM_PTR(&tulip_restart_if_soft_reset_obj) },
     { MP_ROM_QSTR(MP_QSTR_ui_init), MP_ROM_PTR(&tulip_ui_init_obj) },
     { MP_ROM_QSTR(MP_QSTR_ui_start), MP_ROM_PTR(&tulip_ui_start_obj) },
     { MP_ROM_QSTR(MP_QSTR_tab5_diag), MP_ROM_PTR(&tulip_tab5_diag_obj) },
