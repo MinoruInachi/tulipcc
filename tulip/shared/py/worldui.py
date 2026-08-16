@@ -10,7 +10,14 @@ else:
 
 app = None
 TIME_BETWEEN_CHECKS_S = 60
-LV_COORD_MAX = lv.COORD.MAX if hasattr(lv, 'COORD') else 0x7FFFFFFF
+# LVGL 9.5 made LV_COORD_MAX a macro rather than an enum member -- gen_mpy.py
+# only exports enums, so there is no lv.COORD on a 9.5 binding and this fallback
+# is what actually runs on the Tab5. It has to be LVGL's own value:
+# (1 << LV_COORD_TYPE_SHIFT) - 1, shift 29. The 0x7FFFFFFF it used to be was not
+# merely too large -- LVGL reads bits 29-30 as a type tag, and 0x7FFFFFFF tags as
+# LV_COORD_TYPE_PX_NEG, so "scroll to the bottom" below was not even a plain
+# pixel count.
+LV_COORD_MAX = lv.COORD.MAX if hasattr(lv, 'COORD') else (1 << 29) - 1
 
 def check_messages(x=None):
     global app

@@ -6,6 +6,11 @@ import time
 from lvgl_compat import lv, maybe_log_backend
 
 LV_SIZE_CONTENT = getattr(lv, "SIZE_CONTENT", (1 << 30) - 1)
+# LVGL 9.5 turned LV_ANIM_OFF/ON from an enum into plain macros over bool
+# (lv_anim.h: "#define LV_ANIM_OFF false", "typedef bool lv_anim_enable_t"), and
+# gen_mpy.py only exports enums -- so there is no lv.ANIM on a 9.5 binding. Same
+# guard juno6.py and voices.py already use.
+LV_ANIM_OFF = lv.ANIM.OFF if hasattr(lv, 'ANIM') else False
 
 maybe_log_backend("Tulip UI LVGL backend")
 
@@ -669,7 +674,7 @@ class UISlider(UIElement):
             self.group.set_height(h+self.slider.get_style_pad_top(0)*2)
             self.slider.align(lv.ALIGN.CENTER,0,0)
 
-        self.slider.set_value(int(val),lv.ANIM.OFF)
+        self.slider.set_value(int(val),LV_ANIM_OFF)
 
         if(callback is not None):
             self.slider.add_event_cb(callback, lv.EVENT.VALUE_CHANGED, None)

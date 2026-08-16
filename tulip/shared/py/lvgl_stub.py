@@ -73,7 +73,10 @@ OPA = _Enum(COVER=255)
 DIR = _Enum(LEFT=0, BOTTOM=1)
 ANIM = _Enum(OFF=0)
 STATE = _Enum(CHECKED=1, FOCUSED=2)
-COORD = _Enum(MAX=0x7FFFFFFF)
+# LVGL's own values, not round numbers: bits 29-30 of a coordinate are a type
+# tag, so a made-up 0x7FFFFFFF reads back as LV_COORD_TYPE_PX_NEG. This stub is
+# where the wrong value for LV_COORD_MAX came from originally.
+COORD = _Enum(MAX=(1 << 29) - 1)
 SYMBOL = _Enum(
     SHUFFLE="S",
     POWER="P",
@@ -90,7 +93,7 @@ SYMBOL = _Enum(
     OK="O",
 )
 
-SIZE_CONTENT = -1
+SIZE_CONTENT = ((1 << 29) - 1) | (1 << 29)  # LV_COORD_SET_SPEC(LV_COORD_MAX)
 font_montserrat_12 = object()
 font_montserrat_24 = object()
 font_unscii_8 = object()

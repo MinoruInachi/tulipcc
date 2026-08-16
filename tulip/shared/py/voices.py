@@ -12,7 +12,10 @@ from patches import patches
 
 LV_ANIM_OFF = lv.ANIM.OFF if hasattr(lv, 'ANIM') else False
 LV_FLAG_HIDDEN = getattr(lv.obj.FLAG, 'HIDDEN', 1)
-LV_STATE_PRESSED = getattr(lv.STATE, 'PRESSED', 0)
+# LV_STATE_PRESSED is 0x0080. The fallback used to be 0, which is
+# LV_STATE_DEFAULT -- if it ever fired it would silently mean "no state at all"
+# rather than "pressed".
+LV_STATE_PRESSED = getattr(lv.STATE, 'PRESSED', 0x0080)
 
 COLOR_BG = 0
 COLOR_PANEL = 9
