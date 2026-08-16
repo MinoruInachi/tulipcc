@@ -4,6 +4,12 @@ import sys
 import time
 import vfs
 
+# _boot runs with __main__'s globals (see parse_compile_execute() in pyexec.c), so
+# this is what puts ls/cd/cat/mkdir/rm and friends in the REPL namespace. The shared
+# _boot.py does the same for every other board; without it the Tab5 REPL had none of
+# them even though upysh is frozen into the firmware.
+from upysh import *
+
 # Tab5 uses the Tulip CC flash layout: the 'system' partition holds the
 # read-only /sys tree (examples and images, built by tulip/fs_create.py) and
 # 'vfs' holds user files at /user. Shared code assumes exactly this -- tulip.sys(),
