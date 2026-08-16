@@ -3,7 +3,7 @@
 # also has keyboard and other small LVGL things
 import tulip, tulip_graphics
 import time
-from lvgl_compat import lv, maybe_log_backend
+import lvgl as lv
 
 LV_SIZE_CONTENT = getattr(lv, "SIZE_CONTENT", (1 << 30) - 1)
 # LVGL 9.5 turned LV_ANIM_OFF/ON from an enum into plain macros over bool
@@ -11,8 +11,6 @@ LV_SIZE_CONTENT = getattr(lv, "SIZE_CONTENT", (1 << 30) - 1)
 # gen_mpy.py only exports enums -- so there is no lv.ANIM on a 9.5 binding. Same
 # guard juno6.py and voices.py already use.
 LV_ANIM_OFF = lv.ANIM.OFF if hasattr(lv, 'ANIM') else False
-
-maybe_log_backend("Tulip UI LVGL backend")
 
 lv_soft_kb = None
 lv_launcher = None

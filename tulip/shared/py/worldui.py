@@ -1,6 +1,6 @@
 # worldui.py
 
-from lvgl_compat import lv
+import lvgl as lv
 import tulip, time
 (H_RES,V_RES) = tulip.screen_size()
 if(tulip.board()=='WEB'):

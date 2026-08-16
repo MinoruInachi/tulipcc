@@ -6,7 +6,7 @@ import math
 import tulip
 import midi
 import synth
-from lvgl_compat import lv
+import lvgl as lv
 import amy
 from patches import patches
 

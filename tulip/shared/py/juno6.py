@@ -1,7 +1,7 @@
 # juno6.py
 # A more pure-LVGL (using Tulip's UIScreen) UI for Juno-6
 import tulip, midi
-from lvgl_compat import lv
+import lvgl as lv
 import time
 import patches
 from amy import juno

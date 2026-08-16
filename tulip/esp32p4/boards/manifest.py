@@ -29,8 +29,6 @@ freeze("$(MPY_DIR)/../tulip/shared/py", (
 	"editor.py",
 	"juno6.py",
 	"learn_midi_codes.py",
-	"lvgl_compat.py",
-	"lvgl_stub.py",
 	"m58angle.py",
 	"m5_8encoder.py",
 	"m5adc.py",
