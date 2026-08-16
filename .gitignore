@@ -14,12 +14,19 @@ tulip/macos/tulip.x86_64
 tulip/macos/dist
 tulip/macos/lextab.py
 tulip/macos/yacctab.py
+# PLY writes these next to wherever the lvgl binding generator was run from
+/lextab.py
+/yacctab.py
 tulip/linux/build-standard
 tulip/amyrepl/build-standard
 tulip/web/build-standard
 tulip/linux/dev
 tulip/ios/build-standard
 tulip/esp32s3/managed_components
+tulip/esp32p4/build
+tulip/esp32p4/managed_components
+tulip/esp32p4/lextab.py
+tulip/esp32p4/yacctab.py
 tulip/tdeck/build
 tulip/tdeck/managed_components
 tulip/tulipcc_r10/build
