@@ -1,18 +1,41 @@
 # juno6.py
 # A more pure-LVGL (using Tulip's UIScreen) UI for Juno-6
 import tulip, midi
-import lvgl as lv
+from lvgl_compat import lv
 import time
 import patches
 from amy import juno
 
+
+AMY_AVAILABLE = True
+LV_ANIM_OFF = lv.ANIM.OFF if hasattr(lv, 'ANIM') else False
+COLOR_BG = 73
+COLOR_HEADER = 224
+COLOR_SLIDER = 68
+COLOR_KNOB = 0
+COLOR_CONTROL = 36
+COLOR_ACCENT = 3
+COLOR_TEXT = 255
+
+
+def _style_text(obj):
+    obj.set_style_text_color(tulip.pal_to_lv(COLOR_TEXT), 0)
+
+
+def _midi_config():
+    return getattr(midi, 'config', None)
+
+
+def _midi_config_available():
+    return _midi_config() is not None
+
 class JunoSection(tulip.UIElement):
     """A group of elements in an red-header group with a title."""
     
-    header_color = 224
-    bg_color = 73
+    header_color = COLOR_HEADER
+    bg_color = COLOR_BG
     header_font = lv.font_montserrat_12
-    text_color = 255
+    text_color = COLOR_TEXT
     section_gap = 10
     
     def __init__(self, name, elements=None, header_color=None):
@@ -66,23 +89,34 @@ class JunoButtons(tulip.UIElement):
 
     def __init__(self, name, button_labels, callbacks=None, rounded=False):
         super().__init__()
+        tulip.lv_depad(self.group)
         self.name = name
         self.button_labels = button_labels
         self.callbacks = callbacks
         self.checkboxes = []
         self.state = []
+        self.checkbox_cb_data = {}
         self.group.set_width(self.width)
         self.group.set_height(JunoSlider.total_height)
         for button_label in button_labels:
             text = lv.label(self.group)
             text.set_text(button_label)
             text.set_style_text_font(self.font, 0)
+            _style_text(text)
             if self.checkboxes:
                 text.align_to(self.checkboxes[-1], lv.ALIGN.OUT_BOTTOM_MID, 0, 10)
             else:
                 text.align_to(self.group, lv.ALIGN.TOP_MID, 0, 0)
             checkbox = lv.checkbox(self.group)
-            checkbox.add_event_cb(self.callback, lv.EVENT.VALUE_CHANGED, None)
+            checkbox.set_text("")
+            checkbox.add_event_cb(self.callback, lv.EVENT.VALUE_CHANGED, self.checkbox_cb_data)
+            checkbox.set_style_bg_color(tulip.pal_to_lv(COLOR_KNOB), lv.PART.INDICATOR)
+            checkbox.set_style_bg_opa(lv.OPA.COVER, lv.PART.INDICATOR)
+            checkbox.set_style_border_color(tulip.pal_to_lv(COLOR_ACCENT), lv.PART.INDICATOR)
+            checkbox.set_style_border_width(2, lv.PART.INDICATOR)
+            checked = lv.PART.INDICATOR | lv.STATE.CHECKED
+            checkbox.set_style_bg_color(tulip.pal_to_lv(COLOR_ACCENT), checked)
+            checkbox.set_style_text_color(tulip.pal_to_lv(COLOR_TEXT), checked)
             if rounded:
                 checkbox.set_style_radius(100, lv.PART.INDICATOR)
             checkbox.set_ext_click_area(15)  # make the label count too 
@@ -150,8 +184,8 @@ class JunoRadioButtons(JunoButtons):
 class JunoSlider(tulip.UIElement):
     """Builds a slider with description on top and a ganged label on bottom showing the value."""
     
-    handle_color = 0
-    bar_color = 68
+    handle_color = COLOR_KNOB
+    bar_color = COLOR_SLIDER
     handle_radius = 0
     handle_v_pad = 1
     handle_h_pad  = 5
@@ -170,6 +204,7 @@ class JunoSlider(tulip.UIElement):
         self.desc = lv.label(self.group)
         self.desc.set_text(name)
         self.desc.set_style_text_font(JunoSlider.font, 0)
+        _style_text(self.desc)
         self.desc.align(lv.ALIGN.TOP_MID, 0, 0)
 
         self.slider = lv.slider(self.group)
@@ -188,7 +223,9 @@ class JunoSlider(tulip.UIElement):
         self.label = lv.label(self.group)
         self.label.set_text('0')
         self.label.set_style_text_font(JunoSlider.font, 0)
-        self.slider.add_event_cb(self.cb, lv.EVENT.VALUE_CHANGED, None)
+        _style_text(self.label)
+        self.slider_cb_data = {}
+        self.slider.add_event_cb(self.cb, lv.EVENT.VALUE_CHANGED, self.slider_cb_data)
 
         self.group.set_width(JunoSlider.total_width)
         self.group.set_height(JunoSlider.total_height)
@@ -207,7 +244,7 @@ class JunoSlider(tulip.UIElement):
         self.group.set_height(JunoSlider.total_height)
     
     def set(self, v):
-        self.slider.set_value(v, lv.ANIM.OFF)
+        self.slider.set_value(v, LV_ANIM_OFF)
         # Update label and propagate to callback.
         self.cb(None)
         
@@ -228,6 +265,7 @@ class JunoControlledLabel(tulip.UIElement):
         self.button_labels = button_labels
         self.callbacks = callbacks
         self.buttons = []
+        self.button_cb_data = {}
         self.group.set_width(width)
         self.group.set_height(height)
         for button_label in button_labels:
@@ -237,12 +275,14 @@ class JunoControlledLabel(tulip.UIElement):
                 button.align_to(self.buttons[-1], lv.ALIGN.OUT_RIGHT_MID, 5, 0)
             else:
                 button.align_to(self.group, lv.ALIGN.TOP_LEFT, 0, 0)
-            button.add_event_cb(self.callback, lv.EVENT.PRESSED, None)
+            button.add_event_cb(self.callback, lv.EVENT.PRESSED, self.button_cb_data)
             label = lv.label(button)
             label.set_text(button_label)
+            _style_text(label)
             label.center()
             self.buttons.append(button)
         self.label_obj = lv.label(self.group)
+        _style_text(self.label_obj)
         self.set_text(text)
         self.label_obj.align_to(self.buttons[-1], lv.ALIGN.OUT_RIGHT_MID, 5, 0)
         self.group.remove_flag(lv.obj.FLAG.SCROLLABLE)
@@ -307,10 +347,15 @@ class JunoDropDown(tulip.UIElement):
         self.group.set_size(430,40)
         self.label = lv.label(self.group)
         self.label.set_text(name)
+        _style_text(self.label)
         self.dropdown = lv.dropdown(self.group)
+        self.dropdown.set_style_bg_color(tulip.pal_to_lv(COLOR_CONTROL), lv.PART.MAIN)
+        self.dropdown.set_style_text_color(tulip.pal_to_lv(COLOR_TEXT), lv.PART.MAIN)
+        self.dropdown.set_style_border_color(tulip.pal_to_lv(COLOR_KNOB), lv.PART.MAIN)
         self.dropdown.align_to(self.label, lv.ALIGN.OUT_RIGHT_MID, 0, 0)
         self.dropdown.set_dir(lv.DIR.BOTTOM)
-        self.dropdown.add_event_cb(self.cb, lv.EVENT.VALUE_CHANGED, None)
+        self.dropdown_cb_data = {}
+        self.dropdown.add_event_cb(self.cb, lv.EVENT.VALUE_CHANGED, self.dropdown_cb_data)
         self.dropdown.set_height(40)
         self.current_index = initial_value
         self.update_items(items)  # Triggers first call to set_fn
@@ -373,7 +418,10 @@ def update_patch_including_state(jp, patch_num, midi_channel):
     """Mutates juno_patch in-place to use patch_num, or override by state for midi_chan if any."""
     jp.set_patch(patch_num)
     # Maybe this channel has existing modified state?
-    state = midi.config.get_channel_state(midi_channel)
+    config = _midi_config()
+    if config is None:
+        return
+    state = config.get_channel_state(midi_channel)
     if state:
         jp.set_sysex(state)
 
@@ -386,21 +434,25 @@ def current_juno():
     return None
 
 
-# I think we need to ensure current_juno() is init'ed to support the jcb callbacks during UI construction.
-current_juno().init_AMY()
+# Initialize AMY backend if available. Some builds expose amy python but not native _amy.
+try:
+    current_juno().init_AMY()
+except Exception as e:
+    AMY_AVAILABLE = False
+    print("Juno-6: AMY backend unavailable, running UI in no-audio mode:", e)
 
 
 # Make the callback function.
 def jcb(arg):
-    callback = lambda x: current_juno().set_param(arg, x)
+    callback = lambda x: current_juno().set_param(arg, x) if AMY_AVAILABLE else None
     return callback
 
 def hpf(n):
-    callback = lambda x: current_juno().set_param('hpf', n) if x else None
+    callback = lambda x: current_juno().set_param('hpf', n) if (x and AMY_AVAILABLE) else None
     return callback
 
 def cho(n):
-    callback = lambda x: current_juno().set_param('chorus', n) if x else None
+    callback = lambda x: current_juno().set_param('chorus', n) if (x and AMY_AVAILABLE) else None
     return callback
 
 lfo = JunoSection("LFO", [lfo_rate := JunoSlider("Rate", jcb('lfo_rate')),
@@ -480,7 +532,11 @@ def setup_from_patch_number(patch_number):
     # Use no fewer than 4.
     #num_amy_voices = 0 if amy_voices == None else len(amy_voices)
     #polyphony = max(4, num_amy_voices)
-    midi.config.program_change(midi_channel, patch_number)
+    config = _midi_config()
+    if config is None:
+        setup_ui_from_juno_patch(juno_patch_for_midi_channel[midi_channel])
+        return
+    config.program_change(midi_channel, patch_number)
     #jp = juno.JunoPatch()  #.from_patch_number(patch_number)
     #juno_patch_for_midi_channel[midi_channel] = jp
     jp = juno_patch_for_midi_channel[midi_channel]
@@ -497,7 +553,9 @@ def setup_from_midi_chan_str(midi_chan_str):
     if old_midi_channel and old_midi_channel != new_midi_channel:
         # store state of current channel if it's not the dummy channel 0.
         state = current_juno().to_sysex()
-        midi.config.set_channel_state(old_midi_channel, state)
+        config = _midi_config()
+        if config is not None:
+            config.set_channel_state(old_midi_channel, state)
     midi_channel = new_midi_channel
     new_patch = current_juno()
     if(new_patch == None):
@@ -507,7 +565,8 @@ def setup_from_midi_chan_str(midi_chan_str):
         # Unwind
         midi_channel = old_midi_channel
     else:
-        new_patch.init_AMY()
+        if AMY_AVAILABLE:
+            new_patch.init_AMY()
         # Just set the state, don't do the callback.
         patch_selector.set_selected_without_callback(new_patch.patch_number)
         setup_ui_from_juno_patch(new_patch)
@@ -518,9 +577,13 @@ def get_active_midi_channels_as_str():
     """Scan midi channels and return list of strings of ones that are juno."""
     # Ensure that our juno_patch_for_midi_channel is setup to match too.
     global midi_channel
+    config = _midi_config()
+    if config is None:
+        return [str(midi_channel)]
+
     juno_midi_channels = []
-    for chan in midi.config.get_active_channels():
-        patch_num, polyphony = midi.config.channel_info(chan)
+    for chan in config.get_active_channels():
+        patch_num, polyphony = config.channel_info(chan)
         if patch_num is not None and patch_num < 128:
             juno_midi_channels.append(chan)
             if chan not in juno_patch_for_midi_channel:
@@ -584,6 +647,8 @@ except IndexError:
 
 
 def control_change(control, value):
+    if not AMY_AVAILABLE:
+        return
     value = value / 127.0
     if control == 0:  # Pitch bend.
         current_juno().set_pitch_bend(2 * value - 1)
@@ -639,14 +704,15 @@ def deactivate(screen):
         midi.config.set_channel_state(midi_channel, state)
     
 def quit(screen):
-    midi.remove_callback(midi_event_cb)
+    if hasattr(midi, 'remove_callback'):
+        midi.remove_callback(midi_event_cb)
 
 def run(screen):
     screen.offset_y = 100
     screen.quit_callback = quit
     screen.activate_callback = activate
     screen.deactivate_callback = deactivate
-    screen.set_bg_color(73)
+    screen.set_bg_color(COLOR_BG)
     screen.add([lfo, dco, hpf, vcf, vca, env, ch])
     screen.add(port, x=20, y=330)
     # I wanted this further left, but the channel_selector stomps on in?
@@ -659,7 +725,8 @@ def run(screen):
     screen.update_patch_for_channel_hook = update_patch_for_channel
     screen.refresh_with_new_music_map = refresh_with_new_music_map
     
-    midi.add_callback(midi_event_cb)
+    if hasattr(midi, 'add_callback'):
+        midi.add_callback(midi_event_cb)
 
     # Make sure patch is in sync with current channel.
     setup_from_midi_chan_str(str(midi_channel))

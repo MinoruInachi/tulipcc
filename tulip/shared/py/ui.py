@@ -3,7 +3,11 @@
 # also has keyboard and other small LVGL things
 import tulip, tulip_graphics
 import time
-import lvgl as lv
+from lvgl_compat import lv, maybe_log_backend
+
+LV_SIZE_CONTENT = getattr(lv, "SIZE_CONTENT", (1 << 30) - 1)
+
+maybe_log_backend("Tulip UI LVGL backend")
 
 lv_soft_kb = None
 lv_launcher = None
@@ -11,11 +15,51 @@ lv_launcher = None
 
 running_apps = {}
 current_app_string = "repl"
+_repl_background_unset = object()
+_repl_background = None
+_repl_background_bitmap = None
+
+
+def _draw_repl_background(_):
+    if _repl_background is None:
+        return
+    width, height = tulip.screen_size()
+    if _repl_background_bitmap is not None:
+        tulip.bg_bitmap(0, 0, width, height, _repl_background_bitmap)
+    else:
+        image, x, y, color = _repl_background
+        tulip.bg_clear(color)
+        tulip.bg_png(image, x, y)
+    repl_screen.group.invalidate()
+
+
+def repl_background(image=_repl_background_unset, x=0, y=0, color=9):
+    global _repl_background, _repl_background_bitmap
+    if image is _repl_background_unset:
+        return _repl_background
+    if image is None:
+        _repl_background = None
+        _repl_background_bitmap = None
+        # Opaque again: LVGL paints over bg on the REPL screen, so it can erase
+        # its own widgets there without help. See _repaint_repl_background().
+        repl_screen.set_bg_color(UIScreen.default_repl_bg_color)
+        return None
+    if isinstance(image, str) and not image.startswith('/'):
+        image = tulip.pwd().rstrip('/') + '/' + image
+    _repl_background = (image, x, y, color)
+    # Transparent, so the wallpaper below LVGL shows through the REPL screen.
+    repl_screen.set_bg_color(0x55)
+    _draw_repl_background(None)
+    width, height = tulip.screen_size()
+    _repl_background_bitmap = tulip.bg_bitmap(0, 0, width, height)
+    return _repl_background
 
 
 
 # Returns the keypad indev
 def get_keypad_indev():
+    if tulip.board() == "TAB5":
+        return None
     nobody = lv.indev_t()
     a = nobody.get_next()
     if (a.get_type() == lv.INDEV_TYPE.KEYPAD):
@@ -80,6 +124,7 @@ class UIScreen():
     first_run = True
     # Constants you can change
     default_bg_color = 0
+    default_repl_bg_color = 9
     # Start drawing at this position, a little to the right of the edge and 100px down
     default_offset_x = 10
     default_offset_y = 100
@@ -110,6 +155,9 @@ class UIScreen():
         self.name = name
         self.alttab_button = None
         self.quit_button = None
+        self.alttab_cb_data = {}
+        self.quit_cb_data = {}
+        self.launcher_cb_data = {}
         self.running = True # is this code running 
         self.active = False # is it showing on screen 
         self.activate_callback = activate_callback
@@ -132,7 +180,7 @@ class UIScreen():
                 alttab_label.set_text(lv.SYMBOL.SHUFFLE)
                 alttab_label.set_style_text_align(lv.TEXT_ALIGN.CENTER,0)
                 self.alttab_button.align_to(self.group, lv.ALIGN.TOP_RIGHT,0,0)
-                self.alttab_button.add_event_cb(self.alttab_callback, lv.EVENT.CLICKED, None)
+                self.alttab_button.add_event_cb(self.alttab_callback, lv.EVENT.CLICKED, self.alttab_cb_data)
         else:
             if(len(running_apps) == 1):
                 self.alttab_button.delete()
@@ -148,7 +196,7 @@ class UIScreen():
                 quit_label.set_text(lv.SYMBOL.POWER)
                 quit_label.set_style_text_align(lv.TEXT_ALIGN.CENTER,0)
                 self.quit_button.align_to(self.alttab_button, lv.ALIGN.OUT_LEFT_MID,0,0)
-                self.quit_button.add_event_cb(self.screen_quit_callback, lv.EVENT.CLICKED, None)
+                self.quit_button.add_event_cb(self.screen_quit_callback, lv.EVENT.CLICKED, self.quit_cb_data)
             else:
                 self.launcher_button = lv.button(self.group)
                 self.launcher_button.set_style_bg_color(pal_to_lv(36), lv.PART.MAIN)
@@ -158,7 +206,7 @@ class UIScreen():
                 launcher_label.set_text(lv.SYMBOL.LIST)
                 launcher_label.set_style_text_align(lv.TEXT_ALIGN.CENTER,0)
                 self.launcher_button.align_to(self.group, lv.ALIGN.BOTTOM_RIGHT,0,0)
-                self.launcher_button.add_event_cb(launcher, lv.EVENT.CLICKED, None)
+                self.launcher_button.add_event_cb(launcher, lv.EVENT.CLICKED, self.launcher_cb_data)
 
 
 
@@ -177,7 +225,8 @@ class UIScreen():
                 tulip.frame_callback()
                 tulip.Sprite.reset()
                 tulip.bg_clear()
-                tulip.key_scan(0)
+                if hasattr(tulip, "key_scan"):
+                    tulip.key_scan(0)
 
             # Find the next app in the list (assuming dict is ordered by insertion, I think it is)
             apps = list(running_apps.items())
@@ -204,7 +253,8 @@ class UIScreen():
                 tulip.Sprite.reset()  # resets sprite counter
                 tulip.bg_clear()
                 tulip.tfb_update()
-                tulip.key_scan(0)
+                if hasattr(tulip, "key_scan"):
+                    tulip.key_scan(0)
             try:
                 del running_apps[self.name]
             except KeyError:
@@ -227,7 +277,7 @@ class UIScreen():
         for o in obj:
             o.group.set_parent(self.group)
             o.group.set_style_bg_color(pal_to_lv(self.bg_color), lv.PART.MAIN)
-            o.group.set_height(lv.SIZE_CONTENT)
+            o.group.set_height(LV_SIZE_CONTENT)
             if(self.last_obj_added is None):
                 o.group.align_to(self.group,first_align,self.offset_x,self.offset_y)
             else:
@@ -253,12 +303,19 @@ class UIScreen():
         lv.screen_load(self.screen)
 
         if(self.handle_keyboard):
-            get_keypad_indev().set_group(self.kb_group)
+            if tulip.board() == "TAB5":
+                self.kb_group.set_default()
+            else:
+                keypad_indev = get_keypad_indev()
+                if keypad_indev is not None:
+                    keypad_indev.set_group(self.kb_group)
 
         if(self.name == 'repl'):
             tulip.tfb_start()
             tulip.set_screen_as_repl(1)
             tulip.tfb_update() # force redraw of tfb, maybe tfb_start should do this? 
+            if _repl_background is not None:
+                tulip.defer(_draw_repl_background, None, 200)
 
         else:
             tulip.set_screen_as_repl(0)
@@ -267,7 +324,8 @@ class UIScreen():
             else:
                 tulip.tfb_stop()
             if(self.game):
-                tulip.key_scan(1) # enter direct scan mode, keys will not hit the REPL this way
+                if hasattr(tulip, "key_scan"):
+                    tulip.key_scan(1) # enter direct scan mode, keys will not hit the REPL this way
 
         if(self.activate_callback is not None):
             # We defer the activate callback as some apps will draw to the BG, and LVGL may get there first
@@ -277,8 +335,10 @@ class UIScreen():
         # This lets control-Q and control-TAB control them 
         # Only do this after another app (not the repl) has been made
         if(not UIScreen.first_run):
-            tulip.ui_quit_callback(self.screen_quit_callback)
-            tulip.ui_switch_callback(self.alttab_callback)
+            if hasattr(tulip, "ui_quit_callback"):
+                tulip.ui_quit_callback(self.screen_quit_callback)
+            if hasattr(tulip, "ui_switch_callback"):
+                tulip.ui_switch_callback(self.alttab_callback)
         UIScreen.first_run = False
 
     # Remove the elements you created
@@ -329,8 +389,7 @@ def lv_soft_kb_cb(e):
         if(lv_last_mode == kb.get_mode()): # there's a bug where the mode swticher sends BS
             tulip.key_send(8)
     elif(code==lv.SYMBOL.KEYBOARD):
-        lv_soft_kb.delete()
-        lv_soft_kb = None
+        _close_keyboard()
         return
     elif(ord(code)==49): # special -- sends a "1" char even if just hit the mode switcher '1#'
         if(kb.get_mode() == lv_last_mode):  # only update after switching modes
@@ -344,20 +403,41 @@ def lv_soft_kb_cb(e):
 def keyboard():
     global lv_soft_kb, lv_last_mode
     if(lv_soft_kb is not None):
-        lv_soft_kb.delete()
-        lv_soft_kb = None
+        _close_keyboard()
         return
     lv_soft_kb = lv.keyboard(current_lv_group())
     lv_soft_kb.add_event_cb(lv_soft_kb_cb, lv.EVENT.VALUE_CHANGED, None)
     lv_last_mode = lv_soft_kb.get_mode()
+
+def _close_keyboard():
+    global lv_soft_kb
+    lv_soft_kb.delete()
+    lv_soft_kb = None
+    _repaint_repl_background()
+
+# Paint over whatever was just removed from the REPL screen.
+# The REPL screen's group is transparent whenever a repl_background() wallpaper
+# is up, and lv_flush_cb_8b drops transparent pixels while that screen is loaded
+# -- that is exactly what lets the wallpaper show through it. The cost is that
+# LVGL can no longer erase itself there: a deleted object redraws as those same
+# transparent pixels, so the ones it left in bg would stay forever. Without a
+# wallpaper the group is opaque and LVGL erases itself, as on every other board.
+def _repaint_repl_background():
+    if _repl_background is not None:
+        _draw_repl_background(None)
+
+def _close_launcher():
+    global lv_launcher
+    lv_launcher.delete()
+    lv_launcher = None
+    _repaint_repl_background()
 
 def launcher_cb(e):
     global lv_launcher
     if(e.get_code() == lv.EVENT.CLICKED):
         button = e.get_target_obj()
         text = button.get_child(1).get_text()
-        lv_launcher.delete()
-        lv_launcher = None
+        _close_launcher()
         if(text=="Juno-6"):
             tulip.run('juno6')
         if(text=="Drums"):
@@ -387,11 +467,12 @@ def launcher_cb(e):
 def launcher(ignore=True):
     global lv_launcher
     if(lv_launcher is not None):
-        lv_launcher.delete()
-        lv_launcher=None
+        _close_launcher()
         return
-    lv_launcher = lv.list(repl_screen.group)
-    lv_launcher.set_size(195, 140)
+    lv_launcher = lv.list(UIElement.temp_screen)
+    lv_launcher.add_flag(lv.obj.FLAG.HIDDEN)
+    launcher_height = tulip.screen_size()[1] * 2 // 3 if tulip.board() == "TAB5" else 140
+    lv_launcher.set_size(195, launcher_height)
     lv_launcher.set_align(lv.ALIGN.BOTTOM_RIGHT)
     lv_launcher.set_style_text_font(lv.font_montserrat_12,0)
     b_close = lv_launcher.add_button(lv.SYMBOL.CLOSE, "Close")
@@ -414,6 +495,13 @@ def launcher(ignore=True):
     b_wifi.add_event_cb(launcher_cb, lv.EVENT.CLICKED, None)
     b_power = lv_launcher.add_button(lv.SYMBOL.POWER,"Reset")
     b_power.add_event_cb(launcher_cb, lv.EVENT.CLICKED, None)
+    if tulip.board() == "TAB5":
+        lv_launcher.update_layout()
+        last_visible_button = lv_launcher.get_child(min(10, lv_launcher.get_child_count()) - 1)
+        lv_launcher.set_height(last_visible_button.get_y() + last_visible_button.get_height())
+    lv_launcher.set_parent(repl_screen.group)
+    lv_launcher.set_align(lv.ALIGN.BOTTOM_RIGHT)
+    lv_launcher.remove_flag(lv.obj.FLAG.HIDDEN)
 
 # A tab view (that you can add other things to)
 class TabView:
@@ -451,7 +539,7 @@ class TabView:
         for o in obj:
             o.group.set_parent(group)
             o.group.set_style_bg_color(pal_to_lv(self.parent.bg_color), lv.PART.MAIN)
-            o.group.set_height(lv.SIZE_CONTENT)
+            o.group.set_height(LV_SIZE_CONTENT)
             if(self.last_obj_added is None):
                 o.group.align_to(group,first_align,self.parent.offset_x,self.parent.offset_y)
             else:
@@ -647,6 +735,6 @@ class UICheckbox(UIElement):
             self.cb.add_event_cb(callback, lv.EVENT.VALUE_CHANGED, None)
 
 
-repl_screen = UIScreen("repl", bg_color=9, handle_keyboard=True)
+repl_screen = UIScreen("repl", bg_color=UIScreen.default_repl_bg_color, handle_keyboard=True)
 repl_screen.present()
 

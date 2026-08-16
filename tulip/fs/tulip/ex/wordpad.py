@@ -1,6 +1,6 @@
 # wordpad.py
 # use lvgl to make a full screen editor with proportional fonts and word wrap
-import lvgl as lv
+from lvgl_compat import lv
 import tulip, time
 (H_RES,V_RES) = tulip.screen_size()
 

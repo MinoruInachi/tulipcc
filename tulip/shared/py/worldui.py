@@ -1,6 +1,6 @@
 # worldui.py
 
-import lvgl as lv
+from lvgl_compat import lv
 import tulip, time
 (H_RES,V_RES) = tulip.screen_size()
 if(tulip.board()=='WEB'):
@@ -10,6 +10,7 @@ else:
 
 app = None
 TIME_BETWEEN_CHECKS_S = 60
+LV_COORD_MAX = lv.COORD.MAX if hasattr(lv, 'COORD') else 0x7FFFFFFF
 
 def check_messages(x=None):
     global app
@@ -21,7 +22,7 @@ def check_messages(x=None):
             nt = world.nice_time(i['age_ms'])
             text = text + "\n["+ nt +"] "+ i['username'] +": " +i['content']
         app.messages.ta.set_text(text)
-        app.messages.ta.scroll_to_y(lv.COORD.MAX,0)
+        app.messages.ta.scroll_to_y(LV_COORD_MAX, 0)
 
     # Different paths for web and normal world
     if(tulip.board()=="WEB"):
@@ -41,7 +42,7 @@ def check_files():
             if(fn.endswith('.tar')): fn = fn[:-4]
             text = text + "\n["+ nt +"] "+ i['username'] +": " + fn + " (" +i['content'] + ")"
         app.files.ta.set_text(text)
-        app.files.ta.scroll_to_y(lv.COORD.MAX,0)
+        app.files.ta.scroll_to_y(LV_COORD_MAX, 0)
 
     if(tulip.board()=="WEB"):
         world.unique_files(count=12).then(lambda x: done(x))
@@ -98,7 +99,8 @@ class TextEntry(tulip.UIElement):
         self.ta.set_placeholder_text("Type a message....")
         self.ta.remove_flag(lv.obj.FLAG.SCROLLABLE)
         self.ta.set_one_line(True)
-        self.ta.add_event_cb(enter_cb, lv.EVENT.READY,None)
+        self.enter_cb_data = {}
+        self.ta.add_event_cb(enter_cb, lv.EVENT.READY, self.enter_cb_data)
         lv.group_focus_obj(self.ta)
 
 class TextSection(tulip.UIElement):
