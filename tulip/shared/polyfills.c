@@ -17,6 +17,21 @@ void * malloc_caps(uint32_t size, uint32_t flags) {
 }
 #endif
 
+#ifndef AMY_IS_EXTERNAL
+void * malloc_caps(uint32_t size, uint32_t flags) {
+#ifdef ESP_PLATFORM
+    return heap_caps_malloc(size, flags);
+#else
+    // ignore flags
+    return malloc(size);
+#endif
+}
+#endif
+
+void * malloc_caps_block(uint32_t size, uint32_t flags) {
+    return malloc_caps(size, flags);
+}
+
 
 #ifndef ESP_PLATFORM
 

@@ -1,10 +1,12 @@
 #ifndef POLYFILLS_H
+#define POLYFILLS_H
 
 #include <stdint.h>
 #include "py/mphal.h"
-#ifndef __EMSCRIPTEN__
-#include "amy.h"
-#endif
+// No amy.h here: nothing polyfills declares needs it, and pulling it in from a
+// header this widely included forced every port to have some "amy.h" on the
+// include path. The one file that was relying on it transitively
+// (amy_connector.c) now includes it itself.
 #ifdef ESP_PLATFORM
 // not sure, maybe esp includes?
 extern void esp32s3_display_start();
@@ -24,6 +26,7 @@ int64_t get_time_ms();
 int32_t get_ticks_ms();
 int64_t get_time_us();
 void * malloc_caps(uint32_t size, uint32_t flags);
+void * malloc_caps_block(uint32_t size, uint32_t flags);
 void *calloc_caps(uint32_t align, uint32_t count, uint32_t size, uint32_t flags);
 void *realloc_caps(void* ptr, uint32_t size, uint32_t caps);
 void free_caps(void *ptr);

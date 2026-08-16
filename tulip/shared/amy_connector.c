@@ -7,6 +7,12 @@
 
 
 #include "polyfills.h"
+// Used to arrive via polyfills.h. Kept under the same guard it had there: the
+// emscripten build has no amy/src on its include path, and the AMY-using code
+// below is compiled out on that target.
+#ifndef __EMSCRIPTEN__
+#include "amy.h"
+#endif
 #include "py/mphal.h"
 #include "py/runtime.h"
 #include "py/builtin.h"

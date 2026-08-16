@@ -13,8 +13,14 @@
 #include "lvgl.h"
 #define RGB332
 
-#ifdef ESP_PLATFORM
+#if defined(ESP_PLATFORM) && !defined(TAB5)
 #include "esp32s3_display.h"
+#elif defined(ESP_PLATFORM)
+// TAB5 (ESP32-P4) drives a MIPI-DSI panel from display_tab5.c, so none of the
+// S3 RGB-panel header applies. The one thing shared/display.c needs from a
+// backend on ESP is the pixel-clock hook; TAB5 implements it as a no-op in
+// shared_renderer_tab5_glue.c since a DSI panel has no equivalent knob.
+void esp_display_set_clock(uint8_t mhz);
 #else
 #define IRAM_ATTR
 #endif
@@ -50,6 +56,7 @@ extern uint8_t touch_held;
 
 void display_reset_sprites();
 void display_reset_tfb();
+void display_tfb_set_default_bg_color(uint8_t color);
 void display_reset_bg();
 void display_tfb_update(int8_t tfb_row_hint);
 uint8_t display_tfb_visible_cols(void);
@@ -77,6 +84,7 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg
 void display_tfb_new_row();
 void display_run();
 void display_init();
+void setup_lvgl();
 void display_brightness(uint8_t amount);
 
 void unpack_rgb_332_repeat(uint8_t px0, uint8_t *r, uint8_t *g, uint8_t *b);
@@ -86,6 +94,7 @@ bool display_bounce_empty(void *bounce_buf, int pos_px, int len_bytes, void *use
 bool display_frame_done_generic();
 void display_swap();
 uint8_t rgb565to332(uint16_t rgb565);
+uint8_t color_332(uint8_t red, uint8_t green, uint8_t blue);
 void display_teardown(void);
 
 uint8_t check_dim_xy(uint16_t x, uint16_t y);
@@ -113,12 +122,15 @@ extern const unsigned char portfolio_glyph_bitmap[1792];
 // We assume we can store 16 unique 32x32 sprite tiles, you can swap these out from RAM
 #define SPRITE_RAM_BYTES (32*32*SPRITES)
 
-#ifndef TDECK
-#define H_RES 1024
-#define V_RES 600
-#else
+#if defined(TAB5)
+#define H_RES 1280
+#define V_RES 720
+#elif defined(TDECK)
 #define H_RES 320
 #define V_RES 240
+#else
+#define H_RES 1024
+#define V_RES 600
 #endif
 
 #ifdef TDECK
@@ -178,6 +190,19 @@ extern int32_t vsync_count;
 extern uint8_t brightness;
 extern float reported_fps;
 extern float reported_gpu_usage;
+/* Damage tracking. Backends may ignore this entirely; the Tab5 bridge uses it
+ * to recompose only the rows that changed, which is the difference between a
+ * ~90ms full frame and a ~2ms one-text-row update on that hardware. */
+extern volatile uint8_t display_dirty;
+/* Cleared when a caller does something whose damage cannot be expressed as a
+ * range of display rows -- currently any non-identity background scroll, since
+ * that breaks the bg-row to display-row correspondence. */
+extern volatile uint8_t display_rows_trackable;
+void display_mark_dirty_rows(int y0, int y1);
+void display_mark_rows_untrackable(void);
+/* Snapshot and clear the pending damage. Returns false when nothing changed. */
+bool display_take_dirty_rows(int *y0, int *y1);
+#define display_mark_dirty() display_mark_dirty_rows(0, V_RES)
 extern uint8_t *collision_bitfield;
 
 extern const uint16_t rgb332_rgb565_i[256];

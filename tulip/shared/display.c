@@ -1,7 +1,9 @@
 #include "display.h"
+
 uint8_t bg_pal_color;
 uint8_t tfb_fg_pal_color;
 uint8_t tfb_bg_pal_color;
+static uint8_t tfb_default_bg_pal_color = TULIP_TEAL;
 uint8_t ansi_active_bg_color; 
 uint8_t ansi_active_fg_color; 
 int16_t ansi_active_format;
@@ -21,6 +23,73 @@ int32_t vsync_count;
 uint8_t brightness;
 float reported_fps;
 float reported_gpu_usage;
+
+/* Set by every routine that changes what the screen should look like, cleared
+ * by the frame loop once the change has been presented. Backends are free to
+ * ignore it; the Tab5 bridge uses it to skip recomposing an unchanged frame,
+ * which is the common case at the REPL. */
+volatile uint8_t display_dirty = 1;
+volatile uint8_t display_rows_trackable = 1;
+static volatile int16_t display_dirty_y0 = 0;
+static volatile int16_t display_dirty_y1 = V_RES;
+
+/* Producers run on the MicroPython task, the consumer on the display task, and
+ * on the ESP32-P4 those are genuinely concurrent on separate cores. Expanding
+ * the range and raising the flag has to be one step, or a change can be dropped
+ * between the consumer's snapshot and its reset. */
+#ifdef ESP_PLATFORM
+#include "freertos/FreeRTOS.h"
+static portMUX_TYPE display_dirty_mux = portMUX_INITIALIZER_UNLOCKED;
+#define DISPLAY_DIRTY_ENTER() portENTER_CRITICAL_SAFE(&display_dirty_mux)
+#define DISPLAY_DIRTY_EXIT()  portEXIT_CRITICAL_SAFE(&display_dirty_mux)
+#else
+#define DISPLAY_DIRTY_ENTER() do {} while (0)
+#define DISPLAY_DIRTY_EXIT()  do {} while (0)
+#endif
+
+void display_mark_rows_untrackable(void) {
+    display_rows_trackable = 0;
+    display_mark_dirty_rows(0, V_RES);
+}
+
+void display_mark_dirty_rows(int y0, int y1) {
+    if(!display_rows_trackable) { y0 = 0; y1 = V_RES; }
+    if(y0 < 0) y0 = 0;
+    if(y1 > V_RES) y1 = V_RES;
+    if(y1 <= y0) return;
+
+    // Unlocked fast path. The drawing primitives funnel through here once per
+    // pixel, so after the first pixel of a row the pending range already covers
+    // the rest -- and taking a spinlock 921600 times costs far more than the
+    // drawing itself. A miss here only falls through to the locked path below.
+    if(display_dirty && y0 >= display_dirty_y0 && y1 <= display_dirty_y1) return;
+
+    DISPLAY_DIRTY_ENTER();
+    if(!display_dirty) {
+        display_dirty_y0 = (int16_t)y0;
+        display_dirty_y1 = (int16_t)y1;
+        display_dirty = 1;
+    } else {
+        if(y0 < display_dirty_y0) display_dirty_y0 = (int16_t)y0;
+        if(y1 > display_dirty_y1) display_dirty_y1 = (int16_t)y1;
+    }
+    DISPLAY_DIRTY_EXIT();
+}
+
+bool display_take_dirty_rows(int *y0, int *y1) {
+    bool was_dirty;
+    DISPLAY_DIRTY_ENTER();
+    was_dirty = display_dirty != 0;
+    if(was_dirty) {
+        *y0 = display_dirty_y0;
+        *y1 = display_dirty_y1;
+        display_dirty = 0;
+        display_dirty_y0 = V_RES;
+        display_dirty_y1 = 0;
+    }
+    DISPLAY_DIRTY_EXIT();
+    return was_dirty;
+}
 
 uint8_t *collision_bitfield;
 // RAM for sprites and background FB
@@ -78,6 +147,32 @@ uint8_t display_tfb_visible_cols(void) {
 uint8_t display_tfb_visible_rows(void) {
     uint8_t rows = V_RES / tfb_font_height_current();
     return MIN(rows, TFB_ROWS);
+}
+
+// The console's pixel rows live in bg_tfb as a ring. Scrolling used to rebuild
+// every visible pixel row from glyphs and push the result back into PSRAM -- a
+// megabyte of work for a change that only ever adds one line of text. Since the
+// pixels of rows 0..n-2 after a scroll are exactly what rows 1..n-1 already held,
+// a scroll instead advances tfb_ring_top by one font height and rasterises only
+// the row that actually changed.
+//
+// Screen pixel row y is stored in bg_tfb/TFB_pxlen at row tfb_ring_row(y). Rows
+// from tfb_ring_h up (the remainder when the font height does not divide V_RES)
+// are outside the ring and map straight through. tfb_ring_top is always < tfb_ring_h.
+static volatile uint16_t tfb_ring_top = 0;
+static volatile uint16_t tfb_ring_h = 0;
+
+// always_inline because display_bounce_empty may run with the flash cache off;
+// an out-of-line copy of this would live in flash and could not be called there.
+static inline __attribute__((always_inline))
+uint16_t tfb_ring_row_in(uint16_t y, uint16_t top, uint16_t h) {
+    if(h == 0 || y >= h) return y;
+    uint16_t row = y + top;
+    return (row >= h) ? (uint16_t)(row - h) : row;
+}
+
+static inline uint16_t tfb_ring_row(uint16_t y) {
+    return tfb_ring_row_in(y, tfb_ring_top, tfb_ring_h);
 }
 
 // lookup table for Tulip's "pallete" to the 16-bit colorspace needed by LVGL and T-deck
@@ -167,7 +262,7 @@ uint8_t color_332(uint8_t red, uint8_t green, uint8_t blue) {
 // >> 6
 
 uint8_t rgb565to332(uint16_t rgb565) {
-    return (rgb565 >> 6 & 0xe0)  | (rgb565 >> 6 & 0x1c) | (rgb565 >> 3 & 0x3);
+    return (rgb565 >> 8 & 0xe0) | (rgb565 >> 6 & 0x1c) | (rgb565 >> 3 & 0x3);
 }
 
 // Python callback
@@ -176,6 +271,11 @@ extern void tulip_frame_isr();
 uint8_t spriteno_activated;
 
 bool display_frame_done_generic() {
+    // Scrolling changes the image every frame with no explicit draw call, so it
+    // has to keep the frame marked dirty on its own.
+    for(uint16_t i=0;i<V_RES;i++) {
+        if(x_speeds[i] || y_speeds[i]) { display_mark_dirty(); break; }
+    }
     // Update the scroll
     for(uint16_t i=0;i<V_RES;i++) {
         x_offsets[i] = x_offsets[i] + x_speeds[i];
@@ -199,6 +299,7 @@ bool display_frame_done_generic() {
 
 void display_swap() {
     for(uint16_t i=0;i<V_RES;i++) x_offsets[i] = (x_offsets[i] + H_RES) % (H_RES+OFFSCREEN_X_PX);
+    display_mark_dirty();
 }
 
 
@@ -226,6 +327,9 @@ int64_t bounce_time = 0;
 uint32_t bounce_count = 1;
 
 bool IRAM_ATTR display_bounce_empty(void *bounce_buf, int pos_px, int len_bytes, void *user_ctx) {
+    if (bounce_buf == NULL || len_bytes <= 0) {
+        return false;
+    }
     int64_t tic=get_time_us(); // start the timer
     int16_t touch_x = last_touch_x[0];
     int16_t touch_y = last_touch_y[0];
@@ -234,14 +338,37 @@ bool IRAM_ATTR display_bounce_empty(void *bounce_buf, int pos_px, int len_bytes,
     uint16_t starting_display_row_px = pos_px / H_RES;
     uint8_t bounce_total_rows_px = len_bytes / H_RES;
     uint8_t * b = (uint8_t*)bounce_buf;
+    if (bg_lines == NULL) {
+        memset(b, 0, len_bytes);
+        return false;
+    }
+    // Snapshot the ring once, so a scroll landing mid-call cannot make this
+    // chunk render half of it with the old mapping and half with the new.
+    const uint16_t tfb_top = tfb_ring_top;
+    const uint16_t tfb_h = tfb_ring_h;
     // Copy the bg then the TFB over 
     for(uint8_t rows_relative_px=0;rows_relative_px<bounce_total_rows_px;rows_relative_px++) {
         uint8_t * b_ptr = b+(H_RES*rows_relative_px);
         uint16_t y = (starting_display_row_px + rows_relative_px) % V_RES;
-        memcpy(b_ptr, bg_lines[y], H_RES); 
-        if(tfb_active) memcpy(b_ptr, bg_tfb + (y * H_RES),TFB_pxlen[y]);
+        if (bg_lines[y] != NULL) {
+            memcpy(b_ptr, bg_lines[y], H_RES);
+        } else {
+            memset(b_ptr, 0, H_RES);
+        }
+        if(tfb_active && bg_tfb != NULL && TFB_pxlen != NULL) {
+            uint16_t tfb_y = tfb_ring_row_in(y, tfb_top, tfb_h);
+            uint8_t *tfb_line = bg_tfb + (tfb_y * H_RES);
+            uint16_t tfb_pxlen = TFB_pxlen[tfb_y];
+            if(memchr(tfb_line, ALPHA, tfb_pxlen) == NULL) {
+                memcpy(b_ptr, tfb_line, tfb_pxlen);
+            } else {
+                for(uint16_t x=0;x<tfb_pxlen;x++) {
+                    if(tfb_line[x] != ALPHA) b_ptr[x] = tfb_line[x];
+                }
+            }
+        }
     
-        if(spriteno_activated) {
+        if(spriteno_activated && sprite_ids != NULL && sprite_ram != NULL && sprite_x_px != NULL && sprite_y_px != NULL && sprite_w_px != NULL && sprite_h_px != NULL && sprite_vis != NULL && sprite_mem != NULL && collision_bitfield != NULL) {
             memset(sprite_ids, 255, H_RES);
             if(touch_held_local && touch_y == y) {
                 if(touch_x >= 0 && touch_x < H_RES) {
@@ -263,8 +390,10 @@ bool IRAM_ATTR display_bounce_empty(void *bounce_buf, int pos_px, int len_bytes,
                                     b[rows_relative_px*H_RES + col_px] = b0;
                                     // Only update collisions on non-alpha pixels
                                     uint8_t overlap_sprite = sprite_ids[col_px];
-                                    if(overlap_sprite!=255) { // sprite already here!
-                                        uint16_t field = s * (s - 1) / 2 + overlap_sprite;
+                                    if(overlap_sprite != 255 && overlap_sprite != s) {
+                                        uint8_t collision_a = s < overlap_sprite ? s : overlap_sprite;
+                                        uint8_t collision_b = s < overlap_sprite ? overlap_sprite : s;
+                                        uint16_t field = collision_b * (collision_b - 1) / 2 + collision_a;
                                         collision_bitfield[field / 8] |= 1 << (field % 8);
                                     }
                                     sprite_ids[col_px] = s;
@@ -279,11 +408,14 @@ bool IRAM_ATTR display_bounce_empty(void *bounce_buf, int pos_px, int len_bytes,
     bounce_time += (get_time_us() - tic); // stop timer
     bounce_count++;
 
-    return false;
+    return true;
 }
 
+// One pixel row of text, built here before being published into bg_tfb.
+static uint8_t tfb_scratch_row[H_RES];
+
 // set tfb_row_hint to -1 for everything
-void display_tfb_update(int8_t tfb_row_hint) { 
+void display_tfb_update(int8_t tfb_row_hint) {
     if(!tfb_active) { return; }
 
     uint8_t font_width = tfb_font_width_current();
@@ -291,8 +423,23 @@ void display_tfb_update(int8_t tfb_row_hint) {
     uint8_t visible_cols = display_tfb_visible_cols();
     uint8_t visible_rows = display_tfb_visible_rows();
 
+    // This function owns the ring's geometry. A full rebuild re-lays every row
+    // from scratch, so it is also the moment the ring can be re-based; and if the
+    // font changed under us the old mapping describes nothing, so force one.
+    const uint16_t ring_h = (uint16_t)visible_rows * font_height;
+    if(tfb_row_hint < 0 || tfb_ring_h != ring_h) {
+        tfb_ring_h = ring_h;
+        tfb_ring_top = 0;
+        tfb_row_hint = -1;
+    }
+
     uint16_t bounce_row_start = 0;
-    uint16_t bounce_row_end = visible_rows * font_height;
+    // A full rebuild runs to the bottom of the screen, not just to the bottom of
+    // the text. When the font height does not divide V_RES the rows below the
+    // last text row still hold the previous font's pixels, and stopping at
+    // visible_rows*font_height left them on screen -- switching to the 6x8 font
+    // left a band of the old 12x16 console under the new one.
+    uint16_t bounce_row_end = V_RES;
     if(tfb_row_hint >= 0) {
         bounce_row_start = tfb_row_hint * font_height;
         bounce_row_end = bounce_row_start + font_height;
@@ -304,11 +451,19 @@ void display_tfb_update(int8_t tfb_row_hint) {
         }
     }
     for(uint16_t bounce_row_px=bounce_row_start;bounce_row_px<bounce_row_end;bounce_row_px++) {
-        memset(bg_tfb + (bounce_row_px*H_RES), 0, H_RES);
+        // Build into scratch rather than blanking bg_tfb in place. The frame
+        // compositor runs on another core and reads these rows continuously; if
+        // it catches a row between the memset and the glyph loop it renders the
+        // line as fully transparent, which shows up as text flicker.
+        memset(tfb_scratch_row, ALPHA, H_RES);
+
+        // Where this screen row is actually stored right now.
+        const uint16_t store_row_px = tfb_ring_row(bounce_row_px);
 
         uint8_t tfb_row = bounce_row_px / font_height;
         if(tfb_row >= visible_rows) {
-            TFB_pxlen[bounce_row_px] = 0;
+            TFB_pxlen[store_row_px] = 0;
+            memset(bg_tfb + (store_row_px*H_RES), ALPHA, H_RES);
             continue;
         }
         uint8_t tfb_row_offset_px = bounce_row_px % font_height;
@@ -337,7 +492,7 @@ void display_tfb_update(int8_t tfb_row_hint) {
             }
 
             uint16_t start_px = tfb_col * font_width;
-            uint8_t * bptr = bg_tfb + (bounce_row_px * H_RES + start_px);
+            uint8_t * bptr = tfb_scratch_row + start_px;
             uint16_t mask = 0x8000;
             for(uint8_t bit=0; bit<font_width && (start_px + bit) < H_RES; bit++) {
                 uint8_t on = (data & mask) != 0;
@@ -357,9 +512,15 @@ void display_tfb_update(int8_t tfb_row_hint) {
         if(pxlen > H_RES) {
             pxlen = H_RES;
         }
-        TFB_pxlen[bounce_row_px] = pxlen;
+        // Publish. Copy far enough to also clear whatever the previous, longer
+        // line left behind, then widen the visible length last.
+        uint16_t copy_len = TFB_pxlen[store_row_px] > pxlen ? TFB_pxlen[store_row_px] : pxlen;
+        memcpy(bg_tfb + (store_row_px*H_RES), tfb_scratch_row, copy_len);
+        TFB_pxlen[store_row_px] = pxlen;
     }
 
+    // Report the damage only once the rows actually hold their new contents.
+    display_mark_dirty_rows(bounce_row_start, bounce_row_end);
 }
 void display_reset_bg() {
     bg_pal_color = TULIP_TEAL;
@@ -376,12 +537,13 @@ void display_reset_bg() {
         y_speeds[i] = 0;
     }
 
+    display_mark_dirty();
 }
 
 void display_reset_tfb() {
     // Clear out the TFB
     tfb_fg_pal_color = color_332(255,255,255);
-    tfb_bg_pal_color = TULIP_TEAL;
+    tfb_bg_pal_color = tfb_default_bg_pal_color;
     for(uint i=0;i<TFB_ROWS*TFB_COLS;i++) {
         TFB[i]=0;
         TFBfg[i]=tfb_fg_pal_color;
@@ -395,6 +557,18 @@ void display_reset_tfb() {
     ansi_active_fg_color = tfb_fg_pal_color; 
     ansi_active_bg_color = tfb_bg_pal_color;
     tfb_active = 1;
+    display_mark_dirty();
+}
+
+void display_tfb_set_default_bg_color(uint8_t color) {
+    tfb_default_bg_pal_color = color;
+    tfb_bg_pal_color = color;
+    ansi_active_bg_color = color;
+    if(TFBbg != NULL) {
+        memset(TFBbg, color, TFB_ROWS*TFB_COLS);
+        display_tfb_update(-1);
+    }
+    display_mark_dirty();
 }
 
 void display_reset_sprites() {
@@ -410,6 +584,7 @@ void display_reset_sprites() {
     for(uint8_t i=0;i<62;i++) collision_bitfield[i] = 0;
     for(uint32_t i=0;i<SPRITE_RAM_BYTES;i++) sprite_ram[i] = 0;
     spriteno_activated = 0;
+    display_mark_dirty();
 }
 
 
@@ -433,6 +608,7 @@ void display_invert_bg(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
     } else { 
         //fprintf(stderr, "invert_bg %d %d %d %d\n", x,y,w,h); 
     }
+    display_mark_dirty_rows(y, y+h);
 }
 
 void display_set_bg_bitmap_rgba(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint8_t* data) {
@@ -453,6 +629,7 @@ void display_set_bg_bitmap_rgba(uint16_t x, uint16_t y, uint16_t w, uint16_t h, 
     } else { 
         //fprintf(stderr, "bg_bitmap_rgba %d %d %d %d\n", x,y,w,h); 
     }
+    display_mark_dirty_rows(y, y+h);
 }
 
 void display_set_bg_bitmap_raw(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint8_t* data) {
@@ -471,6 +648,7 @@ void display_set_bg_bitmap_raw(uint16_t x, uint16_t y, uint16_t w, uint16_t h, u
     } else { 
         //fprintf(stderr, "bg_bitmap_raw %d %d %d %d\n", x,y,w,h); 
     }
+    display_mark_dirty_rows(y, y+h);
 }
 
 void display_get_bg_bitmap_raw(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint8_t * data) {
@@ -500,6 +678,7 @@ void display_bg_bitmap_blit(uint16_t x,uint16_t y,uint16_t w,uint16_t h,uint16_t
     } else { 
      //fprintf(stderr, "bg_bitmap_blit %d %d %d %d %d %d\n", x,y,w,h, x1, y1); 
     }
+    display_mark_dirty_rows(y1, y1+h);
 }
 
 void display_bg_bitmap_blit_alpha(uint16_t x,uint16_t y,uint16_t w,uint16_t h,uint16_t x1,uint16_t y1) {
@@ -519,6 +698,7 @@ void display_bg_bitmap_blit_alpha(uint16_t x,uint16_t y,uint16_t w,uint16_t h,ui
     } else { 
         //fprintf(stderr, "bg_bitmap_blit_alpha %d %d %d %d %d %d\n", x,y,w,h, x1, y1); 
     }
+    display_mark_dirty_rows(y1, y1+h);
 }
 
 
@@ -539,6 +719,7 @@ void display_load_sprite_rgba(uint32_t mem_pos, uint32_t len, uint8_t* data) {
             }
         }
     }
+    display_mark_dirty();
 }
 
 void display_load_sprite_raw(uint32_t mem_pos, uint32_t len, uint8_t* data) {
@@ -547,6 +728,7 @@ void display_load_sprite_raw(uint32_t mem_pos, uint32_t len, uint8_t* data) {
             sprite_ram[j] = *data++;
         }
     }    
+    display_mark_dirty();
 }
 
 #ifdef ESP_PLATFORM
@@ -612,6 +794,18 @@ void display_screenshot(char * screenshot_fn, int16_t x, int16_t y, int16_t w, i
     display_stop();
 
     uint8_t * screenshot_bb = (uint8_t *) malloc_caps(FONT_HEIGHT*H_RES*BYTES_PER_PIXEL,MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // The capture used to land straight in bg_tfb to save an allocation, but that
+    // aliases the console's own pixels: display_bounce_empty() below is still
+    // reading them while the loop overwrites them. It only ever worked because
+    // screen row N lived at bg_tfb row N; it no longer does (see tfb_ring_row),
+    // and the capture came back with the wrapped rows showing stale text. Take a
+    // buffer of our own -- and if there is no room for one, flatten the ring back
+    // to row order first so the old aliasing is safe again.
+    uint8_t * shot = (uint8_t *) malloc_caps((uint32_t)w*(uint32_t)h, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(shot == NULL) {
+        display_tfb_update(-1);
+        shot = bg_tfb;
+    }
     uint8_t r,g,b,a;
 
     LodePNGState state;
@@ -639,21 +833,22 @@ void display_screenshot(char * screenshot_fn, int16_t x, int16_t y, int16_t w, i
             uint16_t x_counter = 0;
             for(uint16_t scan_x=x;scan_x<x+w;scan_x++) {
                 if(y_counter<h) {
-                    bg_tfb[y_counter*w + x_counter++] = screenshot_bb[ly*H_RES + scan_x];
+                    shot[y_counter*w + x_counter++] = screenshot_bb[ly*H_RES + scan_x];
                 }
             }
             y_counter++;
         }
     }
-    // now bg_tfb has rendered sprites/tfb/etc on screen
+    // now shot has rendered sprites/tfb/etc on screen
 
     // encode png
     uint32_t outsize = 0;
     uint8_t *out;
-    err = lodepng_encode(&out, (size_t*)&outsize,bg_tfb, w, h, &state);
+    err = lodepng_encode(&out, (size_t*)&outsize,shot, w, h, &state);
     write_file(screenshot_fn, out, outsize, 1);
     free_caps(out);
     free_caps(screenshot_bb);
+    if(shot != bg_tfb) free_caps(shot);
 
     // redraw the tfb
     display_tfb_update(-1);
@@ -665,12 +860,14 @@ void display_set_bg_pixel_pal(uint16_t x, uint16_t y, uint8_t pal_idx) {
     if(check_dim_xy(x,y)) {
         bg[y*(H_RES+OFFSCREEN_X_PX)*BYTES_PER_PIXEL + x*BYTES_PER_PIXEL] = pal_idx;    
     }
+    display_mark_dirty_rows(y, y+1);
 }
 
 void display_set_bg_pixel(uint16_t x, uint16_t y, uint8_t r, uint8_t g, uint8_t b) {
     if(check_dim_xy(x,y)) {
         bg[y*(H_RES+OFFSCREEN_X_PX)*BYTES_PER_PIXEL + x*BYTES_PER_PIXEL] = color_332(r,g,b);
     }
+    display_mark_dirty_rows(y, y+1);
 }
 
 
@@ -693,6 +890,8 @@ uint8_t display_get_bg_pixel_pal(uint16_t x, uint16_t y) {
 
 void display_tfb_cursor(uint16_t x, uint16_t y) {
     if(x >= TFB_COLS || y >= TFB_ROWS) return;
+    // Only this character cell's pixel rows change when the row is next rebuilt.
+    display_mark_dirty_rows(y * tfb_font_height_current(), (y + 1) * tfb_font_height_current());
     // Put a space char in the TFB if there's nothing here; makes the system draw it
     if(TFB[y*TFB_COLS+x] == 0) TFB[y*TFB_COLS+x] = 32;
     uint8_t f = TFBf[y*TFB_COLS + x];
@@ -710,9 +909,11 @@ void display_tfb_uncursor(uint16_t x, uint16_t y) {
         if(f & FORMAT_INVERSE) f = f - FORMAT_INVERSE;
         TFBf[y*TFB_COLS + x] = f;
     }
+    display_mark_dirty_rows(y * tfb_font_height_current(), (y + 1) * tfb_font_height_current());
 }
 
 void display_tfb_new_row() {
+    display_mark_dirty();
     uint8_t visible_rows = display_tfb_visible_rows();
     uint8_t visible_cols = display_tfb_visible_cols();
     if(visible_rows == 0 || visible_cols == 0) {
@@ -732,13 +933,31 @@ void display_tfb_new_row() {
             memcpy(&TFBbg[i*TFB_COLS], &TFBbg[(i+1)*TFB_COLS], TFB_COLS);
         }
         for(uint8_t i=0;i<visible_cols;i++) {
-            TFB[tfb_y_row*TFB_COLS+i] = 0; 
+            TFB[tfb_y_row*TFB_COLS+i] = 0;
             TFBf[tfb_y_row*TFB_COLS+i] = 0;
             TFBfg[tfb_y_row*TFB_COLS+i] = tfb_fg_pal_color;
             TFBbg[tfb_y_row*TFB_COLS+i] = tfb_bg_pal_color;
         }
-        // update the whole screen
-        display_tfb_update(-1);
+        // Only the bottom row's pixels are new: every other row keeps exactly the
+        // pixels it already has in bg_tfb, one text row higher up the screen. Turn
+        // the ring instead of re-rendering them. Rebuilding the whole screen here
+        // cost 28ms per scrolled line on a half-full 1280x720 console and 58ms on
+        // a full one, which is what made ordinary console output block MicroPython
+        // for seconds at a time.
+        const uint8_t font_height = tfb_font_height_current();
+        const uint16_t ring_h = (uint16_t)visible_rows * font_height;
+        if(ring_h > 0 && tfb_ring_h == ring_h) {
+            uint16_t top = tfb_ring_top + font_height;
+            tfb_ring_top = (top >= ring_h) ? (uint16_t)(top - ring_h) : top;
+            display_tfb_update(visible_rows-1);
+            // Everything moved, so re-report the damage now that it actually has.
+            // (The display_mark_dirty() at the top of this function ran before the
+            // rows changed; the compositor may have consumed it already.)
+            display_mark_dirty();
+        } else {
+            // Geometry we do not have a ring for -- rebuild the slow way.
+            display_tfb_update(-1);
+        }
     } else {
         // Still got space, just increase the row counter
         display_tfb_update(tfb_y_row);
@@ -775,6 +994,13 @@ uint8_t ansi_parse_digits( unsigned char*str, uint16_t j, uint16_t k, uint16_t *
 uint32_t utf8_esc = 0;
 uint8_t supress_lf = 0;
 void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg_color, uint8_t bg_color) {
+    if(TFB == NULL || TFBf == NULL || TFBfg == NULL || TFBbg == NULL) {
+        return;
+    }
+    // The row this write starts on. A wrap into display_tfb_new_row() widens the
+    // damage to the whole screen on its own, since scrolling moves every row.
+    const uint16_t tfb_str_start_row = tfb_y_row;
+
     uint8_t visible_cols = display_tfb_visible_cols();
     uint8_t visible_rows = display_tfb_visible_rows();
     if(visible_cols == 0 || visible_rows == 0) {
@@ -786,20 +1012,20 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg
     //fprintf(stderr, "###\n");
     // For each character incoming from micropython
     for(uint16_t i=0;i<len;i++) {
-        if(str[i] == 8)  { // backspace , go backwards (don't delete)
+        unsigned char ch = str[i];
+        if(ch == 8)  { // backspace , go backwards (don't delete)
             display_tfb_uncursor(tfb_x_col, tfb_y_row);
             if(tfb_x_col > 0) tfb_x_col--;
         }
-        if(str[i]>127) { // unicode
-            uint32_t esc = 0;
-            uint8_t code= convert_utf8_to_cp437(str[i], &esc);
-            while(code == 0) {
+        if(ch > 127) { // unicode
+            uint8_t code = convert_utf8_to_cp437(ch, &utf8_esc);
+            while(code == 0 && (i + 1) < len) {
                 i++;
-                code = convert_utf8_to_cp437(str[i], &esc);
+                code = convert_utf8_to_cp437(str[i], &utf8_esc);
             }
-            str[i] = code;
+            ch = code;
         }
-        if(str[i] == 27) { // ANSI
+        if(ch == 27) { // ANSI
             // we see an esc coming in on stream at i
             // we check if i+1 is [, save i+2 as j, if not goto B
             // we then scan ahead from j until we find a character F at pos k within a-zA-Z. 
@@ -810,7 +1036,7 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg
             // if F==H: see if digits bwetween j and k, if, move cursor to line;column, if not, move to 0,0, set stream to k, continue
             // if F==anything else: printf unsupported, set stream to k, continue
             // B: get next char, print unsupported, set stream to j+1, continue
-            if(str[i+1]=='[') {
+            if((i + 1) < len && str[i+1]=='[') {
                 uint16_t j=i+2;
                 for(uint16_t scan=j;scan<len;scan++) {
                     if((str[scan]>='A' && str[scan]<='Z') || (str[scan]>='a' && str[scan]<='z')) {
@@ -937,18 +1163,18 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg
 
 
 
-        } else if(str[i] == 10) {
+        } else if(ch == 10) {
             // If an LF, start a new row
             if(!supress_lf) {
                 display_tfb_new_row();
             } else { supress_lf = 0; }
-        } else if(str[i]<32) {
+        } else if(ch < 32) {
             // do nothing with other non-printable chars
         } else { // printable chars
             if(tfb_x_col >= visible_cols) {
                 display_tfb_new_row();
             }
-            TFB[tfb_y_row*TFB_COLS+tfb_x_col] = str[i];    
+            TFB[tfb_y_row*TFB_COLS+tfb_x_col] = ch;
             if(ansi_active_format >= 0 ) {
                 TFBf[tfb_y_row*TFB_COLS+tfb_x_col] =ansi_active_format;        
                 TFBfg[tfb_y_row*TFB_COLS+tfb_x_col] =ansi_active_fg_color ;      
@@ -968,6 +1194,11 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg
     // Update the cursor 
     display_tfb_cursor(tfb_x_col, tfb_y_row);  
     display_tfb_update(tfb_y_row);
+    // display_tfb_update() only rebuilt the row we ended on; if the write began
+    // on an earlier row (without wrapping into a scroll) that row changed too.
+    if(tfb_str_start_row != tfb_y_row) {
+        display_tfb_update(tfb_str_start_row);
+    }
 }
 
 
@@ -1010,6 +1241,32 @@ void display_teardown(void) {
 
 void lv_flush_cb_8b(lv_display_t * display, const lv_area_t * area, unsigned char * px_map)
 {
+#ifdef TAB5
+    const int32_t area_width = lv_area_get_width(area);
+    const uint16_t *src = (const uint16_t *)px_map;
+
+    for(int32_t y = area->y1; y <= area->y2; y++) {
+        if(y < 0 || y >= V_RES + OFFSCREEN_Y_PX) continue;
+        for(int32_t x = area->x1; x <= area->x2; x++) {
+            if(x < 0 || x >= H_RES + OFFSCREEN_X_PX) continue;
+            uint8_t pixel = rgb565to332(src[(y - area->y1) * area_width + (x - area->x1)]);
+            if(!lvgl_is_repl || pixel != ALPHA) {
+                bg[y * (H_RES + OFFSCREEN_X_PX) + x] = pixel;
+            }
+        }
+    }
+#endif
+    // Report the damage only now that the pixels are actually in place. On TAB5
+    // this callback runs on the MicroPython task while the display task is
+    // compositing on the other core: marking first let the compositor take the
+    // range, redraw the rows from their old contents and clear the flag before
+    // the loop above had written the new ones, and nothing would mark them
+    // again. With two DSI framebuffers that lost band survived in whichever
+    // buffer missed it, so the screen alternated between the new content and
+    // whatever had been underneath -- the REPL background flickering under an
+    // app's screen. Boards that render straight into bg have already written it
+    // by the time LVGL calls this, so the move is a no-op for them.
+    display_mark_dirty_rows(area->y1, area->y2 + 1);
     // Inform LVGL that you are ready with the flushing and buf is not used anymore
     lv_display_flush_ready(display);
 }
@@ -1082,9 +1339,21 @@ void setup_lvgl() {
     lv_display_set_physical_resolution(lv_display, H_RES, V_RES); // for touchpad
     lv_display_set_offset(lv_display,0,0);
     lv_display_set_antialiasing(lv_display, 0);
+#ifdef TAB5
+    const uint32_t lvgl_buffer_pixels = (H_RES + OFFSCREEN_X_PX) * (V_RES + OFFSCREEN_Y_PX);
+    lv_buf = (uint8_t *)calloc_caps(32, lvgl_buffer_pixels, sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(lv_buf == NULL) {
+        fprintf(stderr, "Unable to allocate TAB5 LVGL draw buffer\n");
+        return;
+    }
+    lv_display_set_color_format(lv_display, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_flush_cb(lv_display, lv_flush_cb_8b);
+    lv_display_set_buffers(lv_display, lv_buf, NULL, lvgl_buffer_pixels * sizeof(uint16_t), LV_DISPLAY_RENDER_MODE_PARTIAL);
+#else
     lv_display_set_color_format(lv_display, LV_COLOR_FORMAT_RGB332);
     lv_display_set_flush_cb(lv_display, lv_flush_cb_8b);
     lv_display_set_buffers(lv_display, bg, NULL, (H_RES+OFFSCREEN_X_PX)*(V_RES+OFFSCREEN_Y_PX), LV_DISPLAY_RENDER_MODE_DIRECT);
+#endif
     
     lv_tick_set_cb(u32_ticks_ms);
 

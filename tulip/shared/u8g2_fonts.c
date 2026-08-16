@@ -155,8 +155,10 @@ uint8_t u8g2_GetFontCapitalAHeight(u8g2_font_t *u8g2)
 }
 
 uint8_t u8g2_a_height(uint8_t font_no) {
-    u8g2_font_t ufont;
-    ufont.font = NULL; 
+    // Zero first: u8g2_SetFont() only fills font_info when the font pointer
+    // actually changes, so a NULL entry in tulip_fonts would leave it unset.
+    u8g2_font_t ufont = {0};
+    ufont.font = NULL;
     ufont.font_decode.fg_color = 1; 
     ufont.font_decode.is_transparent = 1; 
     ufont.font_decode.dir = 0;
@@ -166,8 +168,10 @@ uint8_t u8g2_a_height(uint8_t font_no) {
 }
 
 uint8_t u8g2_glyph_width(uint8_t font_no, uint16_t glyph) {
-    u8g2_font_t ufont;
-    ufont.font = NULL; 
+    // Zero first: u8g2_SetFont() only fills font_info when the font pointer
+    // actually changes, so a NULL entry in tulip_fonts would leave it unset.
+    u8g2_font_t ufont = {0};
+    ufont.font = NULL;
     ufont.font_decode.fg_color = 1; 
     ufont.font_decode.is_transparent = 1; 
     ufont.font_decode.dir = 0;
@@ -177,8 +181,10 @@ uint8_t u8g2_glyph_width(uint8_t font_no, uint16_t glyph) {
 }
 
 uint8_t u8g2_glyph_height(uint8_t font_no, uint16_t glyph) {
-    u8g2_font_t ufont;
-    ufont.font = NULL; 
+    // Zero first: u8g2_SetFont() only fills font_info when the font pointer
+    // actually changes, so a NULL entry in tulip_fonts would leave it unset.
+    u8g2_font_t ufont = {0};
+    ufont.font = NULL;
     ufont.font_decode.fg_color = 1; 
     ufont.font_decode.is_transparent = 1; 
     ufont.font_decode.dir = 0;
