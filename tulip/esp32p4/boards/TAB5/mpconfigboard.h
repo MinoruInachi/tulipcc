@@ -2,7 +2,7 @@
 
 void tab5_board_startup(void);
 
-#define MICROPY_HW_BOARD_NAME               "Tab5"
+#define MICROPY_HW_BOARD_NAME               "TulipCC"
 #define MICROPY_HW_MCU_NAME                 "ESP32P4"
 
 #define MICROPY_PY_MACHINE_DAC              (0)
