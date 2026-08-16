@@ -7,6 +7,9 @@
 
 #include "esp_timer.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "../../../../amy/src/amy.h"
 
 #include "../../../shared/display.h"
@@ -1408,10 +1411,108 @@ static mp_obj_t tulip_boot_status(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_boot_status_obj, 0, 1, tulip_boot_status);
 
+// tulip.cpu(). The ESP32-S3 version (compute_cpu_usage() in tulip/esp32s3/main.c)
+// walks a hardcoded table of task names taken from tasks.h, and that table does not
+// describe this board: Tab5 runs tab5_audio, touch_task and keyboard_task, and has
+// no amy_r_task/amy_fb_task/seq_task at all, because AMY renders inside the audio
+// task and the sequencer is an AMY callback (see tsequencer_tab5.c). Rather than
+// keep a second list in sync, key off the task handles and report whatever is
+// actually scheduled.
+//
+// ulRunTimeCounter is a free-running total, so a reading is only meaningful as a
+// difference against the previous one -- the first call after boot therefore has
+// nothing to report and returns 0.
+#define TAB5_CPU_MAX_TASKS 48
+
+typedef struct {
+    TaskHandle_t handle;
+    uint32_t counter;
+} tab5_task_time_t;
+
+static tab5_task_time_t s_tab5_task_times[TAB5_CPU_MAX_TASKS];
+static size_t s_tab5_task_time_count = 0;
+
+// Run time this task accumulated since the previous tulip.cpu(), remembering the
+// new total. A task first seen now contributes 0: we have no interval for it yet.
+// Tasks that exit leave their slot behind, which only matters if something churns
+// through more than TAB5_CPU_MAX_TASKS of them -- then new tasks read as idle.
+static uint32_t tab5_task_run_time_delta(TaskHandle_t handle, uint32_t counter) {
+    for (size_t i = 0; i < s_tab5_task_time_count; i++) {
+        if (s_tab5_task_times[i].handle == handle) {
+            uint32_t delta = counter - s_tab5_task_times[i].counter;
+            s_tab5_task_times[i].counter = counter;
+            return delta;
+        }
+    }
+    if (s_tab5_task_time_count < TAB5_CPU_MAX_TASKS) {
+        s_tab5_task_times[s_tab5_task_time_count].handle = handle;
+        s_tab5_task_times[s_tab5_task_time_count].counter = counter;
+        s_tab5_task_time_count++;
+    }
+    return 0;
+}
+
+static mp_obj_t tulip_cpu(size_t n_args, const mp_obj_t *args) {
+    bool debug = (n_args > 0) && mp_obj_is_true(args[0]);
+
+    UBaseType_t capacity = uxTaskGetNumberOfTasks();
+    TaskStatus_t *status = m_new(TaskStatus_t, capacity);
+    uint32_t *deltas = m_new(uint32_t, capacity);
+    UBaseType_t count = uxTaskGetSystemState(status, capacity, NULL);
+
+    // Both idle tasks are named IDLEn. Everything else is work, including the
+    // ESP-Hosted and lwIP tasks that only exist once wifi is up.
+    uint32_t busy = 0;
+    uint32_t idle = 0;
+    for (UBaseType_t i = 0; i < count; i++) {
+        deltas[i] = tab5_task_run_time_delta(status[i].xHandle, status[i].ulRunTimeCounter);
+        if (strncmp(status[i].pcTaskName, "IDLE", 4) == 0) {
+            idle += deltas[i];
+        } else {
+            busy += deltas[i];
+        }
+    }
+
+    uint32_t total = busy + idle;
+    // Two cores, so "100%" here means both were busy for the whole interval.
+    float usage = total ? ((float)busy / (float)total) * 100.0f : 0.0f;
+
+    if (debug) {
+        // Same detail as the ESP32-S3's tulip.cpu(1), but through mp_printf rather
+        // than printf. The board's plain stdout is buffered and gets picked up by
+        // Tulip's on-screen REPL, so a printf here reaches the panel and never the
+        // UART; mp_plat_print is where Python's own print() goes, which means this
+        // lands wherever the caller's REPL actually is.
+        mp_printf(&mp_plat_print, "------ CPU usage since the last tulip.cpu() call (%u tasks)\n",
+                  (unsigned)count);
+        for (UBaseType_t i = 0; i < count; i++) {
+            mp_printf(&mp_plat_print, "%-16s %10u  %6.2f%%  stack free %u\n",
+                      status[i].pcTaskName,
+                      (unsigned)deltas[i],
+                      total ? ((double)deltas[i] / (double)total) * 100.0 : 0.0,
+                      (unsigned)status[i].usStackHighWaterMark);
+        }
+        mp_printf(&mp_plat_print, "------ busy %6.2f%%   idle %6.2f%%\n",
+                  (double)usage, 100.0 - (double)usage);
+        mp_printf(&mp_plat_print, "SPIRAM free %u (largest block %u)\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+        mp_printf(&mp_plat_print, "internal free %u (largest block %u)\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    }
+
+    m_del(uint32_t, deltas, capacity);
+    m_del(TaskStatus_t, status, capacity);
+    return mp_obj_new_float_from_f(usage);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_cpu_obj, 0, 1, tulip_cpu);
+
 static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR__tulip) },
     { MP_ROM_QSTR(MP_QSTR_board), MP_ROM_PTR(&tulip_board_obj) },
     { MP_ROM_QSTR(MP_QSTR_ticks_ms), MP_ROM_PTR(&tulip_ticks_ms_obj) },
+    { MP_ROM_QSTR(MP_QSTR_cpu), MP_ROM_PTR(&tulip_cpu_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_ticks_ms), MP_ROM_PTR(&tulip_amy_ticks_ms_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_sequencer_ticks), MP_ROM_PTR(&tulip_amy_sequencer_ticks_obj) },
     { MP_ROM_QSTR(MP_QSTR_seq_ticks), MP_ROM_PTR(&tulip_seq_ticks_obj) },

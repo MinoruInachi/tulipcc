@@ -29,6 +29,13 @@ CONFIG_BSP_LCD_DPI_BUFFER_NUMS=2
 
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_FREERTOS_HZ=1000
+# What tulip.cpu() reads. Both default to n in ESP-IDF, and TAB5 gets the IDF
+# defaults because its mpconfigboard.cmake points SDKCONFIG_DEFAULTS at this file
+# alone -- Tulip's ESP32-S3 boards turn the same thing on in boards/sdkconfig.tulip.
+# GENERATE_RUN_TIME_STATS is what fills in TaskStatus_t.ulRunTimeCounter, and it
+# selects USE_TRACE_FACILITY, without which uxTaskGetSystemState() does not exist
+# at all. The cost is an esp_timer read per context switch plus a few bytes per TCB.
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS=2
 CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 CONFIG_ESP32P4_REV_MIN_1=y
