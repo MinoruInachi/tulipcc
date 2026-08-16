@@ -24,6 +24,8 @@ If you've got an unflashed Tulip, just finished a DIY, or somehow messed up the 
 
 **If you made your own Tulip** (a DIY `N16R8`/`N32R8` board, or a [T-Deck](../tulip/tdeck/README.md)): these are developer-only boards now, so we no longer ship prebuilt binaries for them. [Build and flash the firmware yourself](#compile-and-flash-tulipcc-for-esp32-s3) for your board — it's quick and documented below.
 
+The [M5Stack Tab5](tab5_porting.md) is not supported by the current TulipCC ESP32-S3 build. It uses an ESP32-P4 main SoC and a 1280×720 MIPI-DSI display with an integrated ST7123/ST7121 touch stack, so it needs a separate esp32p4 bring-up before it can run Tulip natively.
+
 Connect your Tulip to your computer with a USB cable. **Note**: Many Tulip-capable boards have two USB ports, one called UART, TTL or Serial, and one called NATIVE, JTAG, or Host. You should use the UART one if available and try the NATIVE one if not. For example, on the Tulip CC, you can use either USB port, but if you use the NATIVE port you have to hold down the BOOT button while attaching the USB cable. We recommend flashing using the top UART USB connector. On the T-Deck, you only have access to the NATIVE port, and you may need to hold down the BOOT button (the trackball button) while you turn it on. If you've tried both ports and the following commands can't find a serial port to flash to, ensure that you've [installed a driver.](https://github.com/WCHSoftGroup/ch34xser_macos)
 
 Download the `.bin` for your board and use [`esptool.py`](https://docs.espressif.com/projects/esptool/en/latest/esp32/) or any other ESP32-flasher tool to write the entire `.bin` to flash:

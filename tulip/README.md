@@ -5,6 +5,7 @@ amyboard - headless Tulip for the AMYboard
 amyboardweb - web version of amyboard
 amyrepl - micropython build for AMY-included python with no display or tulip stuff
 esp32s3 - all TulipCC hardware specific files for the supported boards 
+esp32p4 - future TulipCC hardware support for ESP32-P4 boards such as M5Stack Tab5
 fs/tulip - the filesystem that gets flashed as /sys on first run -- examples, images, etc
 fs/amyboard - same but for AMYboard
 linux - all Tulip Desktop for Linux specific files - note, NOT supported by us
