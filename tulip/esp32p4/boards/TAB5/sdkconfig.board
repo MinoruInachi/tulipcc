@@ -1,0 +1,131 @@
+# Tab5 ESP32-P4 board configuration.
+
+# Build for speed, not for debugging. The default (-Og) costs roughly a third of
+# the frame time in the display compositor and in AMY. Assertions stay on but
+# drop their file/line strings, so a failed assert still aborts with a backtrace.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+# CONFIG_COMPILER_OPTIMIZATION_DEBUG is not set
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+# CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE is not set
+
+# MicroPython owns core 1: mp_task runs unbounded Python at ESP_TASK_PRIO_MIN + 1,
+# so core 1's idle task legitimately never runs while a script (or a long print)
+# is executing, and the idle-task watchdog fires every 5 seconds. Upstream
+# MicroPython turns this check off for exactly that reason, in
+# micropython/ports/esp32/boards/sdkconfig.base -- which Tulip's ESP32-S3 boards
+# inherit through their SDKCONFIG_DEFAULTS list, and which TAB5 does not, because
+# its mpconfigboard.cmake sets SDKCONFIG_DEFAULTS to this file alone. That is the
+# whole reason "IDLE1 did not reset the watchdog" happens here and not on Tulip CC.
+#
+# Core 0's check stays on deliberately: nothing there is allowed to run forever
+# (the audio task blocks in the codec write, the display task on VSYNC, touch on
+# its notify), so IDLE0 starving is a real fault worth reporting.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+# Two DSI frame buffers: the display bridge composes into the off-screen one and
+# hands it over by pointer, so esp_lcd_panel_draw_bitmap() stops memcpy'ing
+# 1.8 MB per frame and the panel stops tearing. Costs one extra 1.8 MB of PSRAM.
+CONFIG_BSP_LCD_DPI_BUFFER_NUMS=2
+
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS=2
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_1=y
+CONFIG_ESP32P4_REV_MIN_FULL=1
+CONFIG_BSP_ERROR_CHECK=y
+# The same LV_CONF_SKIP divergence as the theme settings below: lv_conf.h builds
+# montserrat 8/12/18/24/36 and unscii 8/16, but Kconfig only defaults to 12/14.
+# Apps that ask for one of the others -- Wordpad wants font_montserrat_24 -- died
+# with AttributeError on TAB5 while working everywhere else. Build the same set.
+CONFIG_LV_FONT_MONTSERRAT_8=y
+CONFIG_LV_FONT_MONTSERRAT_12=y
+CONFIG_LV_FONT_MONTSERRAT_18=y
+CONFIG_LV_FONT_MONTSERRAT_24=y
+CONFIG_LV_FONT_MONTSERRAT_36=y
+CONFIG_LV_FONT_UNSCII_8=y
+CONFIG_LV_FONT_UNSCII_16=y
+# Match the LVGL look of every other Tulip target. TAB5 is built with
+# LV_CONF_SKIP, so it takes its LVGL settings from Kconfig instead of
+# lv_binding_micropython_tulip/lv_conf.h -- and the Kconfig defaults are not
+# the same file's values. lv_conf.h sets LV_THEME_DEFAULT_DARK 1,
+# LV_THEME_DEFAULT_GROW 0 and montserrat_12 as the default font; Kconfig
+# defaults to the light theme, grow-on-press, and montserrat_14. That is why
+# apps built on ui.py (Drums, Voices, Juno-6) came up with white widgets here
+# and dark ones on Tulip CC and the desktop build.
+CONFIG_LV_THEME_DEFAULT_DARK=y
+# CONFIG_LV_THEME_DEFAULT_GROW is not set
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=y
+# CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14 is not set
+# LVGL memory belongs to the MicroPython GC, as it does on every other Tulip
+# target through LV_USE_STDLIB_MALLOC = LV_STDLIB_MICROPYTHON. Kconfig has no
+# MicroPython option, so TAB5 selects custom and reimplements it in
+# lv_mem_tab5.c, and hands LVGL's global state to the GC via lv_global_tab5.h.
+# Both halves are required: the allocator alone would let the collector free
+# live widgets, and the global alone would leave the widget wrappers
+# unreachable. That second failure is why touching a Drums switch panicked in
+# get_native_obj() -- LVGL called back through a collected mp_lv_obj_t.
+# CONFIG_LV_USE_BUILTIN_MALLOC is not set
+CONFIG_LV_USE_CUSTOM_MALLOC=y
+CONFIG_LV_ENABLE_GLOBAL_CUSTOM=y
+CONFIG_LV_GLOBAL_CUSTOM_INCLUDE="lv_global_tab5.h"
+
+# External USB hubs on the USB-A connector. Off by default in the host library.
+# The connector's 5V is a single load switch off the board's own rail, so a
+# bus-powered device that wants more than it can give (a KORG microKEY-37 does
+# not even light its power LED) has to come in through a self-powered hub --
+# which only works if the host library knows how to enumerate one.
+CONFIG_USB_HOST_HUBS_SUPPORTED=y
+
+# Enumeration timing is deliberately left at the ESP-IDF defaults.
+#
+# A KORG microKEY-37 loses its first EP0 control transfer ("USBH: Dev 0 EP 0
+# Error") on most connects here, and the obvious guess -- that it is a settling
+# problem and wants more time -- was measured and is wrong. Debounce 250->500,
+# reset hold 30->50, reset recovery 30->100 and SetAddress recovery 10->50 were
+# all tried together: the retry count per boot did not move (still 1-3 of them),
+# so the extra delay bought nothing and was taken back out. What makes the port
+# reliable is the VBUS-cycle retry in usb_host_tab5.c, not the timing.
+
+# ESP32-C6 ESP-Hosted SDIO wiring on Tab5.
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D3_4BIT_BUS_SLOT_1=8
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D2_4BIT_BUS_SLOT_1=9
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D1_4BIT_BUS_SLOT_1=10
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D0_SLOT_1=11
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_CLK_SLOT_1=12
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_CMD_SLOT_1=13
+CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE=15
+
+# Wi-Fi association latency. Measured on Tab5, tulip.wifi() spent ~6s: ~2.6s of
+# scan+auth on the C6 and ~2.4s in DHCP. Almost all of the DHCP half is lwIP's
+# post-OFFER ARP probe, which waits out two 500ms coarse-timer ticks per try
+# before accepting an address the router already reserved for us. Turning it off
+# is the standard trade on a single-DHCP-server home/office LAN. This is a
+# Kconfig choice, so the ARP option has to be displaced by picking another
+# member -- setting LWIP_DHCP_DOES_ARP_CHECK=n on its own is silently ignored.
+CONFIG_LWIP_DHCP_DOES_NOT_CHECK_OFFERED_IP=y
+# Try the previously leased address first on reconnect, which skips the
+# DISCOVER/OFFER round-trip when the lease is still ours.
+CONFIG_LWIP_DHCP_RESTORE_LAST_IP=y
+
+# Align image header with Tab5 hardware flash size.
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions-8MiBplus-ota.csv"
+
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MEMTEST=
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y
+CONFIG_MBEDTLS_PLATFORM_TIME_ALT=y
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=50768
+
+# ESP32-P4 has no ULP coprocessor.
+CONFIG_SOC_ULP_SUPPORTED=n
+CONFIG_ULP_COPROC_ENABLED=n
+CONFIG_ULP_COPROC_TYPE_FSM=n
+
+# Keep new I2C slave API enabled and silence legacy conflict checks.
+CONFIG_I2C_SKIP_LEGACY_CONFLICT_CHECK=y
+CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2=y

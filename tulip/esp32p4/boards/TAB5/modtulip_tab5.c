@@ -1,0 +1,1478 @@
+#include "py/runtime.h"
+#include "py/nlr.h"
+#include "py/objstr.h"
+#include "mphalport.h"
+#include "genhdr/mpversion.h"
+#include <string.h>
+
+#include "esp_timer.h"
+#include "../../../../amy/src/amy.h"
+
+#include "../../../shared/display.h"
+#include "../../../shared/bresenham.h"
+#include "../../../shared/keyscan.h"
+#include "../../../shared/lodepng.h"
+#include "../../../shared/tulip_helpers.h"
+#include "display_tab5.h"
+#include "audio_tab5.h"
+
+#include "keyboard_tab5.h"
+#include "touch_tab5.h"
+#include "modtulip_tab5.h"
+#include "tsequencer_tab5.h"
+#include "power_tab5.h"
+#include "usb_host_tab5.h"
+
+extern int16_t lvgl_is_repl;
+
+static bool s_tab5_lvgl_initialized = false;
+static bool s_tab5_lvgl_running = false;
+static volatile uint32_t s_tab5_frame_callbacks = 0;
+static volatile uint32_t s_tab5_lvgl_handlers = 0;
+
+MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_process_defers_cb);
+MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_frame_cb);
+MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_frame_arg);
+MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_touch_cb);
+MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_midi_cb);
+
+#define s_tab5_process_defers_cb MP_STATE_PORT(tab5_process_defers_cb)
+#define s_tab5_frame_cb MP_STATE_PORT(tab5_frame_cb)
+#define s_tab5_frame_arg MP_STATE_PORT(tab5_frame_arg)
+#define s_tab5_touch_cb MP_STATE_PORT(tab5_touch_cb)
+#define s_tab5_midi_cb MP_STATE_PORT(tab5_midi_cb)
+
+static void tab5_process_python_defers(void) {
+    nlr_buf_t nlr;
+    if (nlr_push(&nlr) == 0) {
+        if (s_tab5_process_defers_cb == MP_OBJ_NULL) {
+            mp_obj_t module_name = mp_obj_new_str("tulip", 5);
+            mp_obj_t callback_name = mp_obj_new_str("_process_defers", 15);
+            qstr q_module = mp_obj_str_get_qstr(module_name);
+            qstr q_callback = mp_obj_str_get_qstr(callback_name);
+            mp_obj_t module = mp_import_name(q_module, mp_const_none, MP_OBJ_NEW_SMALL_INT(0));
+            s_tab5_process_defers_cb = mp_load_attr(module, q_callback);
+        }
+        mp_call_function_0(s_tab5_process_defers_cb);
+        nlr_pop();
+    } else {
+        s_tab5_process_defers_cb = MP_OBJ_NULL;
+        mp_obj_print_exception(&mp_plat_print, MP_OBJ_FROM_PTR(nlr.ret_val));
+    }
+}
+
+static mp_obj_t tab5_lv_task_handler(mp_obj_t ignored) {
+    (void)ignored;
+    s_tab5_lvgl_handlers++;
+    lv_task_handler();
+    tab5_process_python_defers();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tab5_lv_task_handler_obj, tab5_lv_task_handler);
+
+void tulip_frame_isr(void) {
+    s_tab5_frame_callbacks++;
+    if (s_tab5_lvgl_running &&
+        mp_sched_schedule(MP_OBJ_FROM_PTR(&tab5_lv_task_handler_obj), mp_const_none)) {
+        mp_hal_wake_main_task();
+    }
+    if (s_tab5_frame_cb != MP_OBJ_NULL && s_tab5_frame_cb != mp_const_none &&
+        mp_sched_schedule(s_tab5_frame_cb, s_tab5_frame_arg)) {
+        mp_hal_wake_main_task();
+    }
+}
+
+void tab5_schedule_touch_callback(uint8_t up) {
+    if (s_tab5_touch_cb != MP_OBJ_NULL && s_tab5_touch_cb != mp_const_none &&
+        mp_sched_schedule(s_tab5_touch_cb, mp_obj_new_int(up))) {
+        mp_hal_wake_main_task();
+    }
+}
+
+static mp_obj_t tulip_board(void) {
+    return mp_obj_new_str("TAB5", 4);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_board_obj, tulip_board);
+
+static mp_obj_t tulip_ticks_ms(void) {
+    return mp_obj_new_int_from_ull((uint64_t)esp_timer_get_time() / 1000ULL);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_ticks_ms_obj, tulip_ticks_ms);
+
+static mp_obj_t tulip_amy_ticks_ms(void) {
+    return mp_obj_new_int_from_uint(amy_sysclock());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_amy_ticks_ms_obj, tulip_amy_ticks_ms);
+
+// The rest of the AMY surface the `amy` Python package binds to on MicroPython.
+// These are not optional extras: amy/__init__.py assigns them in one block, so
+// a single missing name silently disables ticks_ms(), get_synth_commands() and
+// everything after it.
+static mp_obj_t tulip_amy_get_synth_commands(size_t n_args, const mp_obj_t *args) {
+    char cmd[MAX_MESSAGE_LEN];
+    void *state = NULL;
+    int synth = mp_obj_get_int(args[0]);
+    bool include_fx = true;
+    if (n_args > 1) include_fx = mp_obj_get_int(args[1]);
+    mp_obj_t list = mp_obj_new_list(0, NULL);
+    do {
+        state = yield_synth_commands(synth, cmd, MAX_MESSAGE_LEN, include_fx, state);
+        int len = strlen(cmd);
+        if (len) mp_obj_list_append(list, mp_obj_new_str(cmd, len));
+    } while (state != NULL);
+    return list;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_amy_get_synth_commands_obj, 1, 2, tulip_amy_get_synth_commands);
+
+static mp_obj_t tulip_amy_render_load(void) {
+    return mp_obj_new_float(amy_get_render_load());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_amy_render_load_obj, tulip_amy_render_load);
+
+static mp_obj_t tulip_amy_set_render_load_threshold(mp_obj_t threshold_obj) {
+    amy_set_render_load_threshold(mp_obj_get_float(threshold_obj));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tulip_amy_set_render_load_threshold_obj, tulip_amy_set_render_load_threshold);
+
+static mp_obj_t tulip_amy_send(mp_obj_t message_obj) {
+    if (!tab5_audio_ready()) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("AMY audio is not ready"));
+    }
+    amy_add_message((char *)mp_obj_str_get_str(message_obj));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tulip_amy_send_obj, tulip_amy_send);
+
+static mp_obj_t tulip_midi_callback(size_t n_args, const mp_obj_t *args) {
+    s_tab5_midi_cb = n_args == 0 ? mp_const_none : args[0];
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_midi_callback_obj, 0, 1, tulip_midi_callback);
+
+/*
+ * MIDI in, from AMY to Python.
+ *
+ * The other targets get this from shared/amy_connector.c, which TAB5 does not
+ * build (it is written around the ESP32-S3's MIDI UART pins). The queue below is
+ * the same shape and depth, so midi.py behaves identically: tulip_amy_midi_hook()
+ * is registered as AMY's external MIDI input hook, drops each message into the
+ * ring, and schedules the Python callback midi.py installed with
+ * tulip.midi_callback(). Sysex takes the separate buffer, and the callback's
+ * argument says which of the two to read -- True for sysex_in(), False for
+ * midi_in(), exactly as amy_connector.c does it.
+ *
+ * The hook runs on the USB host task, so it may only touch the queue and call
+ * mp_sched_schedule(); everything else waits for the scheduled callback.
+ */
+#define TAB5_MIDI_QUEUE_DEPTH 1024
+#define TAB5_MAX_MIDI_BYTES_PER_MESSAGE 3
+
+static uint8_t s_last_midi[TAB5_MIDI_QUEUE_DEPTH][TAB5_MAX_MIDI_BYTES_PER_MESSAGE];
+static uint8_t s_last_midi_len[TAB5_MIDI_QUEUE_DEPTH];
+static volatile int16_t s_midi_queue_head = 0;
+static volatile int16_t s_midi_queue_tail = 0;
+
+static uint8_t s_sysex_in[MAX_MESSAGE_LEN + 2];
+static volatile uint16_t s_sysex_in_len = 0;
+
+// midi_msg_handler() is AMY's CC-mapping dispatcher (src/midi_mappings.c).
+extern void midi_msg_handler(uint8_t *bytes, uint16_t len, uint8_t is_sysex, uint32_t time);
+
+void tulip_amy_midi_hook(uint8_t *data, uint16_t len, uint8_t is_sysex) {
+    uint32_t time;
+    AMY_UNSET(time);
+    midi_msg_handler(data, len, is_sysex, time);
+
+    if (is_sysex) {
+        // Some transports strip the F0/F7 wrapper; put it back so Python always
+        // sees a complete sysex message.
+        uint16_t c = 0;
+        if (len > 0 && data[0] != 0xf0 && c < sizeof(s_sysex_in)) {
+            s_sysex_in[c++] = 0xf0;
+        }
+        for (uint16_t i = 0; i < len && c < sizeof(s_sysex_in); i++) {
+            s_sysex_in[c++] = data[i];
+        }
+        if (c > 0 && s_sysex_in[c - 1] != 0xf7 && c < sizeof(s_sysex_in)) {
+            s_sysex_in[c++] = 0xf7;
+        }
+        s_sysex_in_len = c;
+        if (s_tab5_midi_cb != MP_OBJ_NULL && s_tab5_midi_cb != mp_const_none) {
+            mp_sched_schedule(s_tab5_midi_cb, mp_const_true);
+        }
+        return;
+    }
+
+    const int16_t tail = s_midi_queue_tail;
+    for (uint16_t i = 0; i < len && i < TAB5_MAX_MIDI_BYTES_PER_MESSAGE; i++) {
+        s_last_midi[tail][i] = data[i];
+    }
+    s_last_midi_len[tail] = (len > TAB5_MAX_MIDI_BYTES_PER_MESSAGE)
+        ? TAB5_MAX_MIDI_BYTES_PER_MESSAGE : (uint8_t)len;
+    s_midi_queue_tail = (int16_t)((tail + 1) % TAB5_MIDI_QUEUE_DEPTH);
+    if (s_midi_queue_tail == s_midi_queue_head) {
+        // Wrapped: drop the oldest rather than the newest.
+        s_midi_queue_head = (int16_t)((s_midi_queue_head + 1) % TAB5_MIDI_QUEUE_DEPTH);
+    }
+
+    if (s_tab5_midi_cb != MP_OBJ_NULL && s_tab5_midi_cb != mp_const_none) {
+        mp_sched_schedule(s_tab5_midi_cb, mp_const_false);
+    }
+}
+
+static mp_obj_t tulip_midi_in(void) {
+    if (s_midi_queue_head == s_midi_queue_tail) {
+        return mp_const_none;
+    }
+    const int16_t prev_head = s_midi_queue_head;
+    s_midi_queue_head = (int16_t)((s_midi_queue_head + 1) % TAB5_MIDI_QUEUE_DEPTH);
+    return mp_obj_new_bytes(s_last_midi[prev_head], s_last_midi_len[prev_head]);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_midi_in_obj, tulip_midi_in);
+
+static mp_obj_t tulip_sysex_in(void) {
+    if (s_sysex_in_len == 0) {
+        return mp_const_none;
+    }
+    mp_obj_t bytes = mp_obj_new_bytes(s_sysex_in, s_sysex_in_len);
+    s_sysex_in_len = 0;
+    return bytes;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_sysex_in_obj, tulip_sysex_in);
+
+static mp_obj_t tulip_midi_out(mp_obj_t data_obj) {
+    mp_buffer_info_t bufinfo;
+    if (mp_get_buffer(data_obj, &bufinfo, MP_BUFFER_READ)) {
+        send_usb_midi_out((uint8_t *)bufinfo.buf, (uint16_t)bufinfo.len);
+        return mp_const_none;
+    }
+
+    size_t len;
+    mp_obj_t *items;
+    mp_obj_get_array(data_obj, &len, &items);
+    if (len == 0) {
+        return mp_const_none;
+    }
+    uint8_t *bytes = m_new(uint8_t, len);
+    for (size_t i = 0; i < len; i++) {
+        bytes[i] = (uint8_t)mp_obj_get_int(items[i]);
+    }
+    send_usb_midi_out(bytes, (uint16_t)len);
+    m_del(uint8_t, bytes, len);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tulip_midi_out_obj, tulip_midi_out);
+
+// Feed bytes to AMY as if they had arrived over MIDI, without echoing them back
+// out the USB port. midi.py uses this for its own note generation.
+static mp_obj_t tulip_midi_local(mp_obj_t data_obj) {
+    mp_buffer_info_t bufinfo;
+    if (mp_get_buffer(data_obj, &bufinfo, MP_BUFFER_READ)) {
+        convert_midi_bytes_to_messages((uint8_t *)bufinfo.buf, bufinfo.len, 0);
+        return mp_const_none;
+    }
+
+    size_t len;
+    mp_obj_t *items;
+    mp_obj_get_array(data_obj, &len, &items);
+    if (len == 0) {
+        return mp_const_none;
+    }
+    uint8_t *bytes = m_new(uint8_t, len);
+    for (size_t i = 0; i < len; i++) {
+        bytes[i] = (uint8_t)mp_obj_get_int(items[i]);
+    }
+    convert_midi_bytes_to_messages(bytes, len, 0);
+    m_del(uint8_t, bytes, len);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tulip_midi_local_obj, tulip_midi_local);
+
+static mp_obj_t tulip_build_strings(void) {
+    mp_obj_t tuple[] = {
+        mp_obj_new_str(MICROPY_GIT_TAG, strlen(MICROPY_GIT_TAG)),
+        mp_obj_new_str(MICROPY_GIT_HASH, strlen(MICROPY_GIT_HASH)),
+        mp_obj_new_str(MICROPY_BUILD_DATE, strlen(MICROPY_BUILD_DATE)),
+    };
+    return mp_obj_new_tuple(MP_ARRAY_SIZE(tuple), tuple);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_build_strings_obj, tulip_build_strings);
+
+static mp_obj_t tulip_screen_size(void) {
+    mp_obj_t tuple[2];
+    tuple[0] = mp_obj_new_int(H_RES);
+    tuple[1] = mp_obj_new_int(V_RES);
+    return mp_obj_new_tuple(2, tuple);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_screen_size_obj, tulip_screen_size);
+
+static void tab5_require_bg(void) {
+    if (bg == NULL) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("display is not ready"));
+    }
+}
+
+static void tab5_require_xy(int x, int y) {
+    if (x < 0 || x >= H_RES + OFFSCREEN_X_PX || y < 0 || y >= V_RES + OFFSCREEN_Y_PX) {
+        mp_raise_ValueError(MP_ERROR_TEXT("coordinates out of range"));
+    }
+}
+
+static mp_obj_t tulip_bg_pixel(size_t n_args, const mp_obj_t *args) {
+    tab5_require_bg();
+    int x = mp_obj_get_int(args[0]);
+    int y = mp_obj_get_int(args[1]);
+    tab5_require_xy(x, y);
+    if (n_args == 3) {
+        display_set_bg_pixel_pal((uint16_t)x, (uint16_t)y, (uint8_t)mp_obj_get_int(args[2]));
+        return mp_const_none;
+    }
+    return mp_obj_new_int(display_get_bg_pixel_pal((uint16_t)x, (uint16_t)y));
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_pixel_obj, 2, 3, tulip_bg_pixel);
+
+static mp_obj_t tulip_bg_clear(size_t n_args, const mp_obj_t *args) {
+    tab5_require_bg();
+    uint8_t color = n_args == 0 ? bg_pal_color : (uint8_t)mp_obj_get_int(args[0]);
+    memset(bg, color, (H_RES + OFFSCREEN_X_PX) * (V_RES + OFFSCREEN_Y_PX));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_clear_obj, 0, 1, tulip_bg_clear);
+
+static mp_obj_t tulip_bg_bitmap(size_t n_args, const mp_obj_t *args) {
+    tab5_require_bg();
+    int x = mp_obj_get_int(args[0]);
+    int y = mp_obj_get_int(args[1]);
+    int w = mp_obj_get_int(args[2]);
+    int h = mp_obj_get_int(args[3]);
+    if (w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > H_RES + OFFSCREEN_X_PX ||
+        y + h > V_RES + OFFSCREEN_Y_PX) {
+        mp_raise_ValueError(MP_ERROR_TEXT("bitmap rectangle out of range"));
+    }
+    size_t length = (size_t)w * (size_t)h;
+    if (n_args == 5) {
+        mp_buffer_info_t buffer;
+        mp_get_buffer_raise(args[4], &buffer, MP_BUFFER_READ);
+        if (buffer.len != length) {
+            mp_raise_ValueError(MP_ERROR_TEXT("bitmap length does not match rectangle"));
+        }
+        display_set_bg_bitmap_raw(x, y, w, h, buffer.buf);
+        return mp_const_none;
+    }
+    vstr_t result;
+    vstr_init_len(&result, length);
+    display_get_bg_bitmap_raw(x, y, w, h, (uint8_t *)result.buf);
+    return mp_obj_new_bytes_from_vstr(&result);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_bitmap_obj, 4, 5, tulip_bg_bitmap);
+
+static mp_obj_t tulip_bg_blit(size_t n_args, const mp_obj_t *args) {
+    uint16_t x = mp_obj_get_int(args[0]);
+    uint16_t y = mp_obj_get_int(args[1]);
+    uint16_t w = mp_obj_get_int(args[2]);
+    uint16_t h = mp_obj_get_int(args[3]);
+    uint16_t x1 = mp_obj_get_int(args[4]);
+    uint16_t y1 = mp_obj_get_int(args[5]);
+    if (n_args == 7) {
+        display_bg_bitmap_blit_alpha(x, y, w, h, x1, y1);
+    } else {
+        display_bg_bitmap_blit(x, y, w, h, x1, y1);
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_blit_obj, 6, 7, tulip_bg_blit);
+
+static mp_obj_t tulip_bg_png(size_t n_args, const mp_obj_t *args) {
+    int x = mp_obj_get_int(args[1]);
+    int y = mp_obj_get_int(args[2]);
+    if (x < 0 || y < 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("PNG position out of range"));
+    }
+
+    mp_buffer_info_t png = {0};
+    bool free_png = false;
+    if (mp_obj_is_str(args[0])) {
+        const char *filename = mp_obj_str_get_str(args[0]);
+        int32_t size = file_size(filename);
+        if (size < 0) {
+            mp_raise_OSError(MP_ENOENT);
+        }
+        if (size == 0) {
+            mp_raise_ValueError(MP_ERROR_TEXT("PNG file is empty"));
+        }
+        png.buf = malloc_caps((size_t)size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (png.buf == NULL) {
+            mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("unable to allocate PNG input"));
+        }
+        png.len = (size_t)size;
+        free_png = true;
+        if (read_file(filename, png.buf, size, 1) != (uint32_t)size) {
+            free_caps(png.buf);
+            mp_raise_OSError(MP_EIO);
+        }
+    } else {
+        mp_get_buffer_raise(args[0], &png, MP_BUFFER_READ);
+        if (png.len == 0) {
+            mp_raise_ValueError(MP_ERROR_TEXT("PNG data is empty"));
+        }
+    }
+
+    unsigned char *image = NULL;
+    unsigned width = 0;
+    unsigned height = 0;
+    unsigned error = lodepng_decode32(&image, &width, &height, png.buf, png.len);
+    if (free_png) {
+        free_caps(png.buf);
+    }
+    if (error != 0) {
+        free_caps(image);
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid PNG data"));
+    }
+    if (width == 0 || height == 0 || width > UINT16_MAX || height > UINT16_MAX) {
+        free_caps(image);
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid PNG dimensions"));
+    }
+
+    display_set_bg_bitmap_rgba(x, y, width, height, image);
+    free_caps(image);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_png_obj, 3, 3, tulip_bg_png);
+
+static mp_obj_t tulip_bg_bezier(size_t n_args, const mp_obj_t *args) {
+    plotQuadBezier(mp_obj_get_int(args[0]), mp_obj_get_int(args[1]),
+                   mp_obj_get_int(args[2]), mp_obj_get_int(args[3]),
+                   mp_obj_get_int(args[4]), mp_obj_get_int(args[5]),
+                   mp_obj_get_int(args[6]));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_bezier_obj, 7, 7, tulip_bg_bezier);
+
+static mp_obj_t tulip_bg_line(size_t n_args, const mp_obj_t *args) {
+    uint16_t width = n_args == 6 ? mp_obj_get_int(args[5]) : 1;
+    drawLine_scanline(mp_obj_get_int(args[0]), mp_obj_get_int(args[1]),
+                      mp_obj_get_int(args[2]), mp_obj_get_int(args[3]),
+                      mp_obj_get_int(args[4]), width);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_line_obj, 5, 6, tulip_bg_line);
+
+static mp_obj_t tulip_bg_roundrect(size_t n_args, const mp_obj_t *args) {
+    int16_t x = mp_obj_get_int(args[0]);
+    int16_t y = mp_obj_get_int(args[1]);
+    int16_t w = mp_obj_get_int(args[2]);
+    int16_t h = mp_obj_get_int(args[3]);
+    int16_t radius = mp_obj_get_int(args[4]);
+    uint8_t color = mp_obj_get_int(args[5]);
+    if (n_args == 7 && mp_obj_is_true(args[6])) fillRoundRect(x, y, w, h, radius, color);
+    else drawRoundRect(x, y, w, h, radius, color);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_roundrect_obj, 6, 7, tulip_bg_roundrect);
+
+static mp_obj_t tulip_bg_rect(size_t n_args, const mp_obj_t *args) {
+    int16_t x = mp_obj_get_int(args[0]);
+    int16_t y = mp_obj_get_int(args[1]);
+    int16_t w = mp_obj_get_int(args[2]);
+    int16_t h = mp_obj_get_int(args[3]);
+    uint8_t color = mp_obj_get_int(args[4]);
+    if (n_args == 6 && mp_obj_is_true(args[5])) fillRect(x, y, w, h, color);
+    else drawRect(x, y, w, h, color);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_rect_obj, 5, 6, tulip_bg_rect);
+
+static mp_obj_t tulip_bg_circle(size_t n_args, const mp_obj_t *args) {
+    int16_t x = mp_obj_get_int(args[0]);
+    int16_t y = mp_obj_get_int(args[1]);
+    int16_t radius = mp_obj_get_int(args[2]);
+    uint8_t color = mp_obj_get_int(args[3]);
+    if (n_args == 5 && mp_obj_is_true(args[4])) fillCircle(x, y, radius, color);
+    else drawCircle(x, y, radius, color);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_circle_obj, 4, 5, tulip_bg_circle);
+
+static mp_obj_t tulip_bg_triangle(size_t n_args, const mp_obj_t *args) {
+    int16_t x0 = mp_obj_get_int(args[0]);
+    int16_t y0 = mp_obj_get_int(args[1]);
+    int16_t x1 = mp_obj_get_int(args[2]);
+    int16_t y1 = mp_obj_get_int(args[3]);
+    int16_t x2 = mp_obj_get_int(args[4]);
+    int16_t y2 = mp_obj_get_int(args[5]);
+    uint8_t color = mp_obj_get_int(args[6]);
+    if (n_args == 8 && mp_obj_is_true(args[7])) fillTriangle(x0, y0, x1, y1, x2, y2, color);
+    else drawTriangle(x0, y0, x1, y1, x2, y2, color);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_triangle_obj, 7, 8, tulip_bg_triangle);
+
+static mp_obj_t tulip_bg_fill(mp_obj_t x, mp_obj_t y, mp_obj_t color) {
+    fill(mp_obj_get_int(x), mp_obj_get_int(y), mp_obj_get_int(color));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_3(tulip_bg_fill_obj, tulip_bg_fill);
+
+static mp_obj_t tulip_bg_str(size_t n_args, const mp_obj_t *args) {
+    const char *text = mp_obj_str_get_str(args[0]);
+    uint16_t x = mp_obj_get_int(args[1]);
+    uint16_t y = mp_obj_get_int(args[2]);
+    uint8_t color = mp_obj_get_int(args[3]);
+    uint8_t font = mp_obj_get_int(args[4]);
+    if (n_args == 7) {
+        return mp_obj_new_int(draw_new_str(text, x, y, color, font,
+                                           mp_obj_get_int(args[5]), mp_obj_get_int(args[6]), 1));
+    }
+    return mp_obj_new_int(draw_new_str(text, x, y, color, font, 0, 0, 0));
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_str_obj, 5, 7, tulip_bg_str);
+
+static void tab5_require_scroll_ready(void) {
+    if (x_offsets == NULL || y_offsets == NULL || x_speeds == NULL || y_speeds == NULL) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("background scroll is not ready"));
+    }
+}
+
+static size_t tab5_scroll_line(mp_obj_t line_obj) {
+    int line = mp_obj_get_int(line_obj);
+    if (line < 0 || line >= V_RES) {
+        mp_raise_ValueError(MP_ERROR_TEXT("background scroll line out of range"));
+    }
+    return (size_t)line;
+}
+
+static int16_t tab5_scroll_offset(mp_obj_t offset_obj, int extent) {
+    int offset = mp_obj_get_int(offset_obj) % extent;
+    return offset < 0 ? offset + extent : offset;
+}
+
+static mp_obj_t tulip_bg_scroll(size_t n_args, const mp_obj_t *args) {
+    tab5_require_scroll_ready();
+    if (n_args == 0) {
+        for (size_t line = 0; line < V_RES; line++) {
+            x_offsets[line] = 0;
+            y_offsets[line] = line;
+            x_speeds[line] = 0;
+            y_speeds[line] = 0;
+        }
+        display_rows_trackable = 1;
+        display_mark_dirty();
+        return mp_const_none;
+    }
+    size_t line = tab5_scroll_line(args[0]);
+    x_offsets[line] = tab5_scroll_offset(args[1], H_RES + OFFSCREEN_X_PX);
+    y_offsets[line] = tab5_scroll_offset(args[2], V_RES + OFFSCREEN_Y_PX);
+    x_speeds[line] = mp_obj_get_int(args[3]);
+    y_speeds[line] = mp_obj_get_int(args[4]);
+    display_mark_rows_untrackable();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_scroll_obj, 0, 5, tulip_bg_scroll);
+
+static mp_obj_t tulip_bg_scroll_x_speed(mp_obj_t line_obj, mp_obj_t speed_obj) {
+    tab5_require_scroll_ready();
+    x_speeds[tab5_scroll_line(line_obj)] = mp_obj_get_int(speed_obj);
+    display_mark_rows_untrackable();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(tulip_bg_scroll_x_speed_obj, tulip_bg_scroll_x_speed);
+
+static mp_obj_t tulip_bg_scroll_y_speed(mp_obj_t line_obj, mp_obj_t speed_obj) {
+    tab5_require_scroll_ready();
+    y_speeds[tab5_scroll_line(line_obj)] = mp_obj_get_int(speed_obj);
+    display_mark_rows_untrackable();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(tulip_bg_scroll_y_speed_obj, tulip_bg_scroll_y_speed);
+
+static mp_obj_t tulip_bg_scroll_x_offset(mp_obj_t line_obj, mp_obj_t offset_obj) {
+    tab5_require_scroll_ready();
+    x_offsets[tab5_scroll_line(line_obj)] = tab5_scroll_offset(offset_obj, H_RES + OFFSCREEN_X_PX);
+    display_mark_rows_untrackable();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(tulip_bg_scroll_x_offset_obj, tulip_bg_scroll_x_offset);
+
+static mp_obj_t tulip_bg_scroll_y_offset(mp_obj_t line_obj, mp_obj_t offset_obj) {
+    tab5_require_scroll_ready();
+    y_offsets[tab5_scroll_line(line_obj)] = tab5_scroll_offset(offset_obj, V_RES + OFFSCREEN_Y_PX);
+    display_mark_rows_untrackable();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(tulip_bg_scroll_y_offset_obj, tulip_bg_scroll_y_offset);
+
+static mp_obj_t tulip_bg_swap(void) {
+    tab5_require_scroll_ready();
+    display_swap();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_bg_swap_obj, tulip_bg_swap);
+
+extern uint8_t spriteno_activated;
+
+static void tab5_require_sprites_ready(void) {
+    if (sprite_ram == NULL || sprite_x_px == NULL || sprite_y_px == NULL ||
+        sprite_w_px == NULL || sprite_h_px == NULL || sprite_vis == NULL ||
+        sprite_mem == NULL || collision_bitfield == NULL) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("sprites are not ready"));
+    }
+}
+
+static size_t tab5_sprite_index(mp_obj_t sprite_obj) {
+    int sprite = mp_obj_get_int(sprite_obj);
+    if (sprite < 0 || sprite >= SPRITES) {
+        mp_raise_ValueError(MP_ERROR_TEXT("sprite index out of range"));
+    }
+    return (size_t)sprite;
+}
+
+static size_t tab5_sprite_mem_pos(mp_obj_t mem_obj, size_t length) {
+    int mem_pos = mp_obj_get_int(mem_obj);
+    if (mem_pos < 0 || (size_t)mem_pos > SPRITE_RAM_BYTES || length > SPRITE_RAM_BYTES - (size_t)mem_pos) {
+        mp_raise_ValueError(MP_ERROR_TEXT("sprite RAM range out of bounds"));
+    }
+    return (size_t)mem_pos;
+}
+
+static mp_obj_t tulip_sprite_bitmap(mp_obj_t data_or_pos, mp_obj_t pos_or_length) {
+    tab5_require_sprites_ready();
+    mp_buffer_info_t bitmap;
+    if (mp_get_buffer(data_or_pos, &bitmap, MP_BUFFER_READ)) {
+        size_t mem_pos = tab5_sprite_mem_pos(pos_or_length, bitmap.len);
+        memcpy(sprite_ram + mem_pos, bitmap.buf, bitmap.len);
+        return mp_obj_new_int_from_uint(bitmap.len);
+    }
+    int length = mp_obj_get_int(pos_or_length);
+    if (length < 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("sprite bitmap length must be non-negative"));
+    }
+    size_t mem_pos = tab5_sprite_mem_pos(data_or_pos, (size_t)length);
+    return mp_obj_new_bytes(sprite_ram + mem_pos, (size_t)length);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(tulip_sprite_bitmap_obj, tulip_sprite_bitmap);
+
+static mp_obj_t tulip_sprite_png(mp_obj_t png_obj, mp_obj_t mem_obj) {
+    tab5_require_sprites_ready();
+    mp_buffer_info_t png = {0};
+    bool free_png = false;
+    if (mp_obj_is_str(png_obj)) {
+        const char *filename = mp_obj_str_get_str(png_obj);
+        int32_t size = file_size(filename);
+        if (size < 0) {
+            mp_raise_OSError(MP_ENOENT);
+        }
+        if (size == 0) {
+            mp_raise_ValueError(MP_ERROR_TEXT("PNG file is empty"));
+        }
+        png.buf = malloc_caps((size_t)size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (png.buf == NULL) {
+            mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("unable to allocate PNG input"));
+        }
+        png.len = (size_t)size;
+        free_png = true;
+        if (read_file(filename, png.buf, size, 1) != (uint32_t)size) {
+            free_caps(png.buf);
+            mp_raise_OSError(MP_EIO);
+        }
+    } else {
+        mp_get_buffer_raise(png_obj, &png, MP_BUFFER_READ);
+        if (png.len == 0) {
+            mp_raise_ValueError(MP_ERROR_TEXT("PNG data is empty"));
+        }
+    }
+
+    unsigned char *image = NULL;
+    unsigned width = 0;
+    unsigned height = 0;
+    unsigned error = lodepng_decode32(&image, &width, &height, png.buf, png.len);
+    if (free_png) {
+        free_caps(png.buf);
+    }
+    if (error != 0) {
+        free_caps(image);
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid PNG data"));
+    }
+    if (width == 0 || height == 0 || width > SIZE_MAX / height) {
+        free_caps(image);
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid sprite dimensions"));
+    }
+
+    size_t pixels = (size_t)width * height;
+    size_t mem_pos;
+    nlr_buf_t nlr;
+    if (nlr_push(&nlr) == 0) {
+        mem_pos = tab5_sprite_mem_pos(mem_obj, pixels);
+        nlr_pop();
+    } else {
+        free_caps(image);
+        nlr_jump(nlr.ret_val);
+    }
+    for (size_t pixel = 0; pixel < pixels; pixel++) {
+        const uint8_t *rgba = image + pixel * 4;
+        sprite_ram[mem_pos + pixel] = rgba[3] == 0 ? ALPHA : color_332(rgba[0], rgba[1], rgba[2]);
+    }
+    free_caps(image);
+
+    mp_obj_t result[] = {
+        mp_obj_new_int_from_uint(width),
+        mp_obj_new_int_from_uint(height),
+        mp_obj_new_int_from_uint(pixels),
+    };
+    return mp_obj_new_tuple(3, result);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(tulip_sprite_png_obj, tulip_sprite_png);
+
+static mp_obj_t tulip_sprite_register(size_t n_args, const mp_obj_t *args) {
+    tab5_require_sprites_ready();
+    if (n_args == 3) {
+        mp_raise_TypeError(MP_ERROR_TEXT("sprite_register needs both width and height"));
+    }
+    size_t sprite = tab5_sprite_index(args[0]);
+    size_t pixels = (size_t)sprite_w_px[sprite] * sprite_h_px[sprite];
+    if (n_args == 4) {
+        int width = mp_obj_get_int(args[2]);
+        int height = mp_obj_get_int(args[3]);
+        if (width <= 0 || height <= 0 || width > H_RES || height > V_RES ||
+            (size_t)width > SPRITE_RAM_BYTES / (size_t)height) {
+            mp_raise_ValueError(MP_ERROR_TEXT("invalid sprite dimensions"));
+        }
+        pixels = (size_t)width * (size_t)height;
+        sprite_w_px[sprite] = width;
+        sprite_h_px[sprite] = height;
+    }
+    size_t mem_pos = tab5_sprite_mem_pos(args[1], pixels);
+    sprite_mem[sprite] = mem_pos;
+    if (spriteno_activated < sprite + 1) {
+        spriteno_activated = sprite + 1;
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_sprite_register_obj, 2, 4, tulip_sprite_register);
+
+static mp_obj_t tulip_sprite_move(mp_obj_t sprite_obj, mp_obj_t x_obj, mp_obj_t y_obj) {
+    tab5_require_sprites_ready();
+    size_t sprite = tab5_sprite_index(sprite_obj);
+    int x = mp_obj_get_int(x_obj);
+    int y = mp_obj_get_int(y_obj);
+    if (x < 0 || x >= H_RES || y < 0 || y >= V_RES) {
+        mp_raise_ValueError(MP_ERROR_TEXT("sprite position out of range"));
+    }
+    sprite_x_px[sprite] = x;
+    sprite_y_px[sprite] = y;
+    display_mark_dirty();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_3(tulip_sprite_move_obj, tulip_sprite_move);
+
+static mp_obj_t tulip_sprite_on(mp_obj_t sprite_obj) {
+    tab5_require_sprites_ready();
+    size_t sprite = tab5_sprite_index(sprite_obj);
+    size_t pixels = (size_t)sprite_w_px[sprite] * sprite_h_px[sprite];
+    if (pixels == 0 || sprite_mem[sprite] > SPRITE_RAM_BYTES ||
+        pixels > SPRITE_RAM_BYTES - sprite_mem[sprite]) {
+        mp_raise_ValueError(MP_ERROR_TEXT("sprite layout is not registered"));
+    }
+    sprite_vis[sprite] = SPRITE_IS_SPRITE;
+    display_mark_dirty();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tulip_sprite_on_obj, tulip_sprite_on);
+
+static mp_obj_t tulip_sprite_off(mp_obj_t sprite_obj) {
+    tab5_require_sprites_ready();
+    sprite_vis[tab5_sprite_index(sprite_obj)] = 0;
+    display_mark_dirty();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tulip_sprite_off_obj, tulip_sprite_off);
+
+static mp_obj_t tulip_sprite_clear(void) {
+    tab5_require_sprites_ready();
+    display_reset_sprites();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_sprite_clear_obj, tulip_sprite_clear);
+
+static mp_obj_t tulip_collisions(void) {
+    tab5_require_sprites_ready();
+    mp_obj_t collisions = mp_obj_new_list(0, NULL);
+    for (uint8_t first = 0; first < SPRITES; first++) {
+        for (uint8_t second = first + 1; second < SPRITES; second++) {
+            if (collide_mask_get(first, second)) {
+                mp_obj_t pair[] = {mp_obj_new_int(first), mp_obj_new_int(second)};
+                mp_obj_list_append(collisions, mp_obj_new_tuple(2, pair));
+            }
+        }
+    }
+    memset(collision_bitfield, 0, 62);
+    return collisions;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_collisions_obj, tulip_collisions);
+
+static mp_obj_t tulip_gpu_reset(void) {
+    display_reset_bg();
+    display_reset_sprites();
+    display_reset_tfb();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_gpu_reset_obj, tulip_gpu_reset);
+
+static mp_obj_t tulip_gpu(void) {
+    return mp_obj_new_float(reported_gpu_usage);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_gpu_obj, tulip_gpu);
+
+static mp_obj_t tulip_fps(void) {
+    return mp_obj_new_float(reported_fps);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_fps_obj, tulip_fps);
+
+static mp_obj_t tulip_brightness(size_t n_args, const mp_obj_t *args) {
+    if (n_args == 0) return mp_obj_new_int(brightness);
+    int amount = mp_obj_get_int(args[0]);
+    if (amount < 1 || amount > 9) {
+        mp_raise_ValueError(MP_ERROR_TEXT("brightness must be between 1 and 9"));
+    }
+    brightness = amount;
+    tab5_display_brightness((uint8_t)amount);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_brightness_obj, 0, 1, tulip_brightness);
+
+static mp_obj_t tulip_int_screenshot(size_t n_args, const mp_obj_t *args) {
+    const char *filename = mp_obj_str_get_str(args[0]);
+    if (n_args == 5) {
+        display_screenshot((char *)filename, mp_obj_get_int(args[1]), mp_obj_get_int(args[2]),
+                           mp_obj_get_int(args[3]), mp_obj_get_int(args[4]));
+    } else {
+        display_screenshot((char *)filename, -1, -1, -1, -1);
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_int_screenshot_obj, 1, 5, tulip_int_screenshot);
+
+static mp_obj_t tulip_tfb_str(size_t n_args, const mp_obj_t *args) {
+    if (TFB == NULL || TFBf == NULL || TFBfg == NULL || TFBbg == NULL) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("text framebuffer is not ready"));
+    }
+    int x = mp_obj_get_int(args[0]);
+    int y = mp_obj_get_int(args[1]);
+    if (x < 0 || x >= TFB_COLS || y < 0 || y >= TFB_ROWS) {
+        mp_raise_ValueError(MP_ERROR_TEXT("text coordinates out of range"));
+    }
+    size_t offset = (size_t)y * TFB_COLS + x;
+    if (n_args == 2) {
+        mp_obj_t tuple[] = {
+            mp_obj_new_str((const char *)&TFB[offset], 1),
+            mp_obj_new_int(TFBf[offset]),
+            mp_obj_new_int(TFBfg[offset]),
+            mp_obj_new_int(TFBbg[offset]),
+        };
+        return mp_obj_new_tuple(MP_ARRAY_SIZE(tuple), tuple);
+    }
+
+    size_t length;
+    const char *text = mp_obj_str_get_data(args[2], &length);
+    if (length > (size_t)(TFB_COLS - x)) {
+        length = TFB_COLS - x;
+    }
+    for (size_t i = 0; i < length; i++) {
+        TFB[offset + i] = text[i];
+        if (n_args > 3 && mp_obj_get_int(args[3]) >= 0) TFBf[offset + i] = mp_obj_get_int(args[3]);
+        if (n_args > 4 && mp_obj_get_int(args[4]) >= 0) TFBfg[offset + i] = mp_obj_get_int(args[4]);
+        if (n_args > 5 && mp_obj_get_int(args[5]) >= 0) TFBbg[offset + i] = mp_obj_get_int(args[5]);
+    }
+    display_tfb_update(y);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_tfb_str_obj, 2, 6, tulip_tfb_str);
+
+static mp_obj_t tulip_tfb_font(size_t n_args, const mp_obj_t *args) {
+    if (n_args == 0) return mp_obj_new_int(tfb_font);
+    int font = mp_obj_get_int(args[0]);
+    if (font < TFB_FONT_8X12 || font > TFB_FONT_12X16) {
+        mp_raise_ValueError(MP_ERROR_TEXT("tfb_font must be 0, 1, or 2"));
+    }
+    tfb_font = font;
+    display_tfb_update(-1);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_tfb_font_obj, 0, 1, tulip_tfb_font);
+
+static mp_obj_t tulip_touch(void) {
+    mp_obj_t tuple[6];
+    for (size_t i = 0; i < 3; i++) {
+        tuple[i * 2] = mp_obj_new_int(last_touch_x[i]);
+        tuple[i * 2 + 1] = mp_obj_new_int(last_touch_y[i]);
+    }
+    return mp_obj_new_tuple(MP_ARRAY_SIZE(tuple), tuple);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_touch_obj, tulip_touch);
+
+static mp_obj_t tulip_touch_callback(size_t n_args, const mp_obj_t *args) {
+    s_tab5_touch_cb = n_args == 0 ? mp_const_none : args[0];
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_touch_callback_obj, 0, 1, tulip_touch_callback);
+
+extern int16_t touch_x_delta;
+extern int16_t touch_y_delta;
+extern float touch_y_scale;
+
+static mp_obj_t tulip_touch_delta(size_t n_args, const mp_obj_t *args) {
+    if (n_args == 0) {
+        mp_obj_t tuple[] = {
+            mp_obj_new_int(touch_x_delta),
+            mp_obj_new_int(touch_y_delta),
+            mp_obj_new_float(touch_y_scale),
+        };
+        return mp_obj_new_tuple(MP_ARRAY_SIZE(tuple), tuple);
+    }
+    if (n_args == 1) {
+        mp_raise_TypeError(MP_ERROR_TEXT("touch_delta needs x and y"));
+    }
+    float scale = n_args == 3 ? mp_obj_get_float(args[2]) : 1.0f;
+    if (scale <= 0.0f) {
+        mp_raise_ValueError(MP_ERROR_TEXT("touch y scale must be positive"));
+    }
+    touch_x_delta = mp_obj_get_int(args[0]);
+    touch_y_delta = mp_obj_get_int(args[1]);
+    touch_y_scale = scale;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_touch_delta_obj, 0, 3, tulip_touch_delta);
+
+static mp_obj_t tulip_frame_callback(size_t n_args, const mp_obj_t *args) {
+    if (n_args == 0) {
+        s_tab5_frame_cb = mp_const_none;
+        s_tab5_frame_arg = mp_const_none;
+    } else {
+        s_tab5_frame_cb = args[0];
+        s_tab5_frame_arg = n_args > 1 ? args[1] : mp_const_none;
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_frame_callback_obj, 0, 2, tulip_frame_callback);
+
+static mp_obj_t tulip_display_ready(void) {
+    return mp_obj_new_bool(bg != NULL);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_display_ready_obj, tulip_display_ready);
+
+static mp_obj_t tulip_ui_init(void) {
+    if (!s_tab5_lvgl_initialized && bg != NULL) {
+        setup_lvgl();
+        s_tab5_lvgl_initialized = true;
+    }
+    return mp_obj_new_bool(s_tab5_lvgl_initialized);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_ui_init_obj, tulip_ui_init);
+
+static mp_obj_t tulip_ui_start(void) {
+    s_tab5_lvgl_running = s_tab5_lvgl_initialized;
+    return mp_obj_new_bool(s_tab5_lvgl_running);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_ui_start_obj, tulip_ui_start);
+
+// tab5_diag / tab5_render_stats / audio_diag are REPL-only instruments. Nothing
+// in tulip/fs or tulip/shared/py calls them; they exist so a human can read the
+// display, touch and audio task counters straight off a connected board while
+// tuning this port. Keep them even though a call-graph sweep will call them dead.
+static mp_obj_t tulip_tab5_diag(void) {
+    mp_obj_t values[] = {
+        mp_obj_new_int_from_uint(tab5_display_task_entries()),
+        mp_obj_new_int_from_uint(tab5_display_bridge_frames()),
+        mp_obj_new_int_from_uint(tab5_touch_task_entries()),
+        mp_obj_new_int_from_uint(tab5_touch_poll_count()),
+        mp_obj_new_int_from_uint(tab5_touch_down_count()),
+        mp_obj_new_int_from_uint(tab5_touch_read_errors()),
+        mp_obj_new_int_from_uint(s_tab5_frame_callbacks),
+        mp_obj_new_int_from_uint(s_tab5_lvgl_handlers),
+    };
+    return mp_obj_new_tuple(MP_ARRAY_SIZE(values), values);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_tab5_diag_obj, tulip_tab5_diag);
+
+// Per-frame render phase timings, in microseconds, for the last frame drawn.
+static mp_obj_t tulip_tab5_render_stats(void) {
+    tab5_render_stats_t st;
+    tab5_display_render_stats(&st);
+    mp_obj_t values[] = {
+        mp_obj_new_int_from_uint(st.composite_us),
+        mp_obj_new_int_from_uint(st.convert_us),
+        mp_obj_new_int_from_uint(st.rotate_us),
+        mp_obj_new_int_from_uint(st.present_us),
+        mp_obj_new_int_from_uint(st.wait_us),
+        mp_obj_new_int_from_uint(st.frames_skipped),
+        mp_obj_new_int_from_uint(st.band_rows),
+        mp_obj_new_int_from_uint(st.ppa_failures),
+        mp_obj_new_int_from_uint(st.dsi_fb_count),
+        mp_obj_new_bool(st.ppa_active),
+        mp_obj_new_bool(st.vsync_paced),
+    };
+    return mp_obj_new_tuple(MP_ARRAY_SIZE(values), values);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_tab5_render_stats_obj, tulip_tab5_render_stats);
+
+static mp_obj_t tulip_audio_diag(size_t n_args, const mp_obj_t *args) {
+    if (n_args > 0 && mp_obj_is_true(args[0])) {
+        tab5_audio_reset_stats();
+    }
+    tab5_audio_stats_t stats;
+    tab5_audio_get_stats(&stats);
+    mp_obj_t values[] = {
+        mp_obj_new_int_from_uint(stats.blocks),
+        mp_obj_new_int_from_uint(stats.interval_overruns),
+        mp_obj_new_int_from_uint(stats.render_overruns),
+        mp_obj_new_int_from_uint(stats.write_errors),
+        mp_obj_new_int_from_uint(stats.max_interval_us),
+        mp_obj_new_int_from_uint(stats.max_render_us),
+        mp_obj_new_int_from_uint(stats.max_write_us),
+        mp_obj_new_int_from_uint(stats.clipped_samples),
+        mp_obj_new_int_from_uint(stats.peak_sample),
+        mp_obj_new_int_from_uint(stats.max_deltas_us),
+        mp_obj_new_int_from_uint(stats.max_dsp_us),
+    };
+    return mp_obj_new_tuple(MP_ARRAY_SIZE(values), values);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_audio_diag_obj, 0, 1, tulip_audio_diag);
+
+static mp_obj_t tulip_tfb_ready(void) {
+    bool ready = (TFB != NULL) && (TFBf != NULL) && (TFBfg != NULL) && (TFBbg != NULL);
+    return mp_obj_new_bool(ready);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_tfb_ready_obj, tulip_tfb_ready);
+
+static mp_obj_t tulip_tfb_start(void) {
+    tfb_active = 1;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_tfb_start_obj, tulip_tfb_start);
+
+static mp_obj_t tulip_tfb_stop(void) {
+    tfb_active = 0;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_tfb_stop_obj, tulip_tfb_stop);
+
+static mp_obj_t tulip_tfb_update(void) {
+    display_tfb_update(-1);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_tfb_update_obj, tulip_tfb_update);
+
+static mp_obj_t tulip_tfb_reset(void) {
+    // Avoid early-boot crashes: only touch TFB buffers when they are allocated.
+    if (TFB == NULL || TFBf == NULL || TFBfg == NULL || TFBbg == NULL) {
+        return mp_const_none;
+    }
+
+    for (uint32_t i = 0; i < (uint32_t)TFB_ROWS * (uint32_t)TFB_COLS; i++) {
+        TFB[i] = 0;
+        TFBf[i] = 0;
+        TFBfg[i] = tfb_fg_pal_color;
+        TFBbg[i] = tfb_bg_pal_color;
+    }
+
+    if (TFB_pxlen != NULL) {
+        for (uint16_t i = 0; i < V_RES; i++) {
+            TFB_pxlen[i] = 0;
+        }
+    }
+
+    tfb_x_col = 0;
+    tfb_y_row = 0;
+    ansi_active_format = -1;
+    ansi_active_fg_color = tfb_fg_pal_color;
+    ansi_active_bg_color = tfb_bg_pal_color;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_tfb_reset_obj, tulip_tfb_reset);
+
+// Put the background back the way display_start() left it: the Tulip teal fill
+// plus a reset scroll table. _boot.py calls this once the C boot banner is done
+// with the screen, before ui.py paints the REPL over it.
+static mp_obj_t tulip_bg_reset(void) {
+    if (bg != NULL) {
+        display_reset_bg();
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_bg_reset_obj, tulip_bg_reset);
+
+static mp_obj_t tulip_set_screen_as_repl(mp_obj_t on_obj) {
+    lvgl_is_repl = mp_obj_is_true(on_obj) ? 1 : 0;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tulip_set_screen_as_repl_obj, tulip_set_screen_as_repl);
+
+static mp_obj_t tulip_defer(mp_obj_t cb_obj, mp_obj_t arg_obj, mp_obj_t delay_obj) {
+    (void)cb_obj;
+    (void)arg_obj;
+    (void)delay_obj;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_3(tulip_defer_obj, tulip_defer);
+
+// Editor bindings — the C functions are compiled into the shared sources.
+extern void save_tfb(void);
+extern void restore_tfb(void);
+extern void editor_start(const char *filename);
+extern void editor_activate(void);
+extern void editor_key(int c);
+extern void editor_deinit(void);
+
+static mp_obj_t tulip_tfb_save(void) { save_tfb(); return mp_const_none; }
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_tfb_save_obj, tulip_tfb_save);
+
+static mp_obj_t tulip_tfb_restore(void) { restore_tfb(); return mp_const_none; }
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_tfb_restore_obj, tulip_tfb_restore);
+
+static mp_obj_t tulip_run_editor(size_t n_args, const mp_obj_t *args) {
+    if (n_args > 0)
+        editor_start(mp_obj_str_get_str(args[0]));
+    else
+        editor_start(NULL);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_run_editor_obj, 0, 1, tulip_run_editor);
+
+static mp_obj_t tulip_activate_editor(size_t n_args, const mp_obj_t *args) {
+    (void)n_args; (void)args;
+    editor_activate();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_activate_editor_obj, 0, 1, tulip_activate_editor);
+
+static mp_obj_t tulip_key_editor(size_t n_args, const mp_obj_t *args) {
+    editor_key(mp_obj_get_int(args[0]));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_key_editor_obj, 1, 1, tulip_key_editor);
+
+static mp_obj_t tulip_deinit_editor(size_t n_args, const mp_obj_t *args) {
+    (void)n_args; (void)args;
+    editor_deinit();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_deinit_editor_obj, 0, 0, tulip_deinit_editor);
+
+// A registered callback owns keyboard input, so Editor keys are not also sent to LVGL.
+static mp_obj_t _tab5_keyboard_cb = mp_const_none;
+// keyboard_send_keys_to_micropython lives in shared/keyscan.c, which TAB5 now
+// builds for the USB HID scan-code decoder (see usb_host_tab5.c).
+
+static mp_obj_t tulip_keyboard_callback(size_t n_args, const mp_obj_t *args) {
+    _tab5_keyboard_cb = (n_args > 0) ? args[0] : mp_const_none;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_keyboard_callback_obj, 0, 1, tulip_keyboard_callback);
+
+extern int mp_interrupt_char;
+
+bool tab5_keyboard_deliver_key(uint16_t key) {
+    bool callback_consumed = _tab5_keyboard_cb != MP_OBJ_NULL && _tab5_keyboard_cb != mp_const_none;
+    if (callback_consumed) {
+        mp_sched_schedule(_tab5_keyboard_cb, mp_obj_new_int(key));
+    }
+
+    if (key == mp_interrupt_char) {
+        mp_sched_keyboard_interrupt();
+    } else if (key == 4) {
+        tx_char(key);
+    } else if (lvgl_is_repl) {
+        if (key >= 258 && key <= 262) {
+            tx_char(27);
+            tx_char('[');
+            if (key == 258) tx_char('B');
+            if (key == 259) tx_char('A');
+            if (key == 260) tx_char('D');
+            if (key == 261) tx_char('C');
+            if (key == 262) {
+                tx_char('3');
+                tx_char('~');
+            }
+        } else {
+            tx_char(key);
+        }
+    }
+
+    return callback_consumed;
+}
+
+// Inject a key as if the hardware keyboard had produced it -- what ui.py's soft
+// keyboard types with. This is the same entry point tulip_key_send() uses on the
+// other boards (send_key_to_micropython); it stops one step short of LVGL's
+// keypad indev, exactly as that one does, because a soft keyboard bound to an
+// LVGL text area already feeds it directly.
+static mp_obj_t tulip_key_send(mp_obj_t key_obj) {
+    tab5_keyboard_deliver_key((uint16_t)mp_obj_get_int(key_obj));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tulip_key_send_obj, tulip_key_send);
+
+/*
+ * Keyboard remapping, for the USB-A keyboard.
+ *
+ * scan_ascii() (shared/keyscan.c) decodes HID scan codes with a hard-coded US
+ * layout, so on a JIS keyboard the letters and digits are right but the symbols
+ * are not, and the JIS-only keys (henkan 0x8a, muhenkan 0x8b, kana 0x88, ro 0x87,
+ * yen 0x89) decode to nothing at all. Before consulting that layout scan_ascii()
+ * checks key_remaps[], so a handful of entries in boot.py fixes the symbols
+ * without touching code shared with the other Tulip targets.
+ *
+ *     tulip.key_remap(0x1f, 0x02, ord('"'))   # shift-2 types " not @
+ *
+ * The built-in I2C keyboard does not pass through scan_ascii() -- it reports
+ * finished characters, not scan codes -- so remaps only affect the USB keyboard.
+ */
+static mp_obj_t tulip_key_remap(mp_obj_t scan_obj, mp_obj_t mod_obj, mp_obj_t code_obj) {
+    const uint8_t scan = (uint8_t)mp_obj_get_int(scan_obj);
+    const uint16_t mod = (uint16_t)mp_obj_get_int(mod_obj);
+    const uint8_t code = (uint8_t)mp_obj_get_int(code_obj);
+
+    if (scan == 0) {
+        // Slot 0 means "empty", so scan code 0 (KEY_NONE) can never be remapped.
+        mp_raise_ValueError(MP_ERROR_TEXT("scan code 0 cannot be remapped"));
+    }
+
+    // Replace an existing entry for the same key rather than appending a second
+    // one: scan_ascii() returns the first match, so a duplicate would silently
+    // shadow the new mapping -- easy to hit while working out a layout.
+    for (uint8_t i = 0; i < MAX_KEY_REMAPS; i++) {
+        if (key_remaps[i].scan == scan && key_remaps[i].mod == mod) {
+            key_remaps[i].code = code;
+            return mp_const_none;
+        }
+    }
+
+    for (uint8_t i = 0; i < MAX_KEY_REMAPS; i++) {
+        if (key_remaps[i].scan == 0) {
+            key_remaps[i].scan = scan;
+            key_remaps[i].mod = mod;
+            key_remaps[i].code = code;
+            return mp_const_none;
+        }
+    }
+
+    mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("key remap table is full"));
+}
+static MP_DEFINE_CONST_FUN_OBJ_3(tulip_key_remap_obj, tulip_key_remap);
+
+static mp_obj_t tulip_key_remaps_clear(void) {
+    for (uint8_t i = 0; i < MAX_KEY_REMAPS; i++) {
+        key_remaps[i].scan = 0;
+        key_remaps[i].mod = 0;
+        key_remaps[i].code = 0;
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_key_remaps_clear_obj, tulip_key_remaps_clear);
+
+// Block for one key and report what produced it: (character, scan code,
+// modifier). tulip.remap() uses this to learn a key before remapping it.
+// last_held_code/last_held_modifier are set by scan_ascii(), so they carry the
+// USB keyboard's raw HID report; a key from the built-in keyboard leaves them at
+// whatever the USB keyboard last sent (0 if none).
+static mp_obj_t tulip_key_wait(void) {
+    mp_obj_t tuple[3];
+    tuple[0] = mp_obj_new_int(mp_hal_stdin_rx_chr());
+    tuple[1] = mp_obj_new_int(last_held_code);
+    tuple[2] = mp_obj_new_int(last_held_modifier);
+    return mp_obj_new_tuple(3, tuple);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_key_wait_obj, tulip_key_wait);
+
+// What the USB-A port and the built-in keyboard are actually doing. The counts
+// separate "nothing ever attached" from "it attached but carried no interface we
+// handle" -- the two look identical from the outside, and the built-in keyboard
+// types into the same REPL as a USB one, so which keyboard produced a character
+// is otherwise a guess.
+static mp_obj_t tulip_usb_status(void) {
+    mp_obj_t dict = mp_obj_new_dict(17);
+    #define TAB5_STATUS(name, value) \
+        mp_obj_dict_store(dict, mp_obj_new_str(name, strlen(name)), value)
+    TAB5_STATUS("attached", mp_obj_new_int(tab5_usb_attach_count()));
+    TAB5_STATUS("detached", mp_obj_new_int(tab5_usb_detach_count()));
+    TAB5_STATUS("unclaimed", mp_obj_new_int(tab5_usb_unclaimed_count()));
+    TAB5_STATUS("release_errors", mp_obj_new_int(tab5_usb_release_errors()));
+    TAB5_STATUS("close_errors", mp_obj_new_int(tab5_usb_close_errors()));
+    TAB5_STATUS("free_errors", mp_obj_new_int(tab5_usb_free_errors()));
+    TAB5_STATUS("enum_retries", mp_obj_new_int(tab5_usb_enum_retries()));
+    TAB5_STATUS("midi", mp_obj_new_bool(tab5_usb_midi_connected()));
+    TAB5_STATUS("keyboard", mp_obj_new_bool(tab5_usb_keyboard_connected()));
+    TAB5_STATUS("mouse", mp_obj_new_bool(tab5_usb_mouse_connected()));
+    TAB5_STATUS("builtin_keyboard", mp_obj_new_bool(tab5_keyboard_connected()));
+    // Keys queued from either keyboard: a USB one joins the built-in keyboard's
+    // ring buffer (tab5_keyboard_push_key), which is the whole point of that
+    // design, so this counter cannot attribute a key to one or the other. Use
+    // the "keyboard" flag above to tell whether a USB keyboard is attached.
+    TAB5_STATUS("keys_queued", mp_obj_new_int(tab5_keyboard_event_count()));
+    // Root-port hardware state. "attached" above counts devices that finished
+    // enumerating, so it stays 0 both for an empty connector and for a device
+    // that is plugged in and failing -- which are opposite problems. "port"
+    // here is the D+ pull-up the device asserts as soon as it sees VBUS, so
+    // port=True with attached=0 means the device is there and enumeration is
+    // what is broken. "overcurrent" means the connector's load switch tripped.
+    tab5_usb_port_state_t port;
+    tab5_usb_port_state(&port);
+    TAB5_STATUS("port", mp_obj_new_bool(port.connected));
+    TAB5_STATUS("port_enabled", mp_obj_new_bool(port.enabled));
+    TAB5_STATUS("overcurrent", mp_obj_new_bool(port.overcurrent));
+    TAB5_STATUS("vbus", mp_obj_new_bool(port.powered));
+    TAB5_STATUS("port_speed", mp_obj_new_int(port.speed));
+    #undef TAB5_STATUS
+    return dict;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_usb_status_obj, tulip_usb_status);
+
+// Drive the USB-A connector's 5V load switch by hand, and read it back with no
+// argument. A device that will not start is either not being given power or is
+// pulling the rail down; toggling the switch while watching the device tells
+// which, and the read-back says whether the expander actually took the write.
+static mp_obj_t tulip_usb_host_power(size_t n_args, const mp_obj_t *args) {
+    if (n_args > 0) {
+        if (!tab5_power_set_usb_host(mp_obj_is_true(args[0]))) {
+            mp_raise_msg(&mp_type_RuntimeError,
+                         MP_ERROR_TEXT("could not reach the USB power switch"));
+        }
+        return mp_const_none;
+    }
+    bool on = false;
+    if (!tab5_power_get_usb_host(&on)) {
+        mp_raise_msg(&mp_type_RuntimeError,
+                     MP_ERROR_TEXT("could not read the USB power switch"));
+    }
+    return mp_obj_new_bool(on);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_usb_host_power_obj, 0, 1, tulip_usb_host_power);
+
+// Last-resort on-screen error report for when the Python UI stack fails to come
+// up. Drawn through the text framebuffer, which display_tab5.c has running long
+// before MicroPython starts, so it still works when nothing else on screen does.
+// (This used to carry its own 5x7 glyph renderer, from before TFB was wired up
+// on this board.)
+static mp_obj_t tulip_boot_status(size_t n_args, const mp_obj_t *args) {
+    if (TFB == NULL || TFBf == NULL || TFBfg == NULL || TFBbg == NULL) {
+        return mp_const_none;
+    }
+
+    lvgl_is_repl = 1;
+    (void)tulip_tfb_reset();
+    tfb_active = 1;
+
+    static const char header[] =
+        "TAB5 SAFE MODE\n"
+        "The UI did not start. Connect USB serial for the log.\n";
+    display_tfb_str((unsigned char *)header, (uint16_t)(sizeof(header) - 1), 0, 255, 9);
+
+    if (n_args == 1) {
+        size_t len = 0;
+        const char *detail = mp_obj_str_get_data(args[0], &len);
+        display_tfb_str((unsigned char *)detail, (uint16_t)len, 0, 251, 9);
+        display_tfb_str((unsigned char *)"\n", 1, 0, 251, 9);
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_boot_status_obj, 0, 1, tulip_boot_status);
+
+static const mp_rom_map_elem_t tulip_module_globals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR__tulip) },
+    { MP_ROM_QSTR(MP_QSTR_board), MP_ROM_PTR(&tulip_board_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ticks_ms), MP_ROM_PTR(&tulip_ticks_ms_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_ticks_ms), MP_ROM_PTR(&tulip_amy_ticks_ms_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_sequencer_ticks), MP_ROM_PTR(&tulip_amy_sequencer_ticks_obj) },
+    { MP_ROM_QSTR(MP_QSTR_seq_ticks), MP_ROM_PTR(&tulip_seq_ticks_obj) },
+    { MP_ROM_QSTR(MP_QSTR_seq_add_callback), MP_ROM_PTR(&tulip_seq_add_callback_obj) },
+    { MP_ROM_QSTR(MP_QSTR_seq_remove_callback), MP_ROM_PTR(&tulip_seq_remove_callback_obj) },
+    { MP_ROM_QSTR(MP_QSTR_seq_remove_callbacks), MP_ROM_PTR(&tulip_seq_remove_callbacks_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sequencer_start), MP_ROM_PTR(&tulip_sequencer_start_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_get_synth_commands), MP_ROM_PTR(&tulip_amy_get_synth_commands_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_render_load), MP_ROM_PTR(&tulip_amy_render_load_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_set_render_load_threshold), MP_ROM_PTR(&tulip_amy_set_render_load_threshold_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_send), MP_ROM_PTR(&tulip_amy_send_obj) },
+    { MP_ROM_QSTR(MP_QSTR_midi_callback), MP_ROM_PTR(&tulip_midi_callback_obj) },
+    { MP_ROM_QSTR(MP_QSTR_midi_in), MP_ROM_PTR(&tulip_midi_in_obj) },
+    { MP_ROM_QSTR(MP_QSTR_midi_out), MP_ROM_PTR(&tulip_midi_out_obj) },
+    { MP_ROM_QSTR(MP_QSTR_midi_local), MP_ROM_PTR(&tulip_midi_local_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sysex_in), MP_ROM_PTR(&tulip_sysex_in_obj) },
+    { MP_ROM_QSTR(MP_QSTR_build_strings), MP_ROM_PTR(&tulip_build_strings_obj) },
+    { MP_ROM_QSTR(MP_QSTR_screen_size), MP_ROM_PTR(&tulip_screen_size_obj) },
+    { MP_ROM_QSTR(MP_QSTR_gpu), MP_ROM_PTR(&tulip_gpu_obj) },
+    { MP_ROM_QSTR(MP_QSTR_fps), MP_ROM_PTR(&tulip_fps_obj) },
+    { MP_ROM_QSTR(MP_QSTR_gpu_reset), MP_ROM_PTR(&tulip_gpu_reset_obj) },
+    { MP_ROM_QSTR(MP_QSTR_brightness), MP_ROM_PTR(&tulip_brightness_obj) },
+    { MP_ROM_QSTR(MP_QSTR_int_screenshot), MP_ROM_PTR(&tulip_int_screenshot_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_pixel), MP_ROM_PTR(&tulip_bg_pixel_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_clear), MP_ROM_PTR(&tulip_bg_clear_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_bitmap), MP_ROM_PTR(&tulip_bg_bitmap_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_blit), MP_ROM_PTR(&tulip_bg_blit_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_png), MP_ROM_PTR(&tulip_bg_png_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_bezier), MP_ROM_PTR(&tulip_bg_bezier_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_line), MP_ROM_PTR(&tulip_bg_line_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_roundrect), MP_ROM_PTR(&tulip_bg_roundrect_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_rect), MP_ROM_PTR(&tulip_bg_rect_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_circle), MP_ROM_PTR(&tulip_bg_circle_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_triangle), MP_ROM_PTR(&tulip_bg_triangle_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_fill), MP_ROM_PTR(&tulip_bg_fill_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_str), MP_ROM_PTR(&tulip_bg_str_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_scroll), MP_ROM_PTR(&tulip_bg_scroll_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_scroll_x_speed), MP_ROM_PTR(&tulip_bg_scroll_x_speed_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_scroll_y_speed), MP_ROM_PTR(&tulip_bg_scroll_y_speed_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_scroll_x_offset), MP_ROM_PTR(&tulip_bg_scroll_x_offset_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_scroll_y_offset), MP_ROM_PTR(&tulip_bg_scroll_y_offset_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_swap), MP_ROM_PTR(&tulip_bg_swap_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_reset), MP_ROM_PTR(&tulip_bg_reset_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sprite_bitmap), MP_ROM_PTR(&tulip_sprite_bitmap_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sprite_png), MP_ROM_PTR(&tulip_sprite_png_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sprite_register), MP_ROM_PTR(&tulip_sprite_register_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sprite_move), MP_ROM_PTR(&tulip_sprite_move_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sprite_on), MP_ROM_PTR(&tulip_sprite_on_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sprite_off), MP_ROM_PTR(&tulip_sprite_off_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sprite_clear), MP_ROM_PTR(&tulip_sprite_clear_obj) },
+    { MP_ROM_QSTR(MP_QSTR_collisions), MP_ROM_PTR(&tulip_collisions_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tfb_str), MP_ROM_PTR(&tulip_tfb_str_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tfb_font), MP_ROM_PTR(&tulip_tfb_font_obj) },
+    { MP_ROM_QSTR(MP_QSTR_touch), MP_ROM_PTR(&tulip_touch_obj) },
+    { MP_ROM_QSTR(MP_QSTR_touch_delta), MP_ROM_PTR(&tulip_touch_delta_obj) },
+    { MP_ROM_QSTR(MP_QSTR_touch_callback), MP_ROM_PTR(&tulip_touch_callback_obj) },
+    { MP_ROM_QSTR(MP_QSTR_frame_callback), MP_ROM_PTR(&tulip_frame_callback_obj) },
+    { MP_ROM_QSTR(MP_QSTR_display_ready), MP_ROM_PTR(&tulip_display_ready_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ui_init), MP_ROM_PTR(&tulip_ui_init_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ui_start), MP_ROM_PTR(&tulip_ui_start_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tab5_diag), MP_ROM_PTR(&tulip_tab5_diag_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tab5_render_stats), MP_ROM_PTR(&tulip_tab5_render_stats_obj) },
+    { MP_ROM_QSTR(MP_QSTR_audio_diag), MP_ROM_PTR(&tulip_audio_diag_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tfb_ready), MP_ROM_PTR(&tulip_tfb_ready_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tfb_start), MP_ROM_PTR(&tulip_tfb_start_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tfb_stop), MP_ROM_PTR(&tulip_tfb_stop_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tfb_update), MP_ROM_PTR(&tulip_tfb_update_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tfb_reset), MP_ROM_PTR(&tulip_tfb_reset_obj) },
+    { MP_ROM_QSTR(MP_QSTR_set_screen_as_repl), MP_ROM_PTR(&tulip_set_screen_as_repl_obj) },
+    { MP_ROM_QSTR(MP_QSTR_defer), MP_ROM_PTR(&tulip_defer_obj) },
+    { MP_ROM_QSTR(MP_QSTR_boot_status), MP_ROM_PTR(&tulip_boot_status_obj) },
+    // Editor
+    { MP_ROM_QSTR(MP_QSTR_tfb_save), MP_ROM_PTR(&tulip_tfb_save_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tfb_restore), MP_ROM_PTR(&tulip_tfb_restore_obj) },
+    { MP_ROM_QSTR(MP_QSTR_run_editor), MP_ROM_PTR(&tulip_run_editor_obj) },
+    { MP_ROM_QSTR(MP_QSTR_activate_editor), MP_ROM_PTR(&tulip_activate_editor_obj) },
+    { MP_ROM_QSTR(MP_QSTR_key_editor), MP_ROM_PTR(&tulip_key_editor_obj) },
+    { MP_ROM_QSTR(MP_QSTR_deinit_editor), MP_ROM_PTR(&tulip_deinit_editor_obj) },
+    { MP_ROM_QSTR(MP_QSTR_keyboard_callback), MP_ROM_PTR(&tulip_keyboard_callback_obj) },
+    { MP_ROM_QSTR(MP_QSTR_key_send), MP_ROM_PTR(&tulip_key_send_obj) },
+    { MP_ROM_QSTR(MP_QSTR_key_remap), MP_ROM_PTR(&tulip_key_remap_obj) },
+    { MP_ROM_QSTR(MP_QSTR_key_remaps_clear), MP_ROM_PTR(&tulip_key_remaps_clear_obj) },
+    { MP_ROM_QSTR(MP_QSTR_key_wait), MP_ROM_PTR(&tulip_key_wait_obj) },
+    { MP_ROM_QSTR(MP_QSTR_usb_status), MP_ROM_PTR(&tulip_usb_status_obj) },
+    { MP_ROM_QSTR(MP_QSTR_usb_host_power), MP_ROM_PTR(&tulip_usb_host_power_obj) },
+};
+
+static MP_DEFINE_CONST_DICT(tulip_module_globals, tulip_module_globals_table);
+
+const mp_obj_module_t tulip_user_cmodule = {
+    .base = { &mp_type_module },
+    .globals = (mp_obj_dict_t *)&tulip_module_globals,
+};
+
+MP_REGISTER_MODULE(MP_QSTR__tulip, tulip_user_cmodule);
