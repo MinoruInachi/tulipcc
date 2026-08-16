@@ -2,16 +2,30 @@
 
 from littlefs import lfs
 import os
+import subprocess
 import sys
 
-if(len(sys.argv)<2):
-    print("Usage: python fs_create.py (amyboard,tulip) [flash]")
+USAGE = "Usage: python fs_create.py (amyboard,tulip,tab5) [flash]"
+
+# distro -> (port directory, esptool chip, ../fs source directory, asset prefix)
+#
+# The four are separate concepts, which only coincide for the two ESP32-S3
+# distros. Tab5 is Tulip on ESP32-P4: it ships the same /sys contents and the
+# same published asset names as `tulip`, from a different port directory and for
+# a different chip.
+DISTROS = {
+    'tulip':    ('esp32s3',  'esp32s3', 'tulip',    'tulip'),
+    'amyboard': ('amyboard', 'esp32s3', 'amyboard', 'amyboard'),
+    'tab5':     ('esp32p4',  'esp32p4', 'tulip',    'tulip'),
+}
+
+if(len(sys.argv)<2 or sys.argv[1] not in DISTROS):
+    print(USAGE)
+    sys.exit(1)
 
 distro = sys.argv[1]
-if(distro=='tulip'):
-    os.chdir('esp32s3')
-else:
-    os.chdir('amyboard')
+port_dir, chip, fs_source, prefix = DISTROS[distro]
+os.chdir(port_dir)
 
 idf_path = os.environ["IDF_PATH"]  # get value of IDF_PATH from environment
 parttool_dir = os.path.join(idf_path, "components", "partition_table")  # parttool.py lives in $IDF_PATH/components/partition_table
@@ -24,7 +38,7 @@ if(not os.path.exists('build/flash_args')):
     print("Run this after a successful build only")
     sys.exit()
 
-SYSTEM_HOME = "../fs/%s" % (distro)
+SYSTEM_HOME = "../fs/%s" % (fs_source)
 
 # Copy over only these extensions (compared case-insensitively, so .MID
 # and .mid both match).
@@ -54,7 +68,7 @@ lfs.mount(fs, cfg)
 copy_to_lfs('boot.py', 'boot.py')
 
 print("writing VFS .bin file...")
-with open("build/%s-vfs.bin" % (distro),"wb") as fh:
+with open("build/%s-vfs.bin" % (prefix),"wb") as fh:
     fh.write(cfg.user_context.buffer)
 print("... done.")
 
@@ -67,7 +81,28 @@ fs = lfs.LFSFilesystem()
 lfs.format(fs, cfg)
 lfs.mount(fs, cfg)
 
+def has_wanted_files(folder):
+    for file in os.listdir(folder):
+        if(os.path.splitext(file)[1].lower() in good_exts):
+            return True
+    return False
+
+# Only create the folders that end up holding something, plus their parents.
+# os.walk() also finds build-host leftovers that sit next to the sources --
+# __pycache__ being the one that reached devices, as an empty directory in
+# /sys/ex -- and nothing in them matches good_exts, so this prunes them without
+# needing a list of names to skip.
+wanted = set()
 for folder in folders:
+    if has_wanted_files(folder):
+        parts = folder.split('/')
+        for i in range(len(parts)):
+            wanted.add('/'.join(parts[:i + 1]))
+
+# os.walk() is top-down, so a parent is always created before its children.
+for folder in folders:
+    if folder not in wanted:
+        continue
     lfs.mkdir(fs,folder)
     for file in os.listdir(folder):
         file_part, ext = os.path.splitext(file)
@@ -77,7 +112,7 @@ for folder in folders:
 os.chdir(cur_dir)
 
 print("writing sys .bin file...")
-with open("build/%s-sys.bin" % (distro),"wb") as fh:
+with open("build/%s-sys.bin" % (prefix),"wb") as fh:
     fh.write(cfg.user_context.buffer)
 print("... done.")
 
@@ -90,44 +125,46 @@ try:
 except Exception:
     pass
 if drums_partition is not None:
-    import subprocess
     subprocess.check_call([sys.executable, '-m', 'amy.headers', 'gamma9001'], cwd='../../amy')
     drums_bin = open('../../amy/build/drums.bin', 'rb').read()
     if len(drums_bin) > drums_partition.size:
         raise SystemExit("drums.bin (%d bytes) does not fit the drums partition (%d bytes)"
                          % (len(drums_bin), drums_partition.size))
-    with open('build/%s-drums.bin' % (distro), 'wb') as fh:
+    with open('build/%s-drums.bin' % (prefix), 'wb') as fh:
         fh.write(drums_bin)
     print("drums.bin: %d bytes into %s partition at %s" % (
         len(drums_bin), 'drums', hex(drums_partition.offset)))
 
 # Update the flash_args file to have the sys and user partitions
 flash_args = open('build/flash_args','r').read().split('\n')[:-1]
-flash_args.append('%s %s-sys.bin' % (hex(sys_partition.offset), distro))
-flash_args.append('%s %s-vfs.bin' % (hex(vfs_partition.offset), distro))
+flash_args.append('%s %s-sys.bin' % (hex(sys_partition.offset), prefix))
+flash_args.append('%s %s-vfs.bin' % (hex(vfs_partition.offset), prefix))
 if drums_partition is not None:
-    flash_args.append('%s %s-drums.bin' % (hex(drums_partition.offset), distro))
-new_flash_args = open('build/flash_args_%s' % (distro),'w')
+    flash_args.append('%s %s-drums.bin' % (hex(drums_partition.offset), prefix))
+new_flash_args = open('build/flash_args_%s' % (prefix),'w')
 for f in flash_args:
     new_flash_args.write('%s\n' % (f))
 new_flash_args.close()
 os.chdir('build')
-os.system('esptool.py --chip esp32s3 merge_bin -o %s.bin @flash_args_%s' % (distro, distro))
+# check_call, not os.system: a failed merge here used to leave a stale
+# dist/*-full-*.bin behind and still exit 0, which CI would happily publish.
+subprocess.check_call(['esptool.py', '--chip', chip, 'merge_bin',
+                       '-o', '%s.bin' % (prefix), '@flash_args_%s' % (prefix)])
 os.chdir('..')
 
 # I don't love this but it works
 # i wonder if i can get CMake to pass along MICROPY_BOARD to this program in a shell instead
 MICROPY_BOARD = subprocess.check_output("grep MICROPY_BOARD build/CMakeCache.txt | cut -d '=' -f2 | awk '{print $1}'",shell=True)[:-1].decode('ascii')
 os.system("mkdir -p dist")
-os.system("cp build/%s.bin dist/%s-full-%s.bin" % (distro, distro, MICROPY_BOARD))
-os.system("cp build/micropython.bin dist/%s-firmware-%s.bin" % (distro, MICROPY_BOARD))
-os.system("cp build/%s-sys.bin dist/%s-sys.bin" %(distro, distro))
+os.system("cp build/%s.bin dist/%s-full-%s.bin" % (prefix, prefix, MICROPY_BOARD))
+os.system("cp build/micropython.bin dist/%s-firmware-%s.bin" % (prefix, MICROPY_BOARD))
+os.system("cp build/%s-sys.bin dist/%s-sys.bin" %(prefix, prefix))
 
 # Optionally do the flash of the whole image
 if(len(sys.argv)>2):
     if(sys.argv[2]== 'flash'):
         print("Writing full image")
-        os.system("esptool.py write_flash 0x0 dist/%s-full-%s.bin" % (distro, MICROPY_BOARD))
+        os.system("esptool.py --chip %s write_flash 0x0 dist/%s-full-%s.bin" % (chip, prefix, MICROPY_BOARD))
 
 os.chdir('..')
 

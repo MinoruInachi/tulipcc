@@ -1,7 +1,26 @@
 # This partition table is for the 16MiB Tab5 flash with OTA support.
+#
+# 'system' and 'vfs' mirror the Tulip CC layout (see
+# esp32s3/boards/N16R8/tulip-partitions-16MB.csv): fs_create.py builds a
+# littlefs image for each -- /sys holds the examples and images from
+# tulip/fs/tulip, /user holds user files. Without them MicroPython registers a
+# 'vfs' spanning the rest of flash at runtime (ports/esp32/main.c), which never
+# appears in the partition table binary and so is invisible to fs_create.py.
+#
+# The app slots stay at 0x3f0000 rather than the ESP32-S3's 0x390000: the TAB5
+# build is already 0x358ed0, and shrinking the slots would cut its headroom from
+# 15% to about 6% while the port is still growing.
+#
+# No 'drums' partition: TAB5 does not build amy_connector.c, so nothing mmaps
+# the gamma9001 banks. Adding one later means taking 0x3a0000 out of 'vfs'.
+#
+# Sizes sum to exactly 0x1000000 (16MiB).
+#
 # Name,   Type, SubType, Offset,   Size,     Flags
 nvs,      data, nvs,     0x9000,   0x4000,
 otadata,  data, ota,     0xd000,   0x2000,
 phy_init, data, phy,     0xf000,   0x1000,
 ota_0,    app,  ota_0,   0x10000,  0x3f0000,
 ota_1,    app,  ota_1,   0x400000, 0x3f0000,
+system,   data, fat,     0x7f0000, 0x300000,
+vfs,      data, fat,     0xaf0000, 0x510000,
