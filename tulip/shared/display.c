@@ -123,7 +123,14 @@ uint32_t **bg_lines;//[V_RES];
 uint16_t PIXEL_CLOCK_MHZ = DEFAULT_PIXEL_CLOCK_MHZ;
 uint8_t tfb_active = 1;
 uint8_t gpu_log = 0;
+#ifdef TAB5
+// The Tab5's 7" panel is 1280x720, so the 8x12 font puts a 160x60 console on it
+// -- correct, but small at the distance you actually hold the thing. Start on
+// the 12x16 font instead (106x45). tulip.tfb_font(0) switches back at runtime.
+uint8_t tfb_font = TFB_FONT_12X16;
+#else
 uint8_t tfb_font = TFB_FONT_8X12;
+#endif
 
 int16_t lvgl_is_repl = 0;
 

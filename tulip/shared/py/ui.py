@@ -12,6 +12,30 @@ maybe_log_backend("Tulip UI LVGL backend")
 lv_soft_kb = None
 lv_launcher = None
 
+# The Tab5 has no mouse -- everything on it is hit with a fingertip. At 12pt the
+# shared task bar buttons come out around 20px square, which is under 3mm on its
+# 7" panel and easy to miss. Scale the task bar and the launcher up there only;
+# every other board drives these with a mouse or the keyboard and is unchanged.
+_touch_ui = tulip.board() == "TAB5"
+# lvgl only builds the sizes enabled in lv_conf.h (8/12/18/24/36), and the stub
+# backend carries fewer still, so fall back rather than fail to import.
+_task_bar_font = getattr(lv, "font_montserrat_24", lv.font_montserrat_12) if _touch_ui else lv.font_montserrat_12
+_launcher_font = getattr(lv, "font_montserrat_18", lv.font_montserrat_12) if _touch_ui else lv.font_montserrat_12
+# Square touch target for the three task bar icons, and a wider launcher so the
+# bigger text still fits on one line.
+_task_bar_button_px = 56
+_launcher_width_px = 300 if _touch_ui else 195
+
+
+def _style_task_bar_button(button, label):
+    label.set_style_text_font(_task_bar_font, 0)
+    label.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
+    if _touch_ui:
+        # A fixed-size button no longer shrinks to its label, so the glyph has to
+        # be centred explicitly or it sits in the top-left corner.
+        button.set_size(_task_bar_button_px, _task_bar_button_px)
+        label.center()
+
 
 running_apps = {}
 current_app_string = "repl"
@@ -176,9 +200,8 @@ class UIScreen():
                 self.alttab_button.set_style_bg_color(pal_to_lv(11), lv.PART.MAIN)
                 self.alttab_button.set_style_radius(0,lv.PART.MAIN)
                 alttab_label = lv.label(self.alttab_button)
-                alttab_label.set_style_text_font(lv.font_montserrat_12,0)
                 alttab_label.set_text(lv.SYMBOL.SHUFFLE)
-                alttab_label.set_style_text_align(lv.TEXT_ALIGN.CENTER,0)
+                _style_task_bar_button(self.alttab_button, alttab_label)
                 self.alttab_button.align_to(self.group, lv.ALIGN.TOP_RIGHT,0,0)
                 self.alttab_button.add_event_cb(self.alttab_callback, lv.EVENT.CLICKED, self.alttab_cb_data)
         else:
@@ -192,9 +215,8 @@ class UIScreen():
                 self.quit_button.set_style_bg_color(pal_to_lv(128), lv.PART.MAIN)
                 self.quit_button.set_style_radius(0,lv.PART.MAIN)
                 quit_label = lv.label(self.quit_button)
-                quit_label.set_style_text_font(lv.font_montserrat_12,0)
                 quit_label.set_text(lv.SYMBOL.POWER)
-                quit_label.set_style_text_align(lv.TEXT_ALIGN.CENTER,0)
+                _style_task_bar_button(self.quit_button, quit_label)
                 self.quit_button.align_to(self.alttab_button, lv.ALIGN.OUT_LEFT_MID,0,0)
                 self.quit_button.add_event_cb(self.screen_quit_callback, lv.EVENT.CLICKED, self.quit_cb_data)
             else:
@@ -202,9 +224,8 @@ class UIScreen():
                 self.launcher_button.set_style_bg_color(pal_to_lv(36), lv.PART.MAIN)
                 self.launcher_button.set_style_radius(0,lv.PART.MAIN)
                 launcher_label = lv.label(self.launcher_button)
-                launcher_label.set_style_text_font(lv.font_montserrat_12,0)
                 launcher_label.set_text(lv.SYMBOL.LIST)
-                launcher_label.set_style_text_align(lv.TEXT_ALIGN.CENTER,0)
+                _style_task_bar_button(self.launcher_button, launcher_label)
                 self.launcher_button.align_to(self.group, lv.ALIGN.BOTTOM_RIGHT,0,0)
                 self.launcher_button.add_event_cb(launcher, lv.EVENT.CLICKED, self.launcher_cb_data)
 
@@ -472,9 +493,9 @@ def launcher(ignore=True):
     lv_launcher = lv.list(UIElement.temp_screen)
     lv_launcher.add_flag(lv.obj.FLAG.HIDDEN)
     launcher_height = tulip.screen_size()[1] * 2 // 3 if tulip.board() == "TAB5" else 140
-    lv_launcher.set_size(195, launcher_height)
+    lv_launcher.set_size(_launcher_width_px, launcher_height)
     lv_launcher.set_align(lv.ALIGN.BOTTOM_RIGHT)
-    lv_launcher.set_style_text_font(lv.font_montserrat_12,0)
+    lv_launcher.set_style_text_font(_launcher_font,0)
     b_close = lv_launcher.add_button(lv.SYMBOL.CLOSE, "Close")
     b_close.add_event_cb(launcher_cb, lv.EVENT.CLICKED, None)
     b_pattern = lv_launcher.add_button(lv.SYMBOL.HOME, "Tulip World")
@@ -496,6 +517,10 @@ def launcher(ignore=True):
     b_power = lv_launcher.add_button(lv.SYMBOL.POWER,"Reset")
     b_power.add_event_cb(launcher_cb, lv.EVENT.CLICKED, None)
     if tulip.board() == "TAB5":
+        # Pad the rows out into finger-sized targets before measuring, so the
+        # height below still lands on a whole button.
+        for i in range(lv_launcher.get_child_count()):
+            lv_launcher.get_child(i).set_style_pad_ver(10, lv.PART.MAIN)
         lv_launcher.update_layout()
         last_visible_button = lv_launcher.get_child(min(10, lv_launcher.get_child_count()) - 1)
         lv_launcher.set_height(last_visible_button.get_y() + last_visible_button.get_height())
