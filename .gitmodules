@@ -1,9 +1,11 @@
 [submodule "micropython"]
 	path = micropython
-	url = https://github.com/micropython/micropython
+	url = https://github.com/MinoruInachi/micropython
+	branch = dev_tulipcc_tab5
 [submodule "amy"]
 	path = amy
-	url = https://github.com/shorepine/amy
+	url = https://github.com/MinoruInachi/amy
+	branch = dev_tulipcc_tab5
 [submodule "tinycc"]
 	path = tinycc
 	url = https://github.com/TinyCC/tinycc
