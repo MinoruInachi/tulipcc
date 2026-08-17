@@ -904,6 +904,19 @@ static mp_obj_t tulip_tfb_font(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_tfb_font_obj, 0, 1, tulip_tfb_font);
 
+// The raw HID scan codes currently held down: the modifier byte, then the six
+// rollover slots. usb_host_tab5.c copies every keyboard report into last_scan,
+// so this is the same view the S3 gives. tulip.joyk() is built on it, and
+// without it every joystick-from-keyboard demo (ex/joy.py, ex/parallax.py) sees
+// nothing at all -- joyk() checks hasattr(tulip, "keys") and quietly returns 0.
+static mp_obj_t tulip_keys(void) {
+    mp_obj_t tuple[7];
+    tuple[0] = mp_obj_new_int(last_scan[0]);
+    for (size_t i = 0; i < 6; i++) tuple[i + 1] = mp_obj_new_int(last_scan[i + 2]);
+    return mp_obj_new_tuple(MP_ARRAY_SIZE(tuple), tuple);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_keys_obj, tulip_keys);
+
 static mp_obj_t tulip_touch(void) {
     mp_obj_t tuple[6];
     for (size_t i = 0; i < 3; i++) {
@@ -1566,6 +1579,7 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_collisions), MP_ROM_PTR(&tulip_collisions_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_str), MP_ROM_PTR(&tulip_tfb_str_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_font), MP_ROM_PTR(&tulip_tfb_font_obj) },
+    { MP_ROM_QSTR(MP_QSTR_keys), MP_ROM_PTR(&tulip_keys_obj) },
     { MP_ROM_QSTR(MP_QSTR_touch), MP_ROM_PTR(&tulip_touch_obj) },
     { MP_ROM_QSTR(MP_QSTR_touch_delta), MP_ROM_PTR(&tulip_touch_delta_obj) },
     { MP_ROM_QSTR(MP_QSTR_touch_callback), MP_ROM_PTR(&tulip_touch_callback_obj) },
