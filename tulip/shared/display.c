@@ -1402,8 +1402,18 @@ void setup_lvgl() {
 void display_init(void) {
     // 12 divides into 600, 480, 240
     // Create the background FB
-    // 1536000 bytes
-    bg = (uint8_t*)calloc_caps(32, 1, (H_RES+OFFSCREEN_X_PX)*(V_RES+OFFSCREEN_Y_PX)*BYTES_PER_PIXEL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // 1536000 bytes, plus one row of slack past the plane. display_bounce_empty()
+    // reads a scrolled line as a flat memcpy of H_RES from bg_lines[y], so an
+    // x_offset past OFFSCREEN_X_PX runs that read off the end of its row and into
+    // the next one. On the last row of the plane there is no next one, and
+    // tulip.bg_scroll(V_RES-1, H_RES+OFFSCREEN_X_PX-1, V_RES+OFFSCREEN_Y_PX-1, 0, 0)
+    // is enough to put a screen width of whatever followed bg in PSRAM along the
+    // bottom of the display. The registers reach that far because they wrap modulo
+    // the whole plane, so the read is what has to stay inside the allocation.
+    // Nothing addressable moves: check_dim_xy() still stops at the plane and
+    // display_reset_bg() still fills only the plane, so the slack stays the black
+    // it was allocated as.
+    bg = (uint8_t*)calloc_caps(32, 1, (H_RES+OFFSCREEN_X_PX)*(V_RES+OFFSCREEN_Y_PX)*BYTES_PER_PIXEL + H_RES*BYTES_PER_PIXEL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     // 614400 bytes
     bg_tfb = (uint8_t*)calloc_caps(32, 1, (H_RES*V_RES), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
