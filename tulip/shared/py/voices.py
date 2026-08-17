@@ -24,6 +24,30 @@ COLOR_SCROLLBAR = 109
 COLOR_ACCENT = 129
 COLOR_TEXT = 255
 
+# crox1h is 11px, which is about a millimetre on the Tab5's 7" panel. luRS18 is
+# the same kind of 1-bit bitmap face a size up -- the antialiased montserrat
+# fonts fringe blue here, because LVGL renders RGB565 and the compositor drops
+# it to Tulip's 8-bit palette.
+LIST_FONT = lv.font_tulip_15 if tulip.touch_first() else lv.font_tulip_11
+# The headings sit over columns as narrow as 100px -- "polyphony" does not fit
+# across one at 18px -- and they only name what is already obvious from the
+# rows, so they stay a size down.
+HEADING_FONT = lv.font_tulip_13 if tulip.touch_first() else lv.font_tulip_11
+
+
+def _use_app_font(element):
+    """Put the app's font on an element before anything measures it.
+
+    These elements are built under UIElement.temp_screen and only re-parented
+    into the app's group by UIScreen.add(). A font set on that group therefore
+    arrives after every align_to() in here has already frozen a position from
+    the default font's metrics -- which is how the arpeggiator switches ended up
+    sitting on top of their own labels. Only on the boards that change the font
+    at all; elsewhere the late inheritance is what the layout was drawn against.
+    """
+    if tulip.touch_first():
+        element.group.set_style_text_font(LIST_FONT, 0)
+
 
 def _selector(part, state=0):
     return part | state
@@ -33,30 +57,68 @@ def _style_text(obj):
     obj.set_style_text_color(tulip.pal_to_lv(COLOR_TEXT), 0)
 
 
+# Keyboard geometry. This used to be a block of literals measured off a 1024x600
+# Tulip CC -- right down to drawing the bottom of the white keys at y=599, the
+# last row of that panel. Everything here reproduces those literals exactly at
+# 1024x600 and spends a bigger panel on more octaves and taller keys instead of
+# on margin: the Tab5's 1280x720 gets three octaves rather than two.
+WHITE_KEY_W = 57
+OCTAVE_W = 7 * WHITE_KEY_W
+BLACK_KEY_W = 38
+# Black keys within an octave, as offsets from that octave's leftmost white key.
+# A real keyboard does not space them evenly and the original list did not
+# either; it also drew the first octave two to five pixels right of the second,
+# so that octave keeps its own row rather than being averaged away.
+_BLACK_KEYS_FIRST_OCTAVE = (36, 105, 203, 269, 335)
+_BLACK_KEYS_LATER_OCTAVE = (31, 101, 200, 265, 332)
+_WHITE_KEY_SEMITONES = (0, 2, 4, 5, 7, 9, 11)
+_BLACK_KEY_SEMITONES = (1, 3, 6, 8, 10)
+# The leftmost key. C3, where this keyboard has always started.
+BASE_NOTE = 48
+
+
+def piano_geometry(screen_w, screen_h):
+    """(x, y, w, h) for the keyboard: 2 octaves at 1024x600, 3 at 1280x720."""
+    octaves = max(2, (screen_w - 80) // OCTAVE_W)
+    w = octaves * OCTAVE_W
+    # The original left 112px to the left of the keys and 114 to the right, so
+    # the odd two pixels of the remainder belong on the right.
+    x = (screen_w - w - 2) // 2
+    # The keys have always run to the bottom edge and taken a bit under half the
+    # height. A taller panel makes them taller rather than leaving a black band.
+    h = 270 + max(0, screen_h - 600) // 3
+    return (x, screen_h - h, w, h)
+
+
 def redraw(app):
     # draw bg_x stuff, like the piano
     (app.screen_w, app.screen_h) = tulip.screen_size()
-    # Since redraw is not within app.run() we are not guaranteed to be in the cwd of the app. 
+    # Since redraw is not within app.run() we are not guaranteed to be in the cwd of the app.
     # luckily, tulip.run() adds the cwd of the app to the app class before starting.
-    app.piano_x = 112
-    app.piano_y = 330
-    app.piano_w = 798
-    app.piano_h = 270
+    (app.piano_x, app.piano_y, app.piano_w, app.piano_h) = piano_geometry(app.screen_w, app.screen_h)
+    app.octaves = app.piano_w // OCTAVE_W
     tulip.bg_rect(app.piano_x,app.piano_y,app.piano_w,app.piano_h,255,1)
-    app.white_key_w = 57
-    for k in range(15):
+    app.white_key_w = WHITE_KEY_W
+    for k in range(7 * app.octaves + 1):
         x = app.piano_x+(app.white_key_w*k)
-        tulip.bg_line(x, app.piano_y, x, 599, 36)
-    app.black_key_w = 38
-    app.black_key_h = 180
-    app.black_key_starts = [148, 217, 315, 381, 447, 542, 612, 711, 776, 843]
+        tulip.bg_line(x, app.piano_y, x, app.piano_y + app.piano_h - 1, 36)
+    app.black_key_w = BLACK_KEY_W
+    app.black_key_h = app.piano_h * 2 // 3
+    app.black_key_starts = []
+    for octave in range(app.octaves):
+        offsets = _BLACK_KEYS_FIRST_OCTAVE if octave == 0 else _BLACK_KEYS_LATER_OCTAVE
+        app.black_key_starts += [app.piano_x + octave * OCTAVE_W + o for o in offsets]
+    # The note each key plays, in the same order as the keys are drawn above.
+    app.white_key_notes = [s + 12 * o for o in range(app.octaves) for s in _WHITE_KEY_SEMITONES]
+    app.black_key_notes = [s + 12 * o for o in range(app.octaves) for s in _BLACK_KEY_SEMITONES]
     for s in app.black_key_starts:
-        tulip.bg_rect(s, app.piano_y, app.black_key_w, app.black_key_h, 0, 1)    
+        tulip.bg_rect(s, app.piano_y, app.black_key_w, app.black_key_h, 0, 1)
 
 
 class Settings(tulip.UIElement):
     def __init__(self, width=310, height=300):
         super().__init__()
+        _use_app_font(self)
         self.group.set_size(width, height)
         self.group.remove_flag(lv.obj.FLAG.SCROLLABLE)
         self.label = lv.label(self.group)
@@ -74,7 +136,10 @@ class Settings(tulip.UIElement):
 
         self.tempo = lv.slider(self.rect)
         self.tempo.set_style_bg_opa(lv.OPA.COVER, lv.PART.MAIN)
-        self.tempo.set_width(160)
+        # The one control on this screen you drag rather than tap, so it takes
+        # whatever width the panel got over the 310 it was drawn at -- less the
+        # room the BPM readout beside it needs at the larger font.
+        self.tempo.set_width(160 + (width - 310) - tulip.touch_px(0, 45))
         self.tempo.set_style_bg_color(tulip.pal_to_lv(COLOR_TEXT), lv.PART.INDICATOR)
         self.tempo.set_style_bg_color(tulip.pal_to_lv(COLOR_TEXT), lv.PART.MAIN)
         self.tempo.set_style_bg_color(tulip.pal_to_lv(COLOR_ACCENT), lv.PART.KNOB)
@@ -113,12 +178,12 @@ class Settings(tulip.UIElement):
             switch.set_style_bg_color(tulip.pal_to_lv(COLOR_TEXT), lv.PART.KNOB)
             switch.set_style_border_width(0, lv.PART.KNOB)
 
-        self.mode = ListColumn("mode", ["Up", "Down", "U&D", "Rand"], width=130, height=160, selected=0)
+        self.mode = ListColumn("mode", ["Up", "Down", "U&D", "Rand"], width=130, height=160 + (height - 300), selected=0)
         self.mode.group.set_parent(self.rect)
         self.mode.group.set_style_bg_color(tulip.pal_to_lv(COLOR_PANEL),0)
         self.mode.group.align_to(alabel, lv.ALIGN.OUT_BOTTOM_LEFT, 0, 20)
 
-        self.range = ListColumn("range", ["1", "2", "3"], width=130, height=160, selected=0)
+        self.range = ListColumn("range", ["1", "2", "3"], width=130, height=160 + (height - 300), selected=0)
         self.range.group.set_parent(self.rect)
         self.range.group.set_style_bg_color(tulip.pal_to_lv(COLOR_PANEL),0)
         self.range.group.align_to(self.mode.group, lv.ALIGN.OUT_RIGHT_TOP, 10, 0)
@@ -175,13 +240,15 @@ class Settings(tulip.UIElement):
 
 class ListColumn(tulip.UIElement):
     def __init__(self, name, items=None, selected=None, width=175, height=300, pool_size=0):
-        super().__init__() 
+        super().__init__()
         self.name = name
         self.selected = selected
+        _use_app_font(self)
         self.group.set_size(width,height)
         self.group.remove_flag(lv.obj.FLAG.SCROLLABLE)
         self.label = lv.label(self.group)
-        #self.label.set_style_text_font(lv.font_tulip_11)
+        if tulip.touch_first():
+            self.label.set_style_text_font(HEADING_FONT, 0)
         self.label.set_text(name)
         _style_text(self.label)
         self.list = lv.list(self.group)
@@ -267,8 +334,8 @@ class ListColumn(tulip.UIElement):
         self.select(button.get_index())
 
 def play_note_from_coord(app, x, y, up):
-    white_key_notes = [0,2,4,5,7,9,11,12,14,16,17,19,21,23]
-    black_key_notes = [1,3,6,8, 10, 13, 15, 18, 20, 22]
+    white_key_notes = app.white_key_notes
+    black_key_notes = app.black_key_notes
     white_key = int((x-app.piano_x)/app.white_key_w)
     note_idx = None
     if y < app.piano_y + app.black_key_h:
@@ -280,7 +347,7 @@ def play_note_from_coord(app, x, y, up):
         note_idx = white_key_notes[white_key]
     if note_idx is not None:
         channel = int(app.channels.button_texts[app.channels.selected])
-        note = note_idx + 48
+        note = note_idx + BASE_NOTE
         if(up):
             app.held_note[note] = False
             midi.config.get_synth(channel).note_off(note)
@@ -398,23 +465,30 @@ def run(screen):
     app.quit_callback = quit
     app.activate_callback = activate
     app.deactivate_callback = deactivate
-    app.group.set_style_text_font(lv.font_tulip_11, 0)
+    app.group.set_style_text_font(LIST_FONT, 0)
     _style_text(app.group)
 
+    # The columns fill whatever is above the keyboard, and the width this panel
+    # has over 1024 is split between the two columns that can use it: the patch
+    # names, the only ones that ever run out of room, and the sequencer box.
+    (_, piano_y, _, _) = piano_geometry(*tulip.screen_size())
+    list_h = piano_y - app.offset_y - 5
+    extra_w = tulip.screen_extra_w()
+
     # Skip 10, drums
-    app.channels = ListColumn('channel',["1","2","3","4","5","6","7","8","9","11","12","13","14","15","16"], selected=0, width=100)
+    app.channels = ListColumn('channel',["1","2","3","4","5","6","7","8","9","11","12","13","14","15","16"], selected=0, width=100, height=list_h)
     app.add(app.channels, direction=lv.ALIGN.OUT_BOTTOM_LEFT)
 
-    app.synths = ListColumn('synth', ["Juno-6", "DX7", "Misc", "Custom"])
+    app.synths = ListColumn('synth', ["Juno-6", "DX7", "Misc", "Custom"], height=list_h)
     app.add(app.synths)
 
-    app.patchlist = ListColumn('patches', pool_size=128)
+    app.patchlist = ListColumn('patches', pool_size=128, width=175 + extra_w // 2, height=list_h)
     app.add(app.patchlist)
 
-    app.polyphony = ListColumn('polyphony', [str(x+1) for x in range(8)], width=100)
+    app.polyphony = ListColumn('polyphony', [str(x+1) for x in range(8)], width=100, height=list_h)
     app.add(app.polyphony)
-    
-    app.settings = Settings()
+
+    app.settings = Settings(width=310 + extra_w // 2, height=list_h)
     app.settings.update_from_arp(midi.arpeggiator)
     app.settings.set_tempo(tulip.seq_bpm())
 

@@ -34,7 +34,11 @@ class JunoSection(tulip.UIElement):
     
     header_color = COLOR_HEADER
     bg_color = COLOR_BG
-    header_font = lv.font_montserrat_12
+    # The header is clipped to the width of the controls beneath it, and the
+    # narrow sections are one column wide -- "PORT" over a single slider has
+    # about 50px. helvB14 is as large as that fits, and being bold it reads as a
+    # heading at a size where a lighter face would not.
+    header_font = lv.font_tulip_5 if tulip.touch_first() else lv.font_montserrat_12
     text_color = COLOR_TEXT
     section_gap = 10
     
@@ -73,6 +77,14 @@ class JunoSection(tulip.UIElement):
             self.last_obj_added = obj.group
             total_width += obj.group.get_width() 
 
+        if tulip.touch_first():
+            # The header is clipped to whatever width it is given, and the
+            # one-column sections are narrower than their own names -- PORT sits
+            # over a single slider and came out as "POR". Let those keep their
+            # natural width; every section wide enough for its name is untouched.
+            self.header.set_width(tulip.LV_SIZE_CONTENT)
+            self.header.update_layout()
+            total_width = max(total_width, self.header.get_width())
         self.header.set_width(total_width)
         tulip.lv_depad(self.header)
 
@@ -84,8 +96,13 @@ class JunoSection(tulip.UIElement):
 class JunoButtons(tulip.UIElement):
     """A set of buttons/checkboxes, one under another."""
 
-    font = lv.font_unscii_8
-    width = 37
+    # helvR14 rather than one of the monospace Tulip faces: get_lvgl_font_from_tulip()
+    # in shared/lvgl_u8g2.c sets an lv_font_t's line_height from the u8g2 font's
+    # max_char_WIDTH, so anything taller than it is wide has its top rows clipped
+    # -- 8x13 came out with "Off" reading as "Uff". The proportional faces are
+    # about as wide as they are tall and escape it.
+    font = lv.font_tulip_6 if tulip.touch_first() else lv.font_unscii_8
+    width = tulip.touch_px(37, 44)
 
     def __init__(self, name, button_labels, callbacks=None, rounded=False):
         super().__init__()
@@ -106,7 +123,12 @@ class JunoButtons(tulip.UIElement):
             if self.checkboxes:
                 text.align_to(self.checkboxes[-1], lv.ALIGN.OUT_BOTTOM_MID, 0, 10)
             else:
-                text.align_to(self.group, lv.ALIGN.TOP_MID, 0, 0)
+                # A slider's description sits 20px down from the top of its
+                # group -- align() honours the group's padding, and the
+                # align_to() here does not -- so these columns have always
+                # started 20px high. That only showed once the bigger font
+                # pushed them up under the section header; match the sliders.
+                text.align_to(self.group, lv.ALIGN.TOP_MID, 0, tulip.touch_px(0, 20))
             checkbox = lv.checkbox(self.group)
             checkbox.set_text("")
             checkbox.add_event_cb(self.callback, lv.EVENT.VALUE_CHANGED, self.checkbox_cb_data)
@@ -189,12 +211,21 @@ class JunoSlider(tulip.UIElement):
     handle_radius = 0
     handle_v_pad = 1
     handle_h_pad  = 5
-    width = 15
-    height = 130
+    # 15px of slider is under two millimetres on the Tab5's 7" panel -- fine to
+    # aim a mouse at, not something you can drag with a fingertip. The taller
+    # travel is worth having anyway: this is a synth panel, and the real Juno-6
+    # had long throws.
+    width = tulip.touch_px(15, 24)
+    height = tulip.touch_px(130, 440)
     # The height / width of the slider unit (+ label and value) is slightly bigger than the slider
     total_height = height + 85
     total_width = width + 25
-    font = lv.font_unscii_8
+    # helvR14 rather than one of the monospace Tulip faces: get_lvgl_font_from_tulip()
+    # in shared/lvgl_u8g2.c sets an lv_font_t's line_height from the u8g2 font's
+    # max_char_WIDTH, so anything taller than it is wide has its top rows clipped
+    # -- 8x13 came out with "Off" reading as "Uff". The proportional faces are
+    # about as wide as they are tall and escape it.
+    font = lv.font_tulip_6 if tulip.touch_first() else lv.font_unscii_8
 
     def __init__(self, name, callback=None):
         super().__init__()
@@ -340,11 +371,11 @@ class JunoTokenSpinbox(JunoControlledLabel):
 
 
 class JunoDropDown(tulip.UIElement):
-    def __init__(self, name, items, set_fn, initial_value=0, set_fn_takes_item_str=False, **kwargs):
+    def __init__(self, name, items, set_fn, initial_value=0, set_fn_takes_item_str=False, width=430, **kwargs):
         super().__init__()
         self.set_fn = set_fn  # called when value changes, returns text to display.
         self.set_fn_takes_item_str = set_fn_takes_item_str
-        self.group.set_size(430,40)
+        self.group.set_size(width, tulip.touch_px(40, 52))
         self.label = lv.label(self.group)
         self.label.set_text(name)
         _style_text(self.label)
@@ -352,11 +383,25 @@ class JunoDropDown(tulip.UIElement):
         self.dropdown.set_style_bg_color(tulip.pal_to_lv(COLOR_CONTROL), lv.PART.MAIN)
         self.dropdown.set_style_text_color(tulip.pal_to_lv(COLOR_TEXT), lv.PART.MAIN)
         self.dropdown.set_style_border_color(tulip.pal_to_lv(COLOR_KNOB), lv.PART.MAIN)
+        if tulip.touch_first():
+            # The patch name is what you read from across the desk, and the list
+            # that drops out of it is what you then have to hit. Both before the
+            # align below: align_to freezes a position, so a font set afterwards
+            # would leave the dropdown sitting on top of a now-wider label.
+            self.label.set_style_text_font(lv.font_tulip_15, 0)
+            self.dropdown.set_style_text_font(lv.font_tulip_15, 0)
+            self.dropdown.set_style_text_font(lv.font_tulip_15, lv.PART.SELECTED)
         self.dropdown.align_to(self.label, lv.ALIGN.OUT_RIGHT_MID, 0, 0)
         self.dropdown.set_dir(lv.DIR.BOTTOM)
         self.dropdown_cb_data = {}
         self.dropdown.add_event_cb(self.cb, lv.EVENT.VALUE_CHANGED, self.dropdown_cb_data)
-        self.dropdown.set_height(40)
+        self.dropdown.set_height(tulip.touch_px(40, 52))
+        if tulip.touch_first():
+            # A dropdown sizes itself to its text, and the bigger font pushed
+            # "A53 Lead III" past the box it was measured into. Give it the rest
+            # of the row instead.
+            self.group.update_layout()
+            self.dropdown.set_width(self.group.get_width() - self.label.get_width() - 10)
         self.current_index = initial_value
         self.update_items(items)  # Triggers first call to set_fn
 
@@ -603,7 +648,10 @@ def get_active_midi_channels_as_str():
 
 # Make patch_selector first since it is secondary to the channel_selector,
 # and the channel_selector attempts to manipulate it, so it's good if it exists.
-patch_selector = JunoDropDown("Patch", patches.patches[:128], setup_from_patch_number, initial_value=current_juno().patch_number)
+# The patch names are the long ones, and the row they sit on has width to spare
+# on a 1280 panel -- but not all of it: the task bar owns the top right corner.
+patch_selector = JunoDropDown("Patch", patches.patches[:128], setup_from_patch_number, initial_value=current_juno().patch_number,
+                              width=430 + tulip.screen_extra_w() // 2)
 
 channel_selector = JunoDropDown('Assigned Juno Channel:', get_active_midi_channels_as_str(), setup_from_midi_chan_str, set_fn_takes_item_str=True)
 
@@ -708,13 +756,25 @@ def quit(screen):
         midi.remove_callback(midi_event_cb)
 
 def run(screen):
+    (screen_w, screen_h) = tulip.screen_size()
     screen.offset_y = 100
     screen.quit_callback = quit
     screen.activate_callback = activate
     screen.deactivate_callback = deactivate
     screen.set_bg_color(COLOR_BG)
     screen.add([lfo, dco, hpf, vcf, vca, env, ch])
-    screen.add(port, x=20, y=330)
+    # PORT is one slider, and at 1024 it never fitted on the end of the row --
+    # it was parked below the panel, where the channel selector crowded it. Put
+    # it in line wherever the panel is wide enough to take it.
+    # The width test on its own comes within a few pixels of passing at 1024,
+    # where it must not: this is only ever a question on a panel bigger than the
+    # one the layout was drawn for.
+    screen.group.update_layout()
+    if (tulip.screen_extra_w()
+            and ch.group.get_x() + ch.group.get_width() + port.group.get_width() < screen_w - 16):
+        screen.add(port)
+    else:
+        screen.add(port, x=20, y=330)
     # I wanted this further left, but the channel_selector stomps on in?
     screen.add(patch_selector, x=500, y=20) # relative=lfo, direction=lv.ALIGN.OUT_TOP_MID)
     # channel_selector affects patch_selector, so it is placed to the left.

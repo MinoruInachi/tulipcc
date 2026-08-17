@@ -1,7 +1,8 @@
 # drums.py
 # lvgl drum machine for Tulip
 
-from tulip import UIScreen, UIElement, pal_to_lv, lv_depad, lv, frame_callback, ticks_ms, seq_ticks
+from tulip import (UIScreen, UIElement, pal_to_lv, lv_depad, lv, frame_callback,
+                   ticks_ms, seq_ticks, touch_px, touch_first)
 import amy
 import sequencer
 from patches import drumkit
@@ -9,14 +10,26 @@ from patches import drumkit
 # Use AMY synths starting at this number (avoid MIDI channels and system synth)
 _BASE_SYNTH = 20
 
+# The step buttons are what you actually play this machine on, and 30x40 under a
+# 10px LED is a mouse target rather than a finger one. Everything in a row is
+# laid out from these, so they are what decides whether sixteen steps, a preset
+# menu and three knobs still fit across the panel -- the sizes below come to
+# 1233px of a 1280 one, and to exactly the old numbers at 1024.
+_LED_SIZE = touch_px(10, 14)
+_KNOB_SIZE = touch_px(50, 62)
+_KNOB_GAP = 15
+_DROPDOWN_W = touch_px(100, 160)
+_DROPDOWN_H = touch_px(40, 52)
+_ROW_FONT = lv.font_tulip_15 if touch_first() else None
+
 # A single drum machine switch with LED
 class DrumSwitch(UIElement):
     led_off_color = 255
     led_on_color = 224
     # R O Y W 808 colors
     switch_colors = [128,208,248,255]
-    button_width = 30
-    button_height = 40
+    button_width = touch_px(30, 42)
+    button_height = touch_px(40, 56)
 
     def __init__(self, row, col, synth, switch_color_idx=0):
         super().__init__() 
@@ -42,7 +55,7 @@ class DrumSwitch(UIElement):
         lv_depad(bottom_rect)
 
         self.led = lv.led(self.group)
-        self.led.set_size(5,5)
+        self.led.set_size(touch_px(5, 8), touch_px(5, 8))
         self.led.align_to(top_rect, lv.ALIGN.CENTER,0,0)
         self.led.set_brightness(150)
         self.led.set_color(pal_to_lv(DrumSwitch.led_on_color))
@@ -84,15 +97,27 @@ class DrumSwitch(UIElement):
             self.set(True)
 
 
+def _row_width():
+    """How wide a row comes out: preset menu, sixteen steps, three knobs."""
+    return ((DrumSwitch.button_width + 12) * 16 + 175 + 100
+            + (_DROPDOWN_W - 100) + 3 * (_KNOB_SIZE - 50))
+
+
+# Left edge of the first beat LED, which has to sit over the middle of the first
+# step button. 105 is where that landed with the original sizes.
+_LED_STRIP_X = (105 + (_DROPDOWN_W - 100)
+                + ((DrumSwitch.button_width + 10) - 40) // 2 - (_LED_SIZE - 10) // 2)
+
+
 # A row of LEDs to keep time with and some labels
-class LEDStrip(UIElement): 
+class LEDStrip(UIElement):
     def __init__(self):
         super().__init__() 
         self.leds= []
-        self.group.set_size((DrumSwitch.button_width+12)*16+175+100,DrumSwitch.button_height+65)
+        self.group.set_size(_row_width(), DrumSwitch.button_height+65)
         for i in range(16):
             l = lv.led(self.group)
-            l.set_size(10,10)
+            l.set_size(_LED_SIZE,_LED_SIZE)
             l.set_brightness(150)
             if(i%4==0):
                 l.set_color(pal_to_lv(DrumSwitch.led_on_color))
@@ -100,13 +125,28 @@ class LEDStrip(UIElement):
                 l.set_color(pal_to_lv(92))                
             l.off()
             if i==0:
-                l.align_to(self.group, lv.ALIGN.LEFT_MID,105,0)
+                l.align_to(self.group, lv.ALIGN.LEFT_MID,_LED_STRIP_X,0)
             else:
-                l.align_to(self.leds[i-1], lv.ALIGN.OUT_RIGHT_MID, DrumSwitch.button_width, 0)
+                # One LED per step button, so they share the button pitch.
+                l.align_to(self.leds[i-1], lv.ALIGN.OUT_RIGHT_MID, DrumSwitch.button_width + 10 - _LED_SIZE, 0)
             self.leds.append(l)
-        descs = lv.label(self.group)
-        descs.set_text("Vol             Pitch            Pan")
-        descs.align_to(self.leds[-1], lv.ALIGN.OUT_RIGHT_MID, 45, 0)
+        if touch_first():
+            # These three headings used to be one label with the gaps typed in
+            # as spaces, which only lands over the knobs at one knob size in one
+            # font. Give each knob its own.
+            step_pitch = DrumSwitch.button_width + 10
+            knobs_left = _LED_STRIP_X + _LED_SIZE // 2 - step_pitch // 2 + 16 * step_pitch + _KNOB_GAP
+            for i, name in enumerate(("Vol", "Pitch", "Pan")):
+                desc = lv.label(self.group)
+                desc.set_text(name)
+                desc.set_style_text_font(_ROW_FONT, 0)
+                desc.set_width(_KNOB_SIZE)
+                desc.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
+                desc.align_to(self.group, lv.ALIGN.LEFT_MID, knobs_left + i * (_KNOB_SIZE + _KNOB_GAP), 0)
+        else:
+            descs = lv.label(self.group)
+            descs.set_text("Vol             Pitch            Pan")
+            descs.align_to(self.leds[-1], lv.ALIGN.OUT_RIGHT_MID, 45, 0)
         self.group.remove_flag(lv.obj.FLAG.SCROLLABLE)
 
     def set(self, idx, val):
@@ -132,13 +172,18 @@ class DrumRow(UIElement):
         self.items = items
         self.synth = _BASE_SYNTH + self.row if synth is None else synth
         # Droodown on left
-        self.group.set_size((DrumSwitch.button_width+12)*16+175+100,DrumSwitch.button_height+65)
+        self.group.set_size(_row_width(), DrumSwitch.button_height+65)
         self.dropdown = lv.dropdown(self.group)
         self.dropdown.set_options("\n".join(items))
         self.dropdown.set_dir(lv.DIR.BOTTOM)
         self.dropdown.add_event_cb(self.dropdown_cb, lv.EVENT.VALUE_CHANGED, None)
-        self.dropdown.set_height(40)
-        self.dropdown.set_width(100)
+        if touch_first():
+            # Before the sizing below: a dropdown measures itself against its
+            # font, and its list is what you then have to hit with a fingertip.
+            self.dropdown.set_style_text_font(_ROW_FONT, 0)
+            self.dropdown.set_style_text_font(_ROW_FONT, lv.PART.SELECTED)
+        self.dropdown.set_height(_DROPDOWN_H)
+        self.dropdown.set_width(_DROPDOWN_W)
         self.dropdown.align_to(self.group, lv.ALIGN.LEFT_MID,0,0)
         lv_depad(self.dropdown)
         for i in range(4):
@@ -157,7 +202,7 @@ class DrumRow(UIElement):
         self.knobs = []
         for i in range(3):
             k = lv.arc(self.group)
-            k.set_size(50,50)
+            k.set_size(_KNOB_SIZE,_KNOB_SIZE)
             k.set_style_pad_hor(0,lv.PART.KNOB)
             k.set_style_pad_ver(0,lv.PART.KNOB)
             if(i==2): # pan is special color white/red
@@ -167,9 +212,9 @@ class DrumRow(UIElement):
                 k.set_style_bg_color(pal_to_lv(DrumRow.knob_color), lv.PART.KNOB)
                 k.set_style_arc_color(pal_to_lv(DrumRow.knob_color), lv.PART.INDICATOR)
             if(i==0):
-                k.align_to(self.objs[-1].group, lv.ALIGN.OUT_RIGHT_MID,15,0)
+                k.align_to(self.objs[-1].group, lv.ALIGN.OUT_RIGHT_MID,_KNOB_GAP,0)
             else:
-                k.align_to(self.knobs[i-1], lv.ALIGN.OUT_RIGHT_MID,15,0)
+                k.align_to(self.knobs[i-1], lv.ALIGN.OUT_RIGHT_MID,_KNOB_GAP,0)
             cb = [self.vel_cb, self.pitch_cb, self.pan_cb][i]
             k.add_event_cb(cb, lv.EVENT.VALUE_CHANGED, None)
             self.knobs.append(k)

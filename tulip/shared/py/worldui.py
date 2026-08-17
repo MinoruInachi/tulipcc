@@ -19,6 +19,36 @@ TIME_BETWEEN_CHECKS_S = 60
 # pixel count.
 LV_COORD_MAX = lv.COORD.MAX if hasattr(lv, 'COORD') else (1 << 29) - 1
 
+# The file and message panes are column-aligned text -- the timestamp, the name
+# and the body only line up because every glyph is the same width -- so a bigger
+# font here has to stay monospace. unscii_16 is the only one built in, and it is
+# 16x16 against unscii_8's 8x8: twice the size in both directions, so the longest
+# messages now wrap where they used to fit. Worth it. At 8px a line of this is
+# under a millimetre tall on the Tab5's 7" panel.
+_BODY_FONT = lv.font_unscii_16 if tulip.touch_first() else lv.font_unscii_8
+# The headings stay on a 1-bit bitmap face for the same reason everything else
+# on Tulip does: LVGL renders into RGB565 and the compositor drops that to the
+# 8-bit palette, so an antialiased glyph edge comes out as blue speckle.
+_LABEL_FONT = lv.font_tulip_15 if tulip.touch_first() else lv.font_tulip_13
+# Pane heights, in the order they stack. The file list keeps eight rows at either
+# font size, and the message log gets the height the panel has over the 600 these
+# were drawn for, less what the rest of this takes. (The entry box asks for more
+# than it gets -- a one-line textarea sizes itself to its font -- but the taller
+# face still leaves it a 50px target, which is a fingertip.)
+FILES_H = tulip.touch_px(120, 152)
+ENTRY_H = tulip.touch_px(60, 76)
+MESSAGES_H = (280 + tulip.screen_extra_h()
+              - (FILES_H - 120) - (ENTRY_H - 60) - tulip.touch_px(0, 40))
+# A heading is aligned above its pane, so it lives in the group's top padding.
+# It needs 24px for the label itself -- the default padding is 20, which cropped
+# the tops of the letters at the larger face, because Tulip's bitmap faces draw
+# above their own box (get_lvgl_font_from_tulip() in shared/lvgl_u8g2.c leaves
+# base_line at 0) -- and 8 more to clear the pane, which overflows its own box
+# by a few rows when it scrolls to its newest line.
+PANE_PAD_TOP = tulip.touch_px(20, 38)
+HEADING_LIFT = tulip.touch_px(0, -8)
+BG_COLOR = 13
+
 def check_messages(x=None):
     global app
 
@@ -99,7 +129,7 @@ class TextEntry(tulip.UIElement):
         self.ta = lv.textarea(self.group)
         self.group.set_size(H_RES-40,h)
         self.ta.set_size(H_RES-80, h)
-        self.ta.set_style_text_font(lv.font_tulip_13, 0)
+        self.ta.set_style_text_font(_LABEL_FONT, 0)
         self.ta.set_style_bg_color(tulip.pal_to_lv(bgcolor), lv.PART.MAIN)
         self.ta.set_style_text_color(tulip.pal_to_lv(255),0)
         self.ta.set_style_border_color(tulip.pal_to_lv(255), lv.PART.CURSOR | lv.STATE.FOCUSED)
@@ -114,18 +144,32 @@ class TextSection(tulip.UIElement):
     def __init__(self, h, name, bgcolor=255):
         super().__init__()
         self.ta = lv.label(self.group)
+        if tulip.touch_first():
+            # Only where the heading needs the room -- elsewhere leave the theme
+            # to supply the padding it always has, rather than assert a number.
+            self.group.set_style_pad_top(PANE_PAD_TOP, 0)
         self.group.set_size(H_RES-40,h)
         self.ta.set_size(H_RES-80, h)
-        self.ta.set_style_text_font(lv.font_unscii_8, 0)
+        self.ta.set_style_text_font(_BODY_FONT, 0)
         self.ta.set_style_bg_color(tulip.pal_to_lv(bgcolor), lv.PART.MAIN)
         self.ta.set_style_text_color(tulip.pal_to_lv(255),0)
         self.ta.set_style_border_color(tulip.pal_to_lv(0), lv.PART.CURSOR | lv.STATE.FOCUSED)
 
         self.label = lv.label(self.group)
-        self.label.set_style_text_font(lv.font_tulip_13, 0)
+        self.label.set_style_text_font(_LABEL_FONT, 0)
+        if tulip.touch_first():
+            # The pane scrolls to its newest line, so its top row is cut part
+            # way through wherever the wrapped lines above it happen to end, and
+            # that sliver lands right behind this heading. Paint over it rather
+            # than leave half a message crossing the words.
+            self.label.set_style_bg_color(tulip.pal_to_lv(BG_COLOR), 0)
+            self.label.set_style_bg_opa(lv.OPA.COVER, 0)
+            # Across the whole pane, not just behind the words: the sliver runs
+            # the full width and the heading is only a few characters of it.
+            self.label.set_width(H_RES - 80)
         self.label.set_text(name)
         self.label.set_style_text_color(tulip.pal_to_lv(255),0)
-        self.label.align_to(self.ta, lv.ALIGN.OUT_TOP_LEFT, 0, 0)
+        self.label.align_to(self.ta, lv.ALIGN.OUT_TOP_LEFT, 0, HEADING_LIFT)
 
 def run(screen):
     global app
@@ -143,15 +187,15 @@ def run(screen):
     app.last_check_ms = -(TIME_BETWEEN_CHECKS_S*1000)
     
 
-    screen.set_bg_color(13)
+    screen.set_bg_color(BG_COLOR)
     screen.quit_callback = quit
     screen.activate_callback = activate
     screen.deactivate_callback = deactivate
     screen.handle_keyboard=True
     screen.offset_y = 30
-    app.files = TextSection(120, "Latest files. Use world.download(name) in the REPL to get them.", bgcolor=35)
-    app.messages = TextSection(280, "Latest messages", bgcolor=0)
-    app.entry = TextEntry(60, bgcolor=0)
+    app.files = TextSection(FILES_H, "Latest files. Use world.download(name) in the REPL to get them.", bgcolor=35)
+    app.messages = TextSection(MESSAGES_H, "Latest messages", bgcolor=0)
+    app.entry = TextEntry(ENTRY_H, bgcolor=0)
 
     screen.add(app.files, direction=lv.ALIGN.OUT_BOTTOM_LEFT)
     screen.add(app.messages, direction=lv.ALIGN.OUT_BOTTOM_LEFT, pad_y=0)

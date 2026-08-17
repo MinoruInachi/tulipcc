@@ -30,6 +30,39 @@ _task_bar_button_px = 56
 _launcher_width_px = 300 if _touch_ui else 195
 
 
+# ---- Layout metrics --------------------------------------------------------
+# Every app under tulip/shared/py was laid out against the 1024x600 Tulip CC
+# panel, with its geometry written in as literals -- voices.py even drew the
+# bottom of the piano at y=599. The Tab5's panel is 1280x720, so those apps used
+# well under two thirds of it and left the rest black. They ask for their
+# geometry here now instead.
+#
+# Everything below returns the old literal on a 1024x600 screen, so Tulip CC,
+# desktop and web keep the layout they have always had, to the pixel.
+DESIGN_H_RES = 1024
+DESIGN_V_RES = 600
+
+
+def screen_extra_w():
+    """How much wider this panel is than the 1024 the apps were drawn for."""
+    return max(0, tulip.screen_size()[0] - DESIGN_H_RES)
+
+
+def screen_extra_h():
+    """How much taller this panel is than the 600 the apps were drawn for."""
+    return max(0, tulip.screen_size()[1] - DESIGN_V_RES)
+
+
+def touch_first():
+    """True where the only pointer is a fingertip, so controls have to be big."""
+    return _touch_ui
+
+
+def touch_px(mouse_px, finger_px):
+    """Size a control: what a mouse can hit, or what a fingertip can."""
+    return finger_px if _touch_ui else mouse_px
+
+
 def _style_task_bar_button(button, label):
     label.set_style_text_font(_task_bar_font, 0)
     label.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
