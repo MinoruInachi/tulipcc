@@ -88,6 +88,7 @@ We ship a couple of game-like examples, check them out:
  * [`bunny_bounce`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/bunny_bounce/bunny_bounce.py)
  * [`planet_boing`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/planet_boing/planet_boing.py)
  * [`parallax`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/parallax.py)
+ * [`starfall`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/starfall.py) - a late-70s style fixed shooter, drawn entirely on the BG plane
 
 The Tulip World BBS supports uploading and downloading packages as tar files: just `world.upload('package', username)` or `world.download('package')`. 
 
