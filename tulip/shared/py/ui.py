@@ -75,6 +75,33 @@ def _style_task_bar_button(button, label):
 
 running_apps = {}
 current_app_string = "repl"
+
+# On TAB5 LVGL is composited over the BG plane instead of drawn into it (lv_overlay
+# in shared/display.c), which is what stops a game's BG drawing from blacking the
+# task bar buttons out and a scrolled row from dragging them sideways. The other
+# side of that bargain is transparency: LVGL is now genuinely on top, so a screen
+# that wants the BG plane visible has to leave its own background alone and let the
+# BG plane carry the colour instead. On every other board LVGL renders straight
+# into bg, where painting an opaque background is how a screen covers whatever the
+# last app left behind, so none of this applies.
+LV_ALPHA = 0x55
+_lvgl_overlays_bg = tulip.board() == "TAB5"
+
+
+def _screen_bg_color(screen):
+    """The colour LVGL should paint this screen's own background in.
+
+    Transparent for a screen with anything of its own on the BG plane -- a game,
+    the REPL and its wallpaper, or an app that says so with bg_plane -- and its
+    declared colour goes on the BG plane instead (see UIScreen._paint_bg_plane).
+    Every other screen stays opaque, which keeps LVGL's own background doing the
+    covering for the apps that only ever draw widgets.
+    """
+    if _lvgl_overlays_bg and (screen.game or screen.bg_plane or screen.name == 'repl'):
+        return LV_ALPHA
+    return screen.bg_color
+
+
 _repl_background_unset = object()
 _repl_background = None
 _repl_background_bitmap = None
@@ -102,6 +129,8 @@ def repl_background(image=_repl_background_unset, x=0, y=0, color=9):
         _repl_background_bitmap = None
         # Opaque again: LVGL paints over bg on the REPL screen, so it can erase
         # its own widgets there without help. See _repaint_repl_background().
+        # (Where LVGL is an overlay it is set_bg_color that puts the flat colour
+        # back over the wallpaper, on the BG plane -- see _paint_bg_plane.)
         repl_screen.set_bg_color(UIScreen.default_repl_bg_color)
         return None
     if isinstance(image, str) and not image.startswith('/'):
@@ -205,6 +234,12 @@ class UIScreen():
         self.app_dir = tulip.pwd()
         lv_depad(self.group)
         self.game = False
+        # Set this if the app draws on the BG plane without being a game -- it is
+        # what tells LVGL to keep its hands off this screen's background so the BG
+        # plane shows through (voices.py's piano is drawn that way). Only matters
+        # where LVGL is composited over the BG rather than into it; see
+        # _screen_bg_color().
+        self.bg_plane = False
         self.hide_task_bar = False
         self.keep_tfb = keep_tfb
         self.handle_keyboard = handle_keyboard
@@ -269,7 +304,25 @@ class UIScreen():
 
     def set_bg_color(self, bg_color):
         self.bg_color = bg_color
-        self.group.set_style_bg_color(pal_to_lv(bg_color), lv.PART.MAIN)
+        self.group.set_style_bg_color(pal_to_lv(_screen_bg_color(self)), lv.PART.MAIN)
+        if(self.active):
+            # A see-through screen keeps its background on the BG plane, so that
+            # is where a colour change has to land as well. Wipes whatever else
+            # the app had drawn down there, the same as LVGL repainting its own
+            # background would have.
+            self._paint_bg_plane()
+
+    def _paint_bg_plane(self):
+        """Paint this screen's background where a transparent screen keeps it.
+
+        A no-op unless LVGL is an overlay and this screen is see-through, in which
+        case the colour LVGL would have painted has to go on the BG plane -- or the
+        screen shows whatever the last app left down there through its own
+        background until something else draws.
+        """
+        if _lvgl_overlays_bg and _screen_bg_color(self) == LV_ALPHA:
+            if self.bg_color != LV_ALPHA:
+                tulip.bg_clear(self.bg_color)
 
 
     def alttab_callback(self, e):
@@ -355,8 +408,8 @@ class UIScreen():
         self.active = True
         if(not self.hide_task_bar):
             self.draw_task_bar()
-        self.group.set_style_bg_color(pal_to_lv(self.bg_color), lv.PART.MAIN)
-        
+        self.group.set_style_bg_color(pal_to_lv(_screen_bg_color(self)), lv.PART.MAIN)
+
         lv.screen_load(self.screen)
 
         if(self.handle_keyboard):
@@ -370,9 +423,11 @@ class UIScreen():
         if(self.name == 'repl'):
             tulip.tfb_start()
             tulip.set_screen_as_repl(1)
-            tulip.tfb_update() # force redraw of tfb, maybe tfb_start should do this? 
+            tulip.tfb_update() # force redraw of tfb, maybe tfb_start should do this?
             if _repl_background is not None:
                 tulip.defer(_draw_repl_background, None, 200)
+            else:
+                self._paint_bg_plane()
 
         else:
             tulip.set_screen_as_repl(0)
@@ -380,6 +435,7 @@ class UIScreen():
                 tulip.tfb_start()
             else:
                 tulip.tfb_stop()
+            self._paint_bg_plane()
             if(self.game):
                 if hasattr(tulip, "key_scan"):
                     tulip.key_scan(1) # enter direct scan mode, keys will not hit the REPL this way

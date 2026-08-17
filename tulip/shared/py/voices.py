@@ -458,7 +458,12 @@ def sync_ui_for_channel(channel):
 
 def run(screen):
     global app 
-    app = screen # we can use the screen obj passed in as a general "store stuff here" class, as well as inspect the UI 
+    app = screen # we can use the screen obj passed in as a general "store stuff here" class, as well as inspect the UI
+    # The keyboard along the bottom is drawn on the BG plane, so where LVGL is
+    # composited on top of it (the Tab5) this screen's background has to stay out
+    # of the way -- UIScreen paints COLOR_BG on the BG plane instead. Set before
+    # set_bg_color, which is what applies it.
+    app.bg_plane = True
     app.set_bg_color(COLOR_BG)
     app.offset_y = 25
     app.offset_x = 50

@@ -107,6 +107,30 @@ uint32_t *sprite_mem;//[SPRITES];
 
 uint8_t * lv_buf;
 
+#ifdef TAB5
+// LVGL's own plane, laid over the BG at composite time instead of drawn into it.
+//
+// LVGL used to flush straight into bg, which made the two one buffer where
+// whatever was written last won. Anything redrawing the BG blacked the task bar
+// buttons out and nothing ever repainted them -- they came back for a moment
+// under a finger, because a touch is what invalidated them. On a scrolled row it
+// was worse: bg is read through x_offsets[], so parallax's sky dragged the
+// buttons sideways across the screen and off the edge. Giving LVGL a buffer in
+// screen space, composited every frame, is what makes the two planes independent.
+//
+// ALPHA is a pixel LVGL is not drawing, so the BG plane shows through. The REPL
+// background already worked that way; now any screen can, and one that wants the
+// BG plane visible just leaves its own background ALPHA (see ui.py).
+uint8_t *lv_overlay;
+// The span of non-ALPHA pixels in each row, so compositing a mostly empty overlay
+// -- a game with nothing on it but the task bar -- costs the corner rather than
+// the whole width. Recomputed for the rows a flush touches, which happens far
+// less often than a frame.
+static uint16_t lv_overlay_x0[V_RES + OFFSCREEN_Y_PX];
+static uint16_t lv_overlay_x1[V_RES + OFFSCREEN_Y_PX];  // exclusive; == x0 is empty
+#define LV_OVERLAY_STRIDE (H_RES + OFFSCREEN_X_PX)
+#endif
+
 uint8_t *TFB;//[TFB_ROWS][TFB_COLS];
 uint8_t *TFBfg;//[TFB_ROWS][TFB_COLS];
 uint8_t *TFBbg;//[TFB_ROWS][TFB_COLS];
@@ -362,6 +386,24 @@ bool IRAM_ATTR display_bounce_empty(void *bounce_buf, int pos_px, int len_bytes,
         } else {
             memset(b_ptr, 0, H_RES);
         }
+#ifdef TAB5
+        // LVGL's plane goes over the BG and under the TFB and the sprites, which
+        // is the order it had when it drew into bg itself. Unlike the BG it is
+        // read straight, with no x_offsets[] -- a widget stays where it was put
+        // however the rows underneath it scroll.
+        if(lv_overlay != NULL && lv_overlay_x1[y] > lv_overlay_x0[y]) {
+            const uint8_t *lv_line = lv_overlay + (uint32_t)y * LV_OVERLAY_STRIDE;
+            const uint16_t lv_x0 = lv_overlay_x0[y];
+            const uint16_t lv_len = lv_overlay_x1[y] - lv_x0;
+            if(memchr(lv_line + lv_x0, ALPHA, lv_len) == NULL) {
+                memcpy(b_ptr + lv_x0, lv_line + lv_x0, lv_len);
+            } else {
+                for(uint16_t x = lv_x0; x < lv_x0 + lv_len; x++) {
+                    if(lv_line[x] != ALPHA) b_ptr[x] = lv_line[x];
+                }
+            }
+        }
+#endif
         if(tfb_active && bg_tfb != NULL && TFB_pxlen != NULL) {
             uint16_t tfb_y = tfb_ring_row_in(y, tfb_top, tfb_h);
             uint8_t *tfb_line = bg_tfb + (tfb_y * H_RES);
@@ -1223,6 +1265,9 @@ void display_set_clock(uint8_t mhz) {
 void display_teardown(void) {
     free_caps(bg); bg = NULL;
     free_caps(bg_tfb); bg_tfb = NULL;
+#ifdef TAB5
+    free_caps(lv_overlay); lv_overlay = NULL;
+#endif
     free_caps(TFB_pxlen); TFB_pxlen = NULL;
     free_caps(sprite_ids); sprite_ids = NULL;
     free_caps(lv_buf); lv_buf = NULL;
@@ -1252,14 +1297,26 @@ void lv_flush_cb_8b(lv_display_t * display, const lv_area_t * area, unsigned cha
     const int32_t area_width = lv_area_get_width(area);
     const uint16_t *src = (const uint16_t *)px_map;
 
-    for(int32_t y = area->y1; y <= area->y2; y++) {
-        if(y < 0 || y >= V_RES + OFFSCREEN_Y_PX) continue;
-        for(int32_t x = area->x1; x <= area->x2; x++) {
-            if(x < 0 || x >= H_RES + OFFSCREEN_X_PX) continue;
-            uint8_t pixel = rgb565to332(src[(y - area->y1) * area_width + (x - area->x1)]);
-            if(!lvgl_is_repl || pixel != ALPHA) {
-                bg[y * (H_RES + OFFSCREEN_X_PX) + x] = pixel;
+    // Into LVGL's own plane, ALPHA and all: a widget that has just been deleted
+    // flushes as the screen's background, and on a transparent screen that is the
+    // ALPHA which has to land here for the BG plane to show through again.
+    if(lv_overlay != NULL) {
+        for(int32_t y = area->y1; y <= area->y2; y++) {
+            if(y < 0 || y >= V_RES + OFFSCREEN_Y_PX) continue;
+            uint8_t *row = lv_overlay + (uint32_t)y * LV_OVERLAY_STRIDE;
+            for(int32_t x = area->x1; x <= area->x2; x++) {
+                if(x < 0 || x >= H_RES + OFFSCREEN_X_PX) continue;
+                row[x] = rgb565to332(src[(y - area->y1) * area_width + (x - area->x1)]);
             }
+            // Rescan the row rather than just widening the span with the flushed
+            // area: the span has to be able to shrink again when a widget goes
+            // away, or the composite keeps paying for one that is not there.
+            uint16_t x0 = 0;
+            while(x0 < H_RES && row[x0] == ALPHA) x0++;
+            uint16_t x1 = H_RES;
+            while(x1 > x0 && row[x1 - 1] == ALPHA) x1--;
+            lv_overlay_x0[y] = x0;
+            lv_overlay_x1[y] = x1;
         }
     }
 #endif
@@ -1416,6 +1473,14 @@ void display_init(void) {
     bg = (uint8_t*)calloc_caps(32, 1, (H_RES+OFFSCREEN_X_PX)*(V_RES+OFFSCREEN_Y_PX)*BYTES_PER_PIXEL + H_RES*BYTES_PER_PIXEL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     // 614400 bytes
     bg_tfb = (uint8_t*)calloc_caps(32, 1, (H_RES*V_RES), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+#ifdef TAB5
+    // LVGL's plane, the same shape as bg so a flush needs no coordinate change,
+    // and cleared to ALPHA so nothing covers the BG plane until LVGL draws.
+    lv_overlay = (uint8_t*)malloc_caps(LV_OVERLAY_STRIDE*(V_RES+OFFSCREEN_Y_PX), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(lv_overlay != NULL) memset(lv_overlay, ALPHA, LV_OVERLAY_STRIDE*(V_RES+OFFSCREEN_Y_PX));
+    for(uint16_t i=0;i<V_RES+OFFSCREEN_Y_PX;i++) { lv_overlay_x0[i] = 0; lv_overlay_x1[i] = 0; }
+#endif
 
     // And various ptrs
     sprite_ids = (uint8_t*)malloc_caps(H_RES *  sizeof(uint8_t), MALLOC_CAP_INTERNAL);
