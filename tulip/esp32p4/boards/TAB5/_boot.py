@@ -118,6 +118,19 @@ except Exception as e:
     except Exception as fallback_err:
         print("TAB5 boot: fallback status draw failed:", fallback_err)
 
+# The rest of what the shared _boot.py leaves in __main__'s globals. The docs use
+# all of these bare, with no tulip. in front: edit("boot.py"), run("app"),
+# synth.PatchSynth(...), sequencer.AMYSequence(...). Without this the names only
+# exist as tulip.edit and tulip.run, and the other two not at all -- which is how
+# the Tab5 REPL ended up being the one board where edit() and run() were a
+# NameError. Kept out of the import above so a failure here says which one.
+try:
+    from tulip import edit, run
+    import synth
+    import sequencer
+except Exception as e:
+    print("TAB5 boot: REPL helpers skipped:", e)
+
 # Same as Tulip CC: user-installed modules live in /user/lib and are importable.
 if _mounted:
     try:
