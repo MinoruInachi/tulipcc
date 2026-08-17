@@ -327,7 +327,7 @@ class Starfall:
         # would cost every frame from now on.
         tulip.sprite_clear()
         tulip.Sprite.reset()
-        tulip.bg_clear(BLACK)
+        self._wipe()
         self._load_art()
         self._start_sounds()
         self.score = 0
@@ -409,7 +409,7 @@ class Starfall:
         self.ufo_at = self.now + UFO_EVERY_MS
         self.timer = 0
 
-        tulip.bg_clear(BLACK)
+        self._wipe()
         self._draw_stars()
         tulip.bg_rect(0, GROUND_Y, SW, S, GREEN, 1)
         self._reset_bunkers()
@@ -418,14 +418,60 @@ class Starfall:
         self._draw_hud()
         self._draw_ship()
 
+    # ------------------------------------------------------------- task bar
+
+    def _task_bar_buttons(self):
+        for name in ("quit_button", "alttab_button"):
+            button = getattr(self.app, name, None)
+            if button is not None:
+                yield button
+
+    def _task_bar_box(self):
+        """The corner the quit and alt-tab buttons sit in, or None if there is
+        no task bar.
+
+        Asked of LVGL rather than assumed: the buttons are 56 pixels square only
+        on a touch board (_style_task_bar_button() in ui.py), and the alt-tab one
+        is not created at all when Starfall is the only app running.
+        """
+        boxes = [(b.get_x(), b.get_y(), b.get_width(), b.get_height())
+                 for b in self._task_bar_buttons()]
+        if not boxes:
+            return None
+        return (min([x for (x, y, w, h) in boxes]),
+                min([y for (x, y, w, h) in boxes]),
+                max([x + w for (x, y, w, h) in boxes]),
+                max([y + h for (x, y, w, h) in boxes]))
+
+    def _wipe(self):
+        """Black the whole screen out, and ask for the task bar back.
+
+        LVGL paints those two buttons into the same framebuffer the BG plane
+        draws into, and it only repaints what it believes has changed -- so a
+        bg_clear() takes them with it and nothing ever puts them back. That is
+        what made them flash into view under a finger and then disappear again:
+        the touch invalidated them, and the next wave wiped them out once more.
+        editor.py does the same after it clears the text framebuffer.
+        """
+        tulip.bg_clear(BLACK)
+        for button in self._task_bar_buttons():
+            button.invalidate()
+
     def _draw_stars(self):
         """Fill the sky above the mystery ship's lane. Drawn once a wave, and
         nothing ever moves through it, so it costs no frames at all."""
+        bar = self._task_bar_box()
+        size = S // 2 or 1
         for _ in range(STARS):
             x = random.randrange(2 * S, SW - 2 * S)
             y = random.randrange(2 * S, UFO_Y - 2 * S)
+            # The sky reaches over the task bar, and a star up there would be a
+            # speck left sitting on a button until LVGL next repainted it.
+            if bar is not None and (x < bar[2] and x + size > bar[0]
+                                    and y < bar[3] and y + size > bar[1]):
+                continue
             shade = random.choice((GREY, WHITE, _pal(96, 96, 128)))
-            tulip.bg_rect(x, y, S // 2 or 1, S // 2 or 1, shade, 1)
+            tulip.bg_rect(x, y, size, size, shade, 1)
 
     def _reset_bunkers(self):
         self.bunker_x = list(BUNKER_X)
