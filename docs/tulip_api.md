@@ -358,6 +358,10 @@ def key(k):
 
 tulip.keyboard_callback() # removes callbacks. 
 
+# Brightness of the indicator LEDs on the Tab5's built-in keyboard, 0-100 (Tab5 only)
+tulip.keyboard_brightness(5)
+tulip.keyboard_brightness()  # returns the current setting
+
 # Return the last touch panel coordinates, up to 3 fingers at once
 (x0, y0, x1, y1, x2, y2) = tulip.touch()
 

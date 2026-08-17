@@ -523,6 +523,12 @@ static void request_boot_protocol(usb_device_handle_t device_handle)
 
 // A HID boot report is [modifier][reserved][6 scan codes]. Only codes that were
 // not in the previous report are new presses; an empty report is a release.
+// The previous report is kept here rather than read back out of last_scan[]: the
+// built-in I2C keyboard publishes its own held keys into that array
+// (keyboard_tab5.c), and a code left there by the other keyboard would otherwise
+// look like a key this one was already holding, swallowing the press.
+static uint8_t s_prev_report[8];
+
 static void decode_keyboard_report(const uint8_t *p)
 {
     const uint8_t modifier = p[0];
@@ -537,7 +543,7 @@ static void decode_keyboard_report(const uint8_t *p)
 
         bool already_held = false;
         for (uint8_t j = 2; j < 8; j++) {
-            if (last_scan[j] == p[i]) {
+            if (s_prev_report[j] == p[i]) {
                 already_held = true;
                 break;
             }
@@ -562,6 +568,7 @@ static void decode_keyboard_report(const uint8_t *p)
         s_last_repeat_ms = 0;
     }
 
+    memcpy(s_prev_report, p, 8);
     memcpy(last_scan, p, 8);
 }
 
@@ -921,6 +928,7 @@ static void release_keyboard(void)
     }
     s_kb_claimed = s_kb_ready = s_kb_polling = false;
     s_held_key = 0;
+    memset(s_prev_report, 0, sizeof(s_prev_report));
     memset(last_scan, 0, sizeof(last_scan));
     free_transfer(&s_kb_in);
     // So a keyboard plugged back in is asked for boot protocol again rather than

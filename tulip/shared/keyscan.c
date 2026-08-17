@@ -426,11 +426,11 @@ uint16_t scan_ascii(uint8_t code, uint32_t modifier) {
 }
 
 // TAB5 compiles this file for the HID scan-code decoder (scan_ascii,
-// keycode_to_ctrl_key) but not for key delivery: it has its own path in
-// modtulip_tab5.c (tab5_keyboard_deliver_key), because the board's built-in
-// keyboard is an I2C part that produces finished key codes rather than HID
-// reports. The globals below live in shared/modtulip.c, which TAB5 does not
-// build yet, so this half would not link there.
+// keycode_to_ctrl_key) -- both its USB keyboard and its built-in I2C keyboard
+// report HID scan codes -- but not for key delivery: it has its own path in
+// modtulip_tab5.c (tab5_keyboard_deliver_key). The globals below live in
+// shared/modtulip.c, which TAB5 does not build yet, so this half would not link
+// there.
 #ifndef TAB5
 
 extern int16_t lvgl_is_repl;

@@ -844,6 +844,20 @@ static mp_obj_t tulip_brightness(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_brightness_obj, 0, 1, tulip_brightness);
 
+// The two indicator LEDs on the built-in keyboard, 0-100. Unlike the screen's
+// brightness this is one number for both LEDs; their colors are the keyboard
+// firmware's own (green in HID mode, and the caps indicator blinking blue).
+static mp_obj_t tulip_keyboard_brightness(size_t n_args, const mp_obj_t *args) {
+    if (n_args == 0) return mp_obj_new_int(tab5_keyboard_get_brightness());
+    int amount = mp_obj_get_int(args[0]);
+    if (amount < 0 || amount > 100) {
+        mp_raise_ValueError(MP_ERROR_TEXT("keyboard_brightness must be between 0 and 100"));
+    }
+    tab5_keyboard_set_brightness((uint8_t)amount);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_keyboard_brightness_obj, 0, 1, tulip_keyboard_brightness);
+
 static mp_obj_t tulip_int_screenshot(size_t n_args, const mp_obj_t *args) {
     const char *filename = mp_obj_str_get_str(args[0]);
     if (n_args == 5) {
@@ -1271,8 +1285,9 @@ static MP_DEFINE_CONST_FUN_OBJ_1(tulip_key_send_obj, tulip_key_send);
  *
  *     tulip.key_remap(0x1f, 0x02, ord('"'))   # shift-2 types " not @
  *
- * The built-in I2C keyboard does not pass through scan_ascii() -- it reports
- * finished characters, not scan codes -- so remaps only affect the USB keyboard.
+ * The built-in I2C keyboard runs through scan_ascii() too (it is put in HID mode,
+ * see keyboard_tab5.c), so remaps apply to both keyboards. Its own layout is US,
+ * so in practice only the USB keyboard needs them.
  */
 static mp_obj_t tulip_key_remap(mp_obj_t scan_obj, mp_obj_t mod_obj, mp_obj_t code_obj) {
     const uint8_t scan = (uint8_t)mp_obj_get_int(scan_obj);
@@ -1607,6 +1622,7 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_key_editor), MP_ROM_PTR(&tulip_key_editor_obj) },
     { MP_ROM_QSTR(MP_QSTR_deinit_editor), MP_ROM_PTR(&tulip_deinit_editor_obj) },
     { MP_ROM_QSTR(MP_QSTR_keyboard_callback), MP_ROM_PTR(&tulip_keyboard_callback_obj) },
+    { MP_ROM_QSTR(MP_QSTR_keyboard_brightness), MP_ROM_PTR(&tulip_keyboard_brightness_obj) },
     { MP_ROM_QSTR(MP_QSTR_key_send), MP_ROM_PTR(&tulip_key_send_obj) },
     { MP_ROM_QSTR(MP_QSTR_key_remap), MP_ROM_PTR(&tulip_key_remap_obj) },
     { MP_ROM_QSTR(MP_QSTR_key_remaps_clear), MP_ROM_PTR(&tulip_key_remaps_clear_obj) },
