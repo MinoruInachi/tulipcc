@@ -449,15 +449,30 @@ class Starfall:
                 if live[col]:
                     self._draw_invader(row, col)
 
-    def _erase_formation(self):
-        # One rectangle over everything the formation covers, used when the
-        # whole thing drops a row. Anything of a bunker inside it goes too --
-        # which is what the arcade did as well.
-        left = max(min([min(row) for row in self.ix]) - PAD, 0)
-        right = min(max([max(row) for row in self.ix]) + ART_W + PAD, SW)
-        top = self.iy[0]
-        tulip.bg_rect(left, top, right - left,
-                      self.iy[ROWS - 1] + ART_H - top, BLACK, 1)
+    def _live_cells(self):
+        """Where everyone still alive is drawn, as (x, y) of the padded cell.
+
+        A dead invader stops moving, so its ix is left wherever it died, and a
+        row that has been cleared out stays in iy for the rest of the wave.
+        Anything that works off the whole formation's outline rather than this
+        list ends up acting for invaders that are not there any more.
+        """
+        out = []
+        for row in range(ROWS):
+            live = self.alive[row]
+            y = self.iy[row]
+            for col in range(COLS):
+                if live[col]:
+                    out.append((self.ix[row][col] - PAD, y))
+        return out
+
+    def _erase_formation(self, cells):
+        # One rectangle per live invader, over the cell it is drawn in, used
+        # when the formation drops a row. A single box around the lot would be
+        # one call instead of up to 55, but it would also black out bunker
+        # chunks nobody has reached -- and the model would not know.
+        for (x, y) in cells:
+            tulip.bg_rect(x, y, CELL_W, CELL_H, BLACK, 1)
 
     def _draw_hud(self):
         # Stop short of the task bar buttons in the top right corner.
@@ -697,33 +712,50 @@ class Starfall:
         self.cursor = 0
 
     def _descend(self):
-        self._erase_formation()
+        cells = self._live_cells()
+        self._erase_formation(cells)
         for row in range(ROWS):
             self.iy[row] += DROP
-        self._eat_bunkers()
+        cells = [(x, y + DROP) for (x, y) in cells]
+        self._eat_bunkers(cells)
         self._draw_formation()
-        if self.iy[ROWS - 1] + ART_H >= PLAYER_Y:
+        # The lowest invader still flying, not the lowest row of the formation:
+        # once a row has been cleared out it must not land on anybody.
+        if cells and max([y for (x, y) in cells]) + ART_H >= PLAYER_Y:
             self._lose_ship(invaded=True)
 
-    def _eat_bunkers(self):
-        """Anything of a bunker the formation has reached is gone for good.
+    def _eat_bunkers(self, cells):
+        """Whatever a live invader has come down on is gone for good.
 
-        A whole chunk row at a time, cleared on screen as well as in the model:
-        the rectangle that erases the formation before a drop covers where they
-        were, not where they land, so these have to clear themselves.
+        Cleared on screen as well as in the model: the rectangles that erase
+        the formation before a drop cover where the invaders were, not where
+        they land, so these have to clear themselves. A chunk the cell only
+        half covers goes too -- the invader is about to be drawn over that
+        half, so leaving it in the model would block shots through a hole that
+        is plainly there on screen.
         """
-        (top, bottom) = (self.iy[0], self.iy[ROWS - 1] + ART_H)
-        if bottom < BUNKER_Y or top > BUNKER_Y + BUNKER_H:
-            return
-        for index, chunks in enumerate(self.bunkers):
-            x0 = self.bunker_x[index]
-            for row in range(BUNKER_ROWS):
-                y = BUNKER_Y + row * CHUNK
-                if top <= y + CHUNK and y <= bottom:
-                    if any(chunks[row]):
-                        tulip.bg_rect(x0, y, BUNKER_W, CHUNK, BLACK, 1)
-                    for col in range(BUNKER_COLS):
-                        chunks[row][col] = 0
+        for (x, y) in cells:
+            if y + CELL_H <= BUNKER_Y or y >= BUNKER_Y + BUNKER_H:
+                continue
+            r0 = max(0, (y - BUNKER_Y) // CHUNK)
+            r1 = min(BUNKER_ROWS, -((BUNKER_Y - y - CELL_H) // CHUNK))
+            for index, chunks in enumerate(self.bunkers):
+                x0 = self.bunker_x[index]
+                if x + CELL_W <= x0 or x >= x0 + BUNKER_W:
+                    continue
+                c0 = max(0, (x - x0) // CHUNK)
+                c1 = min(BUNKER_COLS, -((x0 - x - CELL_W) // CHUNK))
+                eaten = False
+                for row in range(r0, r1):
+                    line = chunks[row]
+                    for col in range(c0, c1):
+                        if line[col]:
+                            eaten = True
+                            line[col] = 0
+                if eaten:
+                    tulip.bg_rect(x0 + c0 * CHUNK, BUNKER_Y + r0 * CHUNK,
+                                  (c1 - c0) * CHUNK, (r1 - r0) * CHUNK,
+                                  BLACK, 1)
 
     def _age_splats(self, dt):
         if not self.splats:
