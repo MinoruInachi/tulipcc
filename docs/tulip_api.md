@@ -774,7 +774,7 @@ Any connected AMY device (AMYboard, Tulip, Python on a computer) will respond to
 ## Graphics system
 
 The Tulip GPU consists of 3 subsystems, in drawing order:
- * A bitmap graphics plane (BG) (default size: 1024+128 x 600+100), with scrolling x- and y- speed registers. Drawing shape primitives and UI elements draw to the BG.
+ * A bitmap graphics plane (BG), a margin larger than the screen (1024+128 x 600+100 on a Tulip CC, 1280+160 x 720+120 on a Tab5), with scrolling x- and y- speed registers. Drawing shape primitives and UI elements draw to the BG.
  * A text frame buffer (TFB) that draws 8x12 fixed width text on top of the BG, with 256 colors
  * A sprite layer on top of the TFB (which is on top of the BG). The sprite layer is fast, doesn't need to have a clear screen, is drawn per scanline, can draw bitmap color sprites.
 
@@ -832,7 +832,9 @@ tulip.gpu_log()
 
 ## Graphics background plane
 
-The default background plane (BG) is 1024 + 128 x 600 + 100, with the visible portion 1024x600. (You can change this with `tulip.timing()`.) Use the extra for double buffering, hardware scrolling or for storing bitmap data "offscreen" for later blitting (you can treat it as fixed bitmap RAM.) The BG is drawn first, with the TFB and sprite layers drawn on top.
+The background plane (BG) is the screen plus a margin of an eighth of its width and a sixth of its height, never less than 128 x 100. On a Tulip CC that is 1024 + 128 x 600 + 100 with the visible portion 1024x600; on a Tab5 it is 1280 + 160 x 720 + 120 around a visible 1280x720. (You can change the visible portion with `tulip.timing()`.) Use the extra for double buffering, hardware scrolling or for storing bitmap data "offscreen" for later blitting (you can treat it as fixed bitmap RAM.) The BG is drawn first, with the TFB and sprite layers drawn on top.
+
+Horizontal scrolling only reaches into that margin: an `x_offset` past the margin width runs a line's read off the end of its row in the plane and into the next one, which shows up as the picture shearing by a row. To loop a background seamlessly, copy the leftmost margin-width of columns to the far right of the plane and reset the offset to 0 when it reaches the margin width. Vertical scrolling has no such limit — `y_offset` picks a whole row, so it wraps cleanly over the full height of the plane.
 
 The UI operations (LVGL or anything in `tulip.UI`) also draw to the BG. Be careful if you're using both BG drawing operations and LVGL as they may draw on top of one another.
 

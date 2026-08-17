@@ -141,8 +141,17 @@ extern const unsigned char portfolio_glyph_bitmap[1792];
 #define FONT_WIDTH 8
 #endif
 
-#define OFFSCREEN_X_PX 128
-#define OFFSCREEN_Y_PX 100
+// The margin the background plane carries past the visible screen: the scroll
+// headroom, and the scratch the docs point at for offscreen blitting. It was a
+// flat 128 x 100 on every board, which is 12.5% and 16.7% of a 1024x600 Tulip
+// CC but only 10% and 13.9% of the Tab5's 1280x720 -- a bigger panel got
+// proportionally less room to scroll into. Track the panel instead, with the
+// old figures as a floor so no smaller board loses what it has. 1024x600 comes
+// out at exactly 128 x 100, the T-Deck's 320x240 keeps its 128 x 100, and
+// 1280x720 gets 160 x 120. Every user of these is written as
+// H_RES+OFFSCREEN_X_PX / V_RES+OFFSCREEN_Y_PX, so nothing else has to change.
+#define OFFSCREEN_X_PX ((H_RES)/8 > 128 ? (H_RES)/8 : 128)
+#define OFFSCREEN_Y_PX ((V_RES)/6 > 100 ? (V_RES)/6 : 100)
 #define DEFAULT_PIXEL_CLOCK_MHZ 28
 #define BOUNCE_BUFFER_SIZE_PX (H_RES*12)
 #define TFB_ROWS (V_RES/FONT_HEIGHT)

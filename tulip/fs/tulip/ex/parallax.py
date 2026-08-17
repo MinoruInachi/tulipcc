@@ -3,7 +3,23 @@ import tulip
 
 (sw,sh) = tulip.screen_size()
 
-
+# The sky and the mountains are fixed-size art pinned to the top of the screen,
+# so their rows are the same everywhere. The ground is a 190px block that used
+# to be pinned to y=280 -- drawn for a 600px screen, which on a Tab5 left the
+# bottom 120px empty and the rabbit running along a ledge in mid-air. Hang it
+# off the bottom of the screen instead, keeping the gap under the water it has
+# always had. The dark band between the mountains and the grass stretches to
+# take up the difference.
+GROUND_Y = 280 + (sh - 600)
+GROUND_H = 190
+# Rows within the ground block: meadow, then three more tile rows, then the
+# brick the rabbit runs on and the water under it.
+BRICK_Y = GROUND_Y + 128
+WATER_Y = GROUND_Y + 160
+# Where the rabbit's feet land on the brick.
+RABBIT_Y = BRICK_Y - 28
+# The two tile rows that scroll with the rabbit: the brick and the water.
+SCROLL_ROWS = 64
 
 
 def draw_background(app):
@@ -20,25 +36,25 @@ def draw_background(app):
     for i in range(5):
         tulip.bg_png(mountain,544*i,50)
     mountain = None
-    # And put black under the mountains
-    tulip.bg_rect(0,50+160,sw,190,0,1)
+    # And put black under the mountains, down to wherever the ground starts
+    tulip.bg_rect(0,50+160,sw,GROUND_Y-(50+160),0,1)
 
     # and some tiles
-    tulip.bg_png(pix_dir+'meadow.png',0,280)
+    tulip.bg_png(pix_dir+'meadow.png',0,GROUND_Y)
     # copy it three times underneath
-    tulip.bg_blit(0,300,32,32,0,312)
-    tulip.bg_blit(0,300,32,32,0,344)
-    tulip.bg_blit(0,300,32,32,0,376)
-    tulip.bg_png(pix_dir+'brick.png',0,408)
-    tulip.bg_png(pix_dir+'water.png',0,440)
+    tulip.bg_blit(0,GROUND_Y+20,32,32,0,GROUND_Y+32)
+    tulip.bg_blit(0,GROUND_Y+20,32,32,0,GROUND_Y+64)
+    tulip.bg_blit(0,GROUND_Y+20,32,32,0,GROUND_Y+96)
+    tulip.bg_png(pix_dir+'brick.png',0,BRICK_Y)
+    tulip.bg_png(pix_dir+'water.png',0,WATER_Y)
 
     # Copy this column across the screen
     for i in range((sw*2)//32):
-        tulip.bg_blit(0,280,32,190,i*32,280)
+        tulip.bg_blit(0,GROUND_Y,32,GROUND_H,i*32,GROUND_Y)
 
     # put some empty spots along the brick
     for i in [3, 8, 10, 14, 18, 25, 32, 33, 38]:
-        tulip.bg_blit(0,312,32,32,32*i, 408)
+        tulip.bg_blit(0,GROUND_Y+32,32,32,32*i, BRICK_Y)
 
     # Now scroll the moon and the mountains at separate speeds
     for i in range(100):
@@ -59,7 +75,7 @@ def draw_background(app):
     tulip.sprite_on(0)
 
     # Now run the game loop. First setup some variables for the game state. rabbit x and y, frame counter etc
-    app.d = {"dir":0, "f":0, "rx":50, "ry":380, "jump":0, "run":1, "scroll":0} 
+    app.d = {"dir":0, "f":0, "rx":50, "ry":RABBIT_Y, "jump":0, "run":1, "scroll":0}
     app.rabbit_speed = 10
 
 
@@ -78,15 +94,15 @@ def game_loop(app):
         if(app.d["rx"] > (sw/2)):
             if(app.d["scroll"]==0):
                 app.d["scroll"] = 1
-                for i in range(64): # lower 2 tile rows
-                    tulip.bg_scroll_x_speed(408+i, app.rabbit_speed)
+                for i in range(SCROLL_ROWS): # lower 2 tile rows
+                    tulip.bg_scroll_x_speed(BRICK_Y+i, app.rabbit_speed)
         else:
             app.d["rx"] += app.rabbit_speed
     else:
         if(app.d["scroll"] == 1):
             app.d["scroll"] = 0
-            for i in range(64):
-                tulip.bg_scroll_x_speed(408+i, 0) # stop scrolling
+            for i in range(SCROLL_ROWS):
+                tulip.bg_scroll_x_speed(BRICK_Y+i, 0) # stop scrolling
 
     if(tulip.joyk() & tulip.Joy.LEFT):
         app.d["rx"] -= app.rabbit_speed
@@ -100,9 +116,9 @@ def game_loop(app):
 
     # calculate position from jump start frame time
     if(app.d["jump"]>0):
-        app.d["ry"] = 380-(app.d["f"]-app.d["jump"])*app.rabbit_speed
+        app.d["ry"] = RABBIT_Y-(app.d["f"]-app.d["jump"])*app.rabbit_speed
     else:
-        app.d["ry"] = 380
+        app.d["ry"] = RABBIT_Y
     if(hasattr(tulip, "keys") and tulip.keys()[1]==0x29): # esc
         app.d["run"] = 0
     # Update the sprite position
