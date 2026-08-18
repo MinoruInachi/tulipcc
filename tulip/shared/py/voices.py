@@ -333,7 +333,8 @@ class ListColumn(tulip.UIElement):
         button = e.get_target_obj()
         self.select(button.get_index())
 
-def play_note_from_coord(app, x, y, up):
+def note_from_coord(app, x, y):
+    """The note under (x, y), or None if that point is not on a key."""
     white_key_notes = app.white_key_notes
     black_key_notes = app.black_key_notes
     white_key = int((x-app.piano_x)/app.white_key_w)
@@ -345,28 +346,52 @@ def play_note_from_coord(app, x, y, up):
                 break
     if note_idx is None and white_key >= 0 and white_key < len(white_key_notes):
         note_idx = white_key_notes[white_key]
-    if note_idx is not None:
+    if note_idx is None:
+        return None
+    return note_idx + BASE_NOTE
+
+
+def hold_notes(app, notes):
+    """Make `notes` exactly the set of notes the keyboard is holding down.
+
+    A set difference rather than a note_on or note_off per touch event, because
+    no touch driver ever says "this key was released". It reports the points
+    that are currently down and renumbers them when one lifts, so letting go of
+    one of two fingers, or sliding along the keys, arrives as an ordinary hold
+    with a different set -- and anything held that is no longer in that set has
+    to be turned off here or it sounds forever. Playing chords is exactly the
+    case that used to leave notes stuck: only the last point to lift got its
+    note_off, and every other finger's note was left on.
+
+    held_note remembers which channel each note_on went to, so a note started
+    before a channel change is still released on the synth that is playing it.
+    """
+    for note in [n for n in app.held_note if n not in notes]:
+        midi.config.get_synth(app.held_note.pop(note)).note_off(note)
+        #tulip.midi_local((128+app.channels.selected, note, 127))
+    if notes:
         channel = int(app.channels.button_texts[app.channels.selected])
-        note = note_idx + BASE_NOTE
-        if(up):
-            app.held_note[note] = False
-            midi.config.get_synth(channel).note_off(note)
-            #tulip.midi_local((128+app.channels.selected, note, 127))
-        else:
-            if app.held_note.get(note, False) == False:
-                app.held_note[note] = True
+        for note in notes:
+            if note not in app.held_note:
+                app.held_note[note] = channel
                 midi.config.get_synth(channel).note_on(note, 1)
                 #tulip.midi_local((144+app.channels.selected, note, 127))
 
 
-
 def touch(up):
     global app
-    x,y = [-1,-1,-1], [-1,-1,-1]
-    (x[0],y[0],x[1],y[1],x[2],y[2]) = tulip.touch()
-    for i in range(3):
-        if(x[i] >= app.piano_x and x[i] <= app.piano_x+app.piano_w and y[i] >= app.piano_y and y[i] <= app.piano_y+app.piano_h):
-            play_note_from_coord(app, x[i], y[i], up)
+    notes = set()
+    if not up:
+        coords = tulip.touch()
+        for i in range(3):
+            # An unused touch slot reads -1, which is left of the keyboard and
+            # so fails the bounds test below on its own.
+            (x, y) = (coords[i*2], coords[i*2+1])
+            if(x >= app.piano_x and x <= app.piano_x+app.piano_w and y >= app.piano_y and y <= app.piano_y+app.piano_h):
+                note = note_from_coord(app, x, y)
+                if note is not None:
+                    notes.add(note)
+    hold_notes(app, notes)
 
 def process_key(key):
     global app
@@ -393,10 +418,14 @@ def activate(screen):
     # start listening to the keyboard again
     tulip.keyboard_callback(process_key)
     tulip.touch_callback(touch)
-    screen.held_note = {}
+    hold_notes(screen, set())
 
 def deactivate(screen):
-    # i am being switched away -- keep running but clear and close any active callbacks 
+    # i am being switched away -- keep running but clear and close any active callbacks
+    # Whatever was down when the switch happened has no touch up coming, so it
+    # gets its note_off here instead. Runs on the quit path too: screen_quit_callback()
+    # in ui.py calls deactivate before quit.
+    hold_notes(screen, set())
     tulip.bg_clear()
     tulip.keyboard_callback()
     tulip.touch_callback()
@@ -459,6 +488,9 @@ def sync_ui_for_channel(channel):
 def run(screen):
     global app 
     app = screen # we can use the screen obj passed in as a general "store stuff here" class, as well as inspect the UI
+    # note -> the channel its note_on went to. Set up before present(), which
+    # activates the screen and so calls hold_notes().
+    app.held_note = {}
     # The keyboard along the bottom is drawn on the BG plane, so where LVGL is
     # composited on top of it (the Tab5) this screen's background has to stay out
     # of the way -- UIScreen paints COLOR_BG on the BG plane instead. Set before

@@ -40,6 +40,16 @@ static const char *TAG = "TAB5-TOUCH";
  * empty report. Floor the interval between idle samples; 5ms still beats the
  * panel's own frame time, so it costs no perceptible latency. */
 #define TAB5_TOUCH_MIN_IDLE_INTERVAL_US 5000
+/* How many fingers reach the Python side through tulip.touch(). Three is the
+ * width of last_touch_x/y[], the shared contract every board fills -- see
+ * gt911_touchscreen.c on the Tulip CC, which also writes -1 into the slots with
+ * no finger in them. This used to ask the controller for a single point, which
+ * left slots 1 and 2 permanently -1 and made the Tab5 the one board where a
+ * multi-touch app saw one finger: voices.py could start a chord (the reported
+ * point moves between the fingers) but only ever saw one key to release, and
+ * the rest of the notes sounded forever. Reading three costs no extra I2C --
+ * esp_lcd_touch_read_data() fetches the whole report either way. */
+#define TAB5_TOUCH_POINTS 3
 
 extern void send_touch_to_micropython(int16_t touch_x, int16_t touch_y, uint8_t up);
 extern int16_t last_touch_x[3];
@@ -81,17 +91,34 @@ static void tab5_touch_to_shared_xy(int16_t panel_x, int16_t panel_y, int16_t *s
     *shared_y = y;
 }
 
-static void tab5_emit_touch_to_tulip(int16_t x, int16_t y, uint8_t up)
+/* Publish every finger the controller reported, in shared UI coordinates. The
+ * driver compacts its report, so a finger's slot is not stable across samples --
+ * lift the first of two and the second becomes point 0. Apps have to treat this
+ * as a set of points rather than as identified fingers. */
+static void tab5_publish_touch_points(const uint16_t *panel_x, const uint16_t *panel_y, uint8_t count)
 {
-    int16_t shared_x = 0;
-    int16_t shared_y = 0;
+    if (count > TAB5_TOUCH_POINTS) {
+        count = TAB5_TOUCH_POINTS;
+    }
+    for (uint8_t i = 0; i < count; i++) {
+        int16_t shared_x = 0;
+        int16_t shared_y = 0;
+        tab5_touch_to_shared_xy((int16_t)panel_x[i], (int16_t)panel_y[i], &shared_x, &shared_y);
+        last_touch_x[i] = shared_x;
+        last_touch_y[i] = shared_y;
+    }
+    for (uint8_t i = count; i < TAB5_TOUCH_POINTS; i++) {
+        last_touch_x[i] = -1;
+        last_touch_y[i] = -1;
+    }
+}
 
-    tab5_touch_to_shared_xy(x, y, &shared_x, &shared_y);
-
+/* Only the first point drives LVGL and the REPL menu icon -- both of them are
+ * single-pointer by nature. */
+static void tab5_dispatch_first_point(int16_t shared_x, int16_t shared_y, uint8_t up)
+{
     s_last_touch_x = shared_x;
     s_last_touch_y = shared_y;
-    last_touch_x[0] = shared_x;
-    last_touch_y[0] = shared_y;
     if (!tab5_repl_menu_icon_touch_event(shared_x, shared_y, up != 0)) {
         send_touch_to_micropython(shared_x, shared_y, up);
     }
@@ -234,27 +261,33 @@ void run_tab5_touch(void *param)
             continue;
         }
 
-        uint16_t touch_x[1] = {0};
-        uint16_t touch_y[1] = {0};
-        uint16_t touch_strength[1] = {0};
+        uint16_t touch_x[TAB5_TOUCH_POINTS] = {0};
+        uint16_t touch_y[TAB5_TOUCH_POINTS] = {0};
+        uint16_t touch_strength[TAB5_TOUCH_POINTS] = {0};
         uint8_t touch_cnt = 0;
         const bool pressed = esp_lcd_touch_get_coordinates(s_touch,
                                                            touch_x,
                                                            touch_y,
                                                            touch_strength,
                                                            &touch_cnt,
-                                                           1);
+                                                           TAB5_TOUCH_POINTS);
 
         if (pressed && touch_cnt > 0) {
             s_touch_downs++;
-            tab5_emit_touch_to_tulip((int16_t)touch_x[0], (int16_t)touch_y[0], 0);
+            tab5_publish_touch_points(touch_x, touch_y, touch_cnt);
+            tab5_dispatch_first_point(last_touch_x[0], last_touch_y[0], 0);
             s_touch_was_pressed = true;
         } else if (s_touch_was_pressed) {
+            /* The controller has no coordinates left to give, so the release
+             * carries the last position the first point was at. Every other
+             * slot clears: there is nothing down anywhere. */
             last_touch_x[0] = s_last_touch_x;
             last_touch_y[0] = s_last_touch_y;
-            if (!tab5_repl_menu_icon_touch_event(s_last_touch_x, s_last_touch_y, true)) {
-                send_touch_to_micropython(s_last_touch_x, s_last_touch_y, 1);
+            for (uint8_t i = 1; i < TAB5_TOUCH_POINTS; i++) {
+                last_touch_x[i] = -1;
+                last_touch_y[i] = -1;
             }
+            tab5_dispatch_first_point(s_last_touch_x, s_last_touch_y, 1);
             s_touch_was_pressed = false;
         }
     }
