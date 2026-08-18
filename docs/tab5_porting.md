@@ -52,8 +52,6 @@ That baseline also conflicts with the newer product-page documentation, which de
 5. Map GPIO, audio, storage, and power-control pins from the Tab5 schematic.
 6. Validate boot, framebuffer, touch, USB, and audio on real hardware.
 
-If you want, this note can be turned into a concrete implementation plan once the esp32p4 porting surface is added to the tree.
-
 ## Concrete bring-up plan
 
 ### Phase 0: baseline inventory
