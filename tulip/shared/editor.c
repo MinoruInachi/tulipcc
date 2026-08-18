@@ -50,6 +50,22 @@ uint16_t cursor_y = 0;
 #define EDITOR_TAB_SPACES 4
 #define V_SCROLL_MARGIN 6
 
+// The editor lays out against the console the panel is actually showing, not
+// the largest one the buffer could hold. TFB_ROWS/TFB_COLS size the buffer for
+// the smallest TFB font, but tfb_font selects a bigger one at runtime -- the
+// Tab5 boots on 12x16, so 45 rows and 106 columns of its 60x160 buffer are on
+// screen. Laying out against the buffer put the status bar and, worse, the
+// scroll-down trigger fifteen rows below the bottom of the panel: the cursor
+// walked off the last visible line and nothing scrolled until it had gone a
+// third of a screen further. display.c and modtulip.c already ask for the
+// visible geometry; this was the last place that did not.
+//
+// Buffer strides and allocations stay on TFB_ROWS/TFB_COLS -- only layout
+// moves here.
+#define EDITOR_ROWS (display_tfb_visible_rows())
+#define EDITOR_COLS (display_tfb_visible_cols())
+#define EDITOR_STATUS_ROW ((int16_t)EDITOR_ROWS - 1)
+
 char prompted_string[MAX_STRING_LEN];
 char current_prompt[MAX_STRING_LEN];
 uint8_t prompted_count = 0;
@@ -160,7 +176,7 @@ void string_at_row(char * s, int16_t len, uint16_t y) {
     		for(uint16_t i=len;i<TFB_COLS;i++) {
     			TFB[y*TFB_COLS+i] = 0;
     		}
-            if(y!=TFB_ROWS-1)editor_highlight_at_row(y);
+            if(y!=EDITOR_STATUS_ROW)editor_highlight_at_row(y);
     	}
     }
 }
@@ -168,7 +184,8 @@ void string_at_row(char * s, int16_t len, uint16_t y) {
 
 // (Re) paints the entire TFB
 void paint_tfb(uint16_t start_at_y) {
-    for(uint16_t y=start_at_y;y<TFB_ROWS-1;y++) {
+    const int16_t status_row = EDITOR_STATUS_ROW;
+    for(int16_t y=start_at_y;y<status_row;y++) {
         if(y_offset + y < lines) { 
 	       string_at_row(text_lines[y_offset+y], -1, y);
         } else {
@@ -186,20 +203,24 @@ void move_cursor(int16_t x, int16_t y) {
 	TFBf[cursor_y*TFB_COLS+cursor_x] = 0; 
     display_tfb_update(cursor_y);
 
-	// Move viewport up/down (TFB_ROWS-1) / 2
+	// Move viewport up/down half a screen of visible rows
 	// Move cursor to next/prev line (which would now be in the middle of the screen)
+	const int16_t status_row = EDITOR_STATUS_ROW;
 	if(y < 0) {
 		uint16_t cursor_y_line_was = cursor_y + y_offset;
-		if(y_offset > ((TFB_ROWS-1)/2)) {
-			y_offset = y_offset - (TFB_ROWS-1)/2;
+		if(y_offset > (status_row/2)) {
+			y_offset = y_offset - status_row/2;
 		} else {
 			y_offset = 0;
 		}
 		cursor_y = (cursor_y_line_was-1) - y_offset;
 		paint_tfb(0);
-	} else if(y == TFB_ROWS-1) {
+	// >= rather than ==: page down and search both hand this a row that can
+	// overshoot, and landing in the else below would park the cursor off the
+	// bottom of the panel (and, past the buffer, in the next row's memory).
+	} else if(y >= status_row) {
 		uint16_t cursor_y_line_was = cursor_y + y_offset;
-		y_offset = y_offset + (TFB_ROWS-1)/2;
+		y_offset = y_offset + status_row/2;
 		cursor_y = (cursor_y_line_was+1) - y_offset;
 		paint_tfb(0);
 	} else {
@@ -208,7 +229,10 @@ void move_cursor(int16_t x, int16_t y) {
 	// X scrolling TODO or NI, not sure yet
 	if(x < 0) {
 		dbg("NYI scroll left\n");
-	} else if(x == TFB_COLS) {
+	} else if(x >= (int16_t)EDITOR_COLS) {
+		// Still no horizontal scrolling, but stopping at the last visible
+		// column beats parking the cursor where it cannot be seen -- and a
+		// tab jump past TFB_COLS used to write into the next row's buffer.
 		dbg("NYI scroll right %d %d\n", x, y);
 	} else {
 		cursor_x = x;
@@ -232,16 +256,16 @@ void move_cursor(int16_t x, int16_t y) {
     #else
     sprintf(status, "%04d / %04d [%02.2f%%] %3d %.35s %c", cursor_y+y_offset+1, lines,  percent, cursor_x, fn, dirty_char);
     #endif    
-	string_at_row(status, strlen(status), TFB_ROWS-1);
-	format_at_row(FORMAT_INVERSE, -1, TFB_ROWS-1);
-    display_tfb_update(TFB_ROWS-1);
+	string_at_row(status, strlen(status), status_row);
+	format_at_row(FORMAT_INVERSE, -1, status_row);
+    display_tfb_update(status_row);
 
 
 }
 
 void editor_page_up() {
-	if(y_offset > (TFB_ROWS-V_SCROLL_MARGIN)) {
-		y_offset = y_offset - (TFB_ROWS-V_SCROLL_MARGIN);
+	if(y_offset > (EDITOR_ROWS-V_SCROLL_MARGIN)) {
+		y_offset = y_offset - (EDITOR_ROWS-V_SCROLL_MARGIN);
 	} else {
 		y_offset = 0;
 	}
@@ -250,8 +274,8 @@ void editor_page_up() {
 }
 
 void editor_page_down() {
-	if(y_offset + (TFB_ROWS-V_SCROLL_MARGIN) < lines) {
-		y_offset = y_offset + (TFB_ROWS-V_SCROLL_MARGIN);
+	if(y_offset + (EDITOR_ROWS-V_SCROLL_MARGIN) < lines) {
+		y_offset = y_offset + (EDITOR_ROWS-V_SCROLL_MARGIN);
 		move_cursor(cursor_x, 0);
 	} else {
 		move_cursor(cursor_x, lines-y_offset);
@@ -410,10 +434,10 @@ void prompt_for_string(char * prompt,  uint8_t mode) {
     prompted_count = 0;
     prompted_string[0] = 0;
     strcpy(current_prompt, prompt);
-    string_at_row(prompt, -1, TFB_ROWS-1);
-    format_at_row(FORMAT_INVERSE, -1, TFB_ROWS-1);
-    paint_tfb(TFB_ROWS-1);
-    display_tfb_update(TFB_ROWS-1);
+    string_at_row(prompt, -1, EDITOR_STATUS_ROW);
+    format_at_row(FORMAT_INVERSE, -1, EDITOR_STATUS_ROW);
+    paint_tfb(EDITOR_STATUS_ROW);
+    display_tfb_update(EDITOR_STATUS_ROW);
     editor_mode=mode;
 }
 
@@ -738,7 +762,7 @@ void editor_search(char * search_string) {
                             offset=(ret-text_lines[actual_line]+offset)+1;
                         } else {
                             // A new find, adjust the y_offset and cursor
-                            if(i > TFB_ROWS-1) { // adjust page a bit 
+                            if(i > EDITOR_STATUS_ROW) { // adjust page a bit 
                                 y_offset = actual_line-10; // show some context
                             } else {
                                 y_offset = 0;
@@ -770,9 +794,9 @@ void process_char(int c) {
     if(editor_mode == EDITOR_PROMPT_SEARCH || editor_mode == EDITOR_PROMPT_SAVE || editor_mode == EDITOR_PROMPT_READ) {
         if(c>31 && c<127) {
             prompted_string[prompted_count++] = c;
-            TFB[(TFB_ROWS-1)*TFB_COLS+prompted_count+strlen(current_prompt)] = c;
-            paint_tfb(TFB_ROWS-1);
-            display_tfb_update(TFB_ROWS-1);
+            TFB[EDITOR_STATUS_ROW*TFB_COLS+prompted_count+strlen(current_prompt)] = c;
+            paint_tfb(EDITOR_STATUS_ROW);
+            display_tfb_update(EDITOR_STATUS_ROW);
         }
         if(c==3) {
             editor_mode=EDITOR_NORMAL;
@@ -781,10 +805,10 @@ void process_char(int c) {
         if(c==127 || c==8) {
             if(prompted_count>0) {
                 prompted_string[prompted_count] = 0;
-                TFB[(TFB_ROWS-1)*TFB_COLS+prompted_count+strlen(current_prompt)] = ' ';
+                TFB[EDITOR_STATUS_ROW*TFB_COLS+prompted_count+strlen(current_prompt)] = ' ';
                 prompted_count--; // now pc is 4
-                paint_tfb(TFB_ROWS-1);
-                display_tfb_update(TFB_ROWS-1);
+                paint_tfb(EDITOR_STATUS_ROW);
+                display_tfb_update(EDITOR_STATUS_ROW);
             }
         }
         if(c==13 || c == 10) {

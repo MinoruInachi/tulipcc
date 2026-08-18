@@ -7,10 +7,20 @@ import tulip
 editor = None
 
 
-def draw(x):
-    global editor
-    editor.alttab_button.invalidate()
-    editor.quit_button.invalidate()
+def draw(screen):
+    """Nudge the task bar buttons after the TFB switch painted over them.
+
+    Takes the screen rather than reaching for the module global: this is
+    deferred out of present(), which runs inside Editor.__init__, so it can
+    fire before edit() has assigned `editor` at all. Both buttons are also
+    legitimately None -- alttab only exists while more than one app is
+    running, and neither is made before draw_task_bar() has run. Either way
+    the AttributeError landed inside the defer queue, which prints and
+    swallows it, so the buttons quietly never got redrawn.
+    """
+    for button in (screen.alttab_button, screen.quit_button):
+        if button is not None:
+            button.invalidate()
 
 class Editor(tulip.UIScreen):
     def __init__(self, filename):
@@ -46,7 +56,7 @@ class Editor(tulip.UIScreen):
         # overwriting the first line. So wait a bit and activate then
         tulip.defer(tulip.activate_editor, None, 50)
         # And because of the TFB clearing, the buttons may get destroyed, so re-draw them
-        tulip.defer(draw, None, 100)
+        tulip.defer(draw, screen, 100)
 
 # Launch the tulip editor as a UIScreen
 def edit(filename=None):
