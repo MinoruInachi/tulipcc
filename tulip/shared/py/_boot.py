@@ -107,8 +107,37 @@ if tulip.board() == "WEB" or tulip.board()=="AMYBOARD_WEB":
     # Override send & bleep are done from JS on web because of click-to-start audio.
 else:
     amy.AMY_SAMPLE_RATE=44100
-    # Override amy's send to work with tulip
-    amy.override_send = lambda x: tulip.amy_send(x)
+    # Nothing to override: amy's own dispatch already resolves _send_wire to
+    # tulip.amy_send here (amy_c_api_mp.inc). Installing the platform default
+    # in amy.override_send would only make it look like the user redirected
+    # AMY elsewhere, which is how transfer chunks lost their sysex marking and
+    # got parsed as wire commands (amy #1045). override_send stays free for
+    # what it's for -- pointing AMY at another board over midi.sysex_amy/i2c.
+
+# amy.message() in C: tulip.amy_message() (amy_connector.c) builds the same
+# wire string several times faster -- a table walk into a stack buffer instead
+# of per-argument map slicing and `+=`, which all allocate. Installed over
+# amy.message here so every amy.send() on every target gets it; the Python
+# original is captured FIRST and the fallback goes to it by name, or the
+# fallback would find this function again and recurse.
+#
+# The C side returns None for anything it does not reproduce exactly (an
+# unknown keyword, a numeric string where an int was meant, an overlong
+# message) and the Python original then runs -- and raises whatever it was
+# going to raise. Kwarg combos that amy.message() warns or errors about while
+# amy.show_warnings is set go straight to Python so those diagnostics still
+# fire.
+_py_amy_message = amy.message
+amy._py_message = _py_amy_message   # the original, reachable for tests/debugging
+def _c_amy_message(**kwargs):
+    if amy.show_warnings and ('patch_string' in kwargs or 'num_partials' in kwargs or
+            ('voices' in kwargs and ('preset' in kwargs or 'synth' in kwargs))):
+        return _py_amy_message(**kwargs)
+    m = tulip.amy_message(**kwargs)
+    if m is None:
+        return _py_amy_message(**kwargs)
+    return m
+amy.message = _c_amy_message
 
 if board() == "AMYBOARD" or board()=="AMYBOARD_WEB" or board()=="AMYBOARD_VCV":
     import amyboard

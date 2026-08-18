@@ -25,6 +25,16 @@ if(len(sys.argv)<2 or sys.argv[1] not in DISTROS):
 
 distro = sys.argv[1]
 port_dir, chip, fs_source, prefix = DISTROS[distro]
+
+# Ship editable copies of the built-in apps as /sys/ex/my_*.py -- the frozen
+# originals are read-only, and the docs point users at these copies to edit.
+# They are gitignored (tulip/fs/tulip/ex/my_*), so regenerate them per build.
+# Keyed on the /sys source rather than the distro: tab5 ships the same tree.
+if(fs_source=='tulip'):
+    import shutil
+    for app in ('drums', 'juno6', 'voices', 'worldui'):
+        shutil.copyfile('shared/py/%s.py' % (app), 'fs/%s/ex/my_%s.py' % (fs_source, app))
+
 os.chdir(port_dir)
 
 idf_path = os.environ["IDF_PATH"]  # get value of IDF_PATH from environment

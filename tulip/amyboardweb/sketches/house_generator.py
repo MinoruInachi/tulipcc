@@ -29,11 +29,10 @@ amy.send(synth=2, patch=256, num_voices=3)
 # Synth 10: 808 drums. patch=258 is the GM drum kit (maps note 36->kick etc.)
 # and loads on any firmware -- on current builds it's the Gamma9001 TR-808
 # bank; the newer kits at 384-390 need current firmware, so this
-# World-deployed sketch sticks with 258. synth_flags=3 routes notes through
-# the GM note map and ignores note-offs. Drum kits are single-voice (amy#913):
+# World-deployed sketch sticks with 258. Drum kits are single-voice (amy#913):
 # one dedicated osc per drum sound, gain baked into the kit's note map (no amp
 # needed — amp would now broadcast to every drum osc).
-amy.send(synth=10, num_voices=1, synth_flags=3, patch=258)
+amy.send(synth=10, patch=258)
 
 # A little reverb
 amy.send(reverb="0.7,0.5,0.1")
@@ -116,7 +115,7 @@ def get_chord_bar():
     """Which bar within the current chord (0-3)."""
     return (step % STEPS_PER_CHORD) // STEPS_PER_BAR
 
-def loop():
+def loop(tick):
     global step, bars_played, current_bass_pattern, current_piano_pattern, prog, chords
     step += 1
     if step < 5:

@@ -40,7 +40,7 @@ You configure the `voices` in a `synth` by using a `patch`, which is a number re
 
 (Note that when you use voices/synths, you'll need to include the `synth` arg when addressing oscillators, and AMY will automatically route your command to the relevant oscillators in each voice of the synth's set -- there's no other way to tell which oscillators are being used by which voices.)
 
-To play a patch -- for instance the built-in patches emulating Juno and DX7 synthesizers and a piano -- you create a synth configured with that patch, then send note events, or parameter moidifications, to the synth. We ship patches 0-127 for Juno, 128-255 for DX7, 256 for our [built-in piano](https://shorepine.github.io/amy/piano.html), and -- on devices with the Gamma9001 drum banks (Tulip, AMYboard, AMY on the web) -- seven GM drum kits at patches 384-390 (see [Drum kits](#drum-kits)). For example, a multitimbral Juno/DX7 synth can be set up like this:
+To play a patch -- for instance the built-in patches emulating Juno and DX7 synthesizers and a piano -- you create a synth configured with that patch, then send note events, or parameter moidifications, to the synth. We ship patches 0-127 for Juno, 128-255 for DX7, 256 for our [built-in piano](https://shorepine.github.io/amy/piano.html), and -- on devices with the Gamma9001 drum banks (Tulip, AMYboard, AMY on the web, the CPython `amy` module) -- seven GM drum kits at patches 384-390 (see [Drum kits](#drum-kits)). For example, a multitimbral Juno/DX7 synth can be set up like this:
 
 ```python
 amy.send(synth=1, num_voices=4, patch=1)     # 4 voices of Juno patch #1 on synth 1
@@ -70,6 +70,8 @@ amy.send(synth=0, note=70, vel=0)
 amy.send(synth=0, vel=0)
 # Once a synth has been initialized and associated with a set of voices, you can use it alone with patch
 amy.send(synth=0, patch=13)  # Load a different Juno patch, it will remain 4-voice.
+# You can also use `patch_string` to directly define a patch using a wire-command string.
+amy.send(synth=0, num_voices=3, patch_string=amy.message(wave=amy.TRIANGLE, bp0='0,1,1000,0,1000,0'))
 # You can release all the voices/oscs being used by a synth by setting its num_voices to zero.
 amy.send(synth=0, num_voices=0)
 # Each synth has an overall level (`synth_level`, wire code `iV`), default 1.0,
@@ -77,15 +79,11 @@ amy.send(synth=0, num_voices=0)
 # for the synth, independent of any osc amp settings (and the natural way to
 # scale a drum-kit synth, whose per-drum oscs each carry their own amp):
 amy.send(synth=0, synth_level=0.5)
-# As a special case, you can use `synth_flags` to set up a MIDI drum synth
-# that will translate GM note events into PCM presets. Load one of the drum kit
-# patches (384-390, see the Drum kits section). Drum kits are single-voice:
-# the one voice holds a dedicated osc per drum sound, so num_voices must be 1:
-amy.send(synth=10, num_voices=1, patch=384, synth_flags=3)
+# Patches 258 and 384-390 are General MIDI drum synth kits (see the Drum kits section).
+# They include special flags that will translate GM note events into PCM presets.
+amy.send(synth=10, patch=384)
 amy.send(synth=10, note=38, vel=1)  # acoustic snare (GM note numbers)
 amy.send(synth=10, patch=389)       # hot-swap the synth to the 80s Power Kit
-# You can also use `patch_string` to directly define a patch using a wire-command string.
-amy.send(synth=11, num_voices=3, patch_string='w7f0Z', synth_flags=3)
 ```
 
 Note 1: Although `note` can take on real values -- e.g. `note=60.5` for 50 cents above C4 -- the voice management tracks voices by integer note numbers (i.e., midi notes) so it rounds note values to the nearest integer when deciding which note-off goes with which note-on.  Note also that note-on events that also set the `preset` parameter (e.g. to select PCM samples) will fold the patch number into the note integer used as the key for note-on, note-off matching.
@@ -94,12 +92,27 @@ Note 2: note-on events to synths (or their component voices) have a specific beh
 ```
 amy.reset()
 amy.send(synth=1, num_voices=2, oscs_per_voice=2)
-amy.send(synth=1, osc=1, freq=660)
+amy.send(synth=1, osc=0, wave=amy.SINE, freq=440)  # These are all defaults, so this line is not needed.
+amy.send(synth=1, osc=1, wave=amy.SINE, freq=660)  # Non-default freq
 amy.send(synth=1, note=60, vel=1)
 ```
 .. will sound two sine tones a fifth apart, even though the two oscs are not chained and we only issued a single note-one.
 
+### Changing a synth's voice count
 
+You can change `num_voices` on a synth that is already running. The synth keeps the sound it has at that moment, including any changes you made since loading its patch:
+
+```python
+amy.send(synth=0, num_voices=1, patch=1)
+amy.send(synth=0, osc=0, filter_freq=2000, resonance=4)  # tweak the live synth
+amy.send(synth=0, num_voices=4)                          # 4 voices of the TWEAKED sound
+```
+
+Changing the voice count rebuilds all of the synth's voices by copying one of the existing voices into the new ones, so every osc setting the synth currently holds comes along.  Note and velocity aren't part of an osc's configuration, so resizing a synth while it's playing copies the sound, not the notes.  A synth with no patch at all -- one built with `oscs_per_voice` or a `patch_string` and then configured osc by osc -- resizes like any other.
+
+To load a *different* sound, name it: `amy.send(synth=0, patch=13)`, or a fresh `patch_string`, replaces the voices' configuration.
+
+A synth built from a `patch_string` carries no patch *number*: the number AMY assigns internally is released as soon as the patch is loaded, so it never occupies a user patch slot.  A bare MIDI program change on such a channel therefore selects from bank 0, the Juno patches.  A synth sitting on a numbered patch -- built-in, or one of your own at 1024+ -- infers its bank from that number.
 
 ### User patches
 
@@ -116,6 +129,21 @@ So you can do:
 >>> amy.send(synth=0, vel=2, note=50)
 ```
 AMY infers the number of oscs needed for the patch from the cumulated commands. If you store a new patch over an old one, that old memory is freed and re-allocated. (We rely on `malloc` for all of this.)
+
+#### Loading DX7 sysex (.SYX) files as user patches
+
+`amy.fm` converts DX7 patches straight from sysex data into a user patch, on any platform AMY's Python runs on (including Tulip and AMYboard). Hand `fm.load_syx()` the bytes of a `.SYX` file — the common 32-voice bank sysex, a single-voice sysex, or raw packed (128-byte) / unpacked (155-byte) voice data — or a base64 string of any of those, which is handy for pasting a patch into a self-contained script or AMYboard sketch:
+
+```python
+>>> from amy import fm
+>>> syx = open('ROM1A.SYX', 'rb').read()
+>>> fm.syx_names(syx)                             # list the 32 voice names in the bank
+['BRASS   1 ', 'BRASS   2 ', ...]
+>>> fm.load_syx(syx, voice=10, patch=1024)        # store voice 10 as user patch 1024
+'E.PIANO 1 '
+>>> amy.send(synth=1, num_voices=6, patch=1024)   # and play it
+>>> amy.send(synth=1, note=60, vel=1)
+```
 
 You can do something very similar directly into a synth, provided it has been initialized with the correct number of oscs.  So we could get
 the same final synth as above with these commands:
@@ -134,7 +162,7 @@ On many synths (like this SH-101), you'll see a row of sliders that impact which
 
 <img src="./sh101.png" width="400"/>
 
-We use this style of control in AMY, called `CtrlCoef` or Control Coefficients. They are a list of up to 9 floats that are multiplied by a range of control signals, then summed up to give the final result (in this case, the filter frequency).
+We use this style of control in AMY, called `CtrlCoef` or Control Coefficients. They are a list of up to 10 floats that are multiplied by a range of control signals, then summed up to give the final result (in this case, the filter frequency).
 
 The full set of parameters accepting **ControlCoefficients** is `amp`, `freq`, `filter_freq`, `duty`, and `pan`.   The control signals are:
 
@@ -143,71 +171,71 @@ The full set of parameters accepting **ControlCoefficients** is `amp`, `freq`, `
  * `vel`: The velocity, from the note-on event.
  * `eg0`: The output of Envelope Generator 0.
  * `eg1`: The output of Envelope Generator 1.
- * `mod`: The output of the modulating oscillator, specified by the `mod_source` parameter.
+ * `mod0`: The output of the first modulating oscillator, specified by the `mod_source` parameter.  (`mod` is accepted as an alias, from when there was only one.)
  * `bend`: The current pitch bend value (from `amy.send(pitch_bend=0.5)` etc.).
  * `ext0`: An external parameter, [set by your code](api.md) or 3rd party CV input or sensor
  * `ext1`: An external parameter, [set by your code](api.md) or 3rd party CV input or sensor
+ * `mod1`: The output of the second modulating oscillator, i.e. `mod_source=[lfo_a, lfo_b]` routes `lfo_b` here.  It sits at the end, not next to `mod0`, because new control inputs are appended so that existing ones never change position.
 
-The set `50,0,0,0,1` means that we have a base frequency of 50 Hz, we ignore the note frequency and velocity and EG0, but we also add the output of EG1. Any coefficients that you do not specify, for instance by providing fewer than 7 values, are not modified.  You can also use empty strings to skip positional values, so `filter_freq=',,,,1'` couples EG1 to the filter frequency without changing any of the other coefficients.  (Note that when we passed `freq=220` in the first example, that was interpreted setting the `const` coefficient to 220, but leaving all the remaining coefficients untouched.)
+The set `50,0,0,0,1` means that we have a base frequency of 50 Hz, we ignore the note frequency and velocity and EG0, but we also add the output of EG1. Any coefficients that you do not specify, for instance by providing fewer than 10 values, are not modified.  You can also use empty strings to skip positional values, so `filter_freq=',,,,1'` couples EG1 to the filter frequency without changing any of the other coefficients.  (Note that when we passed `freq=220` in the first example, that was interpreted setting the `const` coefficient to 220, but leaving all the remaining coefficients untouched.)
 
-Because entering lists of commas is error prone, you can also specify control coefficients as Python dicts consisting of value with keys from the list above, i.e. `filter_freq={'const': 50, 'eg1': 1}` is equivalent to `filter_freq='50,,,,1'`.
+Because entering lists of commas is error prone -- and because a positional list makes you remember oddities like `mod1` being coefficient 9 rather than 6 -- you should prefer to specify control coefficients as Python dicts consisting of values with keys from the list above, i.e. `filter_freq={'const': 50, 'eg1': 1}` is equivalent to `filter_freq='50,,,,1'`.
 
 You can use the same EG to control several things at once.  For example, we could include `freq=',,,,0.333'`, which says to modify the note frequency from the same EG1 as is controlling the filter frequency, but scaled down by 1/3rd so the initial decay is over 1 octave, not 3.  Give it a go!
 
 The note frequency is scaled relative to a zero-point of middle A (MIDI note 69, 440 Hz), so to make the oscillator faithfully track the `note` parameter to the note-on event, you would use something like `freq='440,1'`.  Setting it to `freq='880,1'` would make the oscillator always be one octave higher than the `note` MIDI number.  Setting `freq='440,0.5'` would make the oscillator track the `note` parameter at half an octave per unit, so while `note=69` would still give middle A, `note=81` (A5) would make the oscillator run at D#5, and `note=93` (A6) would be required to get A5 from the oscillator.
 
-The default set of ControlCoefficients for `freq` is `'440,1,0,0,0,0,1'`, i.e. a base of middle A, tracking the MIDI note, plus pitch bend (at unit-per-octave).  Because 440 is such an important value, as a special case, setting the first `freq` value to zero is magically rewritten as 440, so `freq='0,1,0,0,0,0,1'` also yields the default behavior.  `amp` also has a set of defaults: `amp='1,0,1,1,0,0,0'`, i.e. an overall gain of 1, scaled by note-on velocity and by EG0 (which just tracks the note-on status if it has not been set up).  `amp` is a little special in two ways.  First, its `const` coefficient acts as an *overall gain* on the oscillator rather than an additive base value: 1 means full amplitude, and 0 means the oscillator is silenced entirely (it is skipped during rendering).  So `amp={'const': 0, ...}` **mutes the oscillator** — if you just want velocity + EG0 control, leave `const` alone (it defaults to 1).  Second, the nonzero components are combined in the log (dB) domain instead of being summed linearly: each control input's 0..1 range is mapped so that 1 is full amplitude and 0 is -60dB, the coefficient-weighted values are summed in that domain, and the result is converted back to a linear amplitude, with anything at or below -60dB floored to silence.  (The `mod` input is applied directly in the log domain, so an LFO routed to `amp` gives exponential tremolo around the current level.)  These defaults are set up in [`src/amy.c:reset_osc_params()`](https://github.com/shorepine/amy/blob/1e23c70ca6c582cc2dad10f3dec48ea4817bbc30/src/amy.c#L765), and the combination happens in [`amp_combine_controls()`](https://github.com/shorepine/amy/blob/1e23c70ca6c582cc2dad10f3dec48ea4817bbc30/src/amy.c#L1517).
+The default set of ControlCoefficients for `freq` is `{'const': 440, 'note': 1, 'bend': 1}`, i.e. a base of middle A, tracking the MIDI note, plus pitch bend (at unit-per-octave).  Because 440 is such an important value, as a special case, setting the first `freq` value to zero is magically rewritten as 440, so `freq={'const': 0, 'note': 1, 'bend': 1}` also yields the default behavior.  `amp` also has a set of defaults: `amp={'const': 1, 'vel': 1, 'eg0': 1}`, i.e. an overall gain of 1, scaled by note-on velocity and by EG0 (which just tracks the note-on status if it has not been set up).  `amp` is a little special in two ways.  First, its `const` coefficient acts as an *overall gain* on the oscillator rather than an additive base value: 1 means full amplitude, and 0 means the oscillator is silenced entirely (it is skipped during rendering).  So `amp={'const': 0, ...}` **mutes the oscillator** — if you just want velocity + EG0 control, leave `const` alone (it defaults to 1).  Second, the nonzero components are combined in the log (dB) domain instead of being summed linearly: each control input's 0..1 range is mapped so that 1 is full amplitude and 0 is -60dB, the coefficient-weighted values are summed in that domain, and the result is converted back to a linear amplitude, with anything at or below -60dB floored to silence.  (The `mod0`/`mod1` inputs are applied directly in the log domain, so an LFO routed to `amp` gives exponential tremolo around the current level.)  These defaults are set up in [`src/amy.c:reset_osc_params()`](https://github.com/shorepine/amy/blob/7de42556e34e12bfa049be57f034b5816585709b/src/amy.c#L892), and the combination happens in [`amp_combine_controls()`](https://github.com/shorepine/amy/blob/7de42556e34e12bfa049be57f034b5816585709b/src/amy.c#L1750).
 
 We also have LFOs, which are implemented as one oscillator modulating another (instead of sending its waveform to the output). You set up the low-frequency oscillator, then have it control a parameter of another audible oscillator. Let's make the classic 8-bit duty cycle pulse wave modulation, a favorite:
 
 ```python
 amy.reset()  # Clear the state.
 amy.send(osc=1, wave=amy.SINE, freq=0.5, amp=1)   # We set the amp but not the vel, so it doesn't sound.
-amy.send(osc=0, wave=amy.PULSE, duty={'const': 0.5, 'mod': 0.4}, mod_source=1)
+amy.send(osc=0, wave=amy.PULSE, duty={'const': 0.5, 'mod0': 0.4}, mod_source=1)
 amy.send(osc=0, note=60, vel=0.5)
 ```
 
-You see we first set up the modulation oscillator (a sine wave at 0.5Hz, with amplitude of 1).  We do *not* send it a velocity, because that would make it start sending a 0.5 Hz sinewave to the audio output; we want its output only to be used internally.  Then we set up the oscillator to be modulated, a pulse wave with a modulation source of oscillator 1 and the duty **ControlCoefficients** set to have a constant value of 0.5 plus 0.4 times the modulating input (i.e., the depth of the pulse width modulation, where 0.4 modulates between 0.1 and 0.9, almost the maximum depth).  The initial duty cycle will start at 0.5 and be offset by the state of oscillator 1 every tick, to make that classic thick saw line from the C64 et al. The modulation will re-trigger every note on. Just like with envelope generators, the modulation oscillator has a 'slot' in the ControlCoefficients - the 6th coefficient, `mod` - so it can modulate PWM duty cycle, amplitude, frequency, filter frequency, or pan! And if you want to modulate more than one thing, like frequency and duty, just specify multiple ControlCoefficients:
+You see we first set up the modulation oscillator (a sine wave at 0.5Hz, with amplitude of 1).  We do *not* send it a velocity, because that would make it start sending a 0.5 Hz sinewave to the audio output; we want its output only to be used internally.  Then we set up the oscillator to be modulated, a pulse wave with a modulation source of oscillator 1 and the duty **ControlCoefficients** set to have a constant value of 0.5 plus 0.4 times the modulating input (i.e., the depth of the pulse width modulation, where 0.4 modulates between 0.1 and 0.9, almost the maximum depth).  The initial duty cycle will start at 0.5 and be offset by the state of oscillator 1 every tick, to make that classic thick saw line from the C64 et al. The modulation will re-trigger every note on. Just like with envelope generators, each modulation oscillator has a 'slot' in the ControlCoefficients - `mod0` and `mod1` - so it can modulate PWM duty cycle, amplitude, frequency, filter frequency, or pan! And if you want to modulate more than one thing, like frequency and duty, just specify multiple ControlCoefficients:
 
 ```python
 amy.send(osc=1, wave=amy.TRIANGLE, freq=5, amp=1)
-amy.send(osc=0, wave=amy.PULSE, duty={'const': 0.5, 'mod': 0.25}, freq={'mod': 0.5}, mod_source=1)
+amy.send(osc=0, wave=amy.PULSE, duty={'const': 0.5, 'mod0': 0.25}, freq={'mod0': 0.5}, mod_source=1)
 amy.send(osc=0, note=60, vel=0.5)
 ```
 
 We have some helpful patches in `amy.examples`, if you want to use them, or add to them. To make that filter bass, just do `amy.send(synth=0, num_voices=4, patch=amy.examples.filter_bass())` and then `amy.send(synth=0,vel=1,note=50)` to hear it.
 
 
-## AMY's sequencer and timestamps
+## AMY's sequencer and ticks
 
-AMY can accept a `time` (in milliseconds) parameter to schedule events in the future, and also provides a pattern sequencer for repeating events.
-
-The scheduled events are very helpful in cases where you can't rely on an accurate clock from the client, or don't have one. The clock used internally by AMY is based on the audio samples being generated out the speakers, which should run at an accurate 44,100 times a second.  This lets you do things like schedule fast moving parameter changes over short windows of time. 
-
-```python
-start = amy.millis()  # arbitrary start timestamp
-amy.send(osc=0, note=50, vel=1, time=start)
-amy.send(osc=0, note=52, vel=1, time=start + 1000)
-```
-
-Both `amy.send()`s will return immediately, but you'll hear the second note play precisely a second after the first. AMY uses this internal clock to schedule step changes in breakpoints as well. 
-
+AMY provides a musical sequencer, on `ticks`, for both one-off future scheduling and repeating events. There's no millisecond-based scheduling primitive -- everything scheduled ahead of time is expressed in ticks, at the current tempo.
 
 ### The sequencer
 
-AMY starts a musical sequencer that works on `ticks` from startup. You can reset the `ticks` to 0 with an `amy.send(reset=amy.RESET_TIMEBASE)`. Note this will happen immediately, ignoring any `time` or `sequence`.
+AMY starts a musical sequencer that works on `ticks` from startup. You can reset the `ticks` to 0 with an `amy.send(reset=amy.RESET_TIMEBASE)`. The reset travels as an ordinary event, so you can schedule it with `ticks=` like anything else, and it works the same from the C `amy_add_event()` API. The counters restart at the next audio block boundary, which keeps the reset off the render thread's toes; until that boundary `amy.sysclock()` and `amy.sequencer_ticks()` report the running timeline. Anything already queued for a future moment -- a note-off waiting on a note-on delay, an event scheduled through the C API's `amy_event.time`, anything held back by `latency_ms` -- keeps its relative timing across the reset, so a note due 200 ms from now is still due 200 ms from now (send `RESET_EVENTS` too if you want them dropped).
 
 Ticks run at 48 PPQ at the set tempo. The tempo defaults to 108 BPM. This means there are 108 quarter notes a minute, and `48 * 108 = 5184` ticks a minute, 86 ticks a second. The tempo can be changed with `amy.send(tempo=120)`.
 
-You can schedule an event to happen at a precise tick with `amy.send(... ,sequence="tick,period,tag")`. `tick` can be an absolute or offset tick number. If `period` is ommited or 0, `tick` is assumed to be absolute and once AMY reaches `tick`, the rest of your event will play and the saved event will be removed from memory. If an absolute `tick` is in the past, AMY will ignore it. 
+You can schedule an event with `amy.send(..., ticks="tick,period,tag")`. All three values are optional past `tick`:
+```python
+amy.send(osc=0, wave=amy.SAW_UP, eg0="0,1,500,0,500,0")  # Pluck tone
+amy.send(osc=0, note=50, vel=1, ticks=amy.sequencer_ticks() + 96)   # one-off: fires once, ~1s from now
+amy.send(osc=0, note=38, vel=1, ticks="0,24,7")    # repeating, cancelable via tag 7
+amy.send(osc=0, ticks="0,0,7")                     # cancel tag 7
+amy.send(osc=0, note=72, vel=1, ticks="0,24")      # repeating, not individually cancelable
+amy.reset()   # Stop everything
+```
 
-You can schedule repeating events (like a step sequencer or drum machine) with `period`, which is the length of the sequence in ticks. For example a `period` of 48 with `ticks` omitted or 0 will trigger once every quarter note. A `period` of 24 will happen twice every quarter note. A `period` of 96 will happen every two quarter notes. `period` can be any whole number to allow for complex rhythms. 
+`tick` can be an absolute or offset tick number. If `period` is omitted or 0, `tick` is assumed to be absolute: once AMY reaches `tick`, the rest of your event plays once and the saved event is removed from memory. This is also how you schedule a plain one-off event in the future -- give only `tick` (no `period`, no `tag`) and it behaves like the old millisecond `time=` parameter did, except the delay is in ticks, at the current tempo. If an absolute `tick` is already due or overdue when the event arrives, AMY plays it immediately rather than dropping it -- so a scheduling callback that runs a little late (they all do) still sounds, just a fraction of a tick behind.
 
-For pattern sequencers like drum machines, you will also want to use `tick` alongside `period`. If both are given and nonzero, `tick` is assumed to be an offset on the `period`. For example, for a 16-step drum machine pattern running on eighth notes (PPQ/2), you would use a `period` of `16 * 24 = 384`. The first slot of the drum machine would have a `tick` of 0, the 2nd would have a `tick` offset of 24, and so on. 
+You can schedule repeating events (like a step sequencer or drum machine) with `period`, which is the length of the sequence in ticks. For example a `period` of 48 with `tick` equal to 0 will trigger once every quarter note. A `period` of 24 will happen twice every quarter note. A `period` of 96 will happen every two quarter notes. `period` can be any whole number to allow for complex rhythms.
 
-`tag` should be given, and will be `0` if not. You should set `tag` to a random or incrementing number in your code that you can refer to later. `tag` allows you to replace or delete the event once scheduled. 
+For pattern sequencers like drum machines, you will also want to use `tick` alongside `period`. If both are given and `period` is nonzero, `tick` is assumed to be an offset on the `period`. For example, for a 16-step drum machine pattern running on eighth notes (PPQ/2), you would use a `period` of `16 * 24 = 384`. The first slot of the drum machine would have a `tick` of 0, the 2nd would have a `tick` offset of 24, and so on.
 
-If you are including AMY in a program, you can set the [hook `void (*amy_external_sequencer_hook)(uint32_t)`](docs/api.md) to any function. This will be called at every tick with the current tick number as an argument. 
+`tag` is optional. If you give one, you can cancel that event later by sending `ticks="0,0,tag"` with the same `tag`. If you omitted `tag` when setting up the sequence (a 1- or 2-value `ticks=`), the event is still scheduled and still fires, but it isn't addressable by any tag -- there's no way to cancel or replace it individually (only by something like `amy.reset()`, discarding all sequenced events), so only omit `tag` for events you don't need to manage later.
+
+If you are including AMY in a program, you can set the [hook `void (*amy_external_sequencer_hook)(uint32_t)`](docs/api.md) to any function. This will be called at every tick with the current tick number as an argument.
 
 ## Core oscillators
 
@@ -221,7 +249,7 @@ Oscillators will not become audible until a `velocity` over 0 is set for the osc
 
  - Pick the table with `preset`: `pcm_wavetable_base` to `pcm_wavetable_base + pcm_wavetable_samples - 1`
  - `duty` controls interpolation position across the 64 waveform cycles within one wavetable preset.
- - Internally each cycle is 256 samples; full table length is typically 16384 samples.
+ - Internally each cycle is 256 samples; full table length is typically 16384 samples (64 complete cycles).
  - You can load new wavetables using `load_sample` and use your new preset number. Ensure they are 16,384 samples long. Find more on [waveeditonline.com](http://waveeditonline.com).
 
 
@@ -324,11 +352,11 @@ Please see our [piano voice documentation](https://shorepine.github.io/amy/piano
 
 ## PCM and Sampler
 
-AMY comes with a bank of drum-like PCM samples baked in, as they are normally hard to render with additive, subtractive or FM synthesis. Use the type `PCM` with a `preset` number to play them; their native pitch is used if you don't give a frequency or note parameter. The default build bakes in an 11-sample TR-808 set (presets 0-10). Builds with the Gamma9001 banks enabled (Tulip, AMYboard, AMY on the web) instead bake the full 19-sample TR-808 bank as presets 0-18 and add 136 more samples at presets 256-391: TR-909, Linn 9000, Univox MR-12, Tokyo Synthetics, the 80s Power Kit, and a large acoustic percussion bank. You can update the baked-in PCM sample bank using `amy/headers.py`.
+AMY comes with a bank of drum-like PCM samples baked in, as they are normally hard to render with additive, subtractive or FM synthesis. Use the type `PCM` with a `preset` number to play them; their native pitch is used if you don't give a frequency or note parameter. The default build bakes in an 11-sample TR-808 set (presets 0-10). Builds with the Gamma9001 banks enabled (Tulip, AMYboard, AMY on the web, the CPython `amy` module) instead bake the full 19-sample TR-808 bank as presets 0-18 and add 136 more samples at presets 256-391: TR-909, Linn 9000, Univox MR-12, Tokyo Synthetics, the 80s Power Kit, and a large acoustic percussion bank. You can update the baked-in PCM sample bank using `amy/headers.py`.
 
 ### Drum kits
 
-On Gamma9001 devices, patches 384-390 are ready-made General MIDI drum kits: load one on a synth with `synth_flags=3` and GM note numbers (35/36 kick, 38 snare, 42 closed hat, 46 open hat, 49 crash, ...) play the right sound.
+On Gamma9001 devices, patches 384-390 are ready-made General MIDI drum kits: load one on a synth and GM note numbers (35/36 kick, 38 snare, 42 closed hat, 46 open hat, 49 crash, ...) play the right sound.
 
 | patch | MIDI PC (bank MSB 3) | kit |
 |-------|----------------------|-----|
@@ -340,7 +368,7 @@ On Gamma9001 devices, patches 384-390 are ready-made General MIDI drum kits: loa
 | 389 | 5 | 80s Power Kit (gated reverb) |
 | 390 | 6 | Percussion (hand drums / latin) |
 
-Switch kits from code with `amy.send(synth=10, patch=38x)`, or over MIDI with a bank select MSB of 3 (CC0=3) followed by a program change 0-6 on the drum channel. A synth already sitting on a kit patch stays in the kit bank, so a bare program change also switches kits. Channel 10 boots as the TR-808 kit when default synths are on; you can run a second kit polytimbrally on another channel, e.g. `amy.send(synth=11, num_voices=4, patch=390, synth_flags=3)`. Set a kit channel's overall level with a constant amp on the synth, e.g. `amy.send(synth=10, amp=0.5)` — the kits keep their per-drum gains in each note mapping's velocity scale, so the level persists across hits, just like on the melodic patches.
+Switch kits from code with `amy.send(synth=10, patch=38x)`, or over MIDI with a bank select MSB of 3 (CC0=3) followed by a program change 0-6 on the drum channel. A synth already sitting on a kit patch stays in the kit bank, so a bare program change also switches kits. Channel 10 boots as the TR-808 kit when default synths are on; you can run a second kit polytimbrally on another channel, e.g. `amy.send(synth=11, patch=390)`. Set a kit channel's overall level with a constant amp on the synth, e.g. `amy.send(synth=10, amp=0.5)` — the kits keep their per-drum gains in each note mapping's velocity scale, so the level persists across hits, just like on the melodic patches.
 
 
 ```python
@@ -348,14 +376,38 @@ amy.send(osc=0, wave=amy.PCM, vel=1, preset=10) # cowbell
 amy.send(osc=0, wave=amy.PCM, vel=1, preset=10, note=70) # higher cowbell! 
 ```
 
-You can turn on sample looping, helpful for instruments, using `feedback`:
+You can turn on sample looping, helpful for instruments, using `mode`:
 
 ```python
-amy.send(wave=amy.PCM,vel=1,preset=21,feedback=0) # clean guitar string, no looping
-amy.send(wave=amy.PCM,vel=1,preset=21,feedback=1) # loops forever until note off
+amy.reset()
+amy.load_sample('sounds/partial_sources/VI ISUMP2A.wav', preset=99)  # wave file with looping
+amy.send(wave=amy.PCM, preset=99, vel=1) # plays through, no looping
+amy.send(wave=amy.PCM, preset=99, vel=1, mode=amy.PCM_LOOP) # loops until note off
 amy.send(vel=0) # note off
-amy.send(wave=amy.PCM,vel=1,preset=35,feedback=1) # nice violin
+# Continue looping even after note off, but ADSR will apply a release
+amy.send(wave=amy.PCM, preset=99, vel=1, mode=amy.PCM_LOOP_FOREVER, eg0='0,1,1000,0')
+amy.send(vel=0) # note off
 ```
+
+**Looping needs an in-memory sample.** Presets loaded with `disk_sample` stream
+from the file through a small buffer instead of sitting in memory, so there is
+nothing to loop back into and the loop marks can't be honored.
+
+AMY therefore refuses to enter that configuration rather than accepting it and
+quietly not looping. Both halves are checked as they are set — when you change
+`mode`, and when you change `preset` — and the command that would create the
+impossible pair is dropped with a warning naming the file:
+
+```
+amy: osc 0 preset 1024 streams from drums/kick.wav, which cannot loop;
+     ignoring mode=2. Use load_sample() to loop.
+```
+
+The `mode` is the half dropped when you set both at once, so the sample still
+plays (once, honoring note-off) rather than leaving you a loop mode pointing at
+nothing. Setting a streamed preset on an oscillator that is *already* in a loop
+mode drops the `preset` instead, and says so. Load the sample with
+`load_sample` if you need it to loop.
 
 ### Sampler (aka Memory PCM)
 

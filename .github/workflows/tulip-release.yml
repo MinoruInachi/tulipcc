@@ -30,6 +30,7 @@ on:
       - 'tulip/esp32s3/**'
       - 'tulip/shared/**'
       - 'tulip/fs/tulip/**'
+      - 'tulip/fs_create.py'
       - 'tulip/macos/**'
       - 'tulip/windows/**'
       - '.github/workflows/tulip-release.yml'
@@ -46,9 +47,26 @@ jobs:
       contents: write                # create + clobber the 'tulip' release
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/init-submodules
+
+      # See amyboard-pr-preview.yml for why ccache lives in the workspace
+      # rather than ~/.ccache. This job runs on main, so unlike the PR previews
+      # it also SAVES -- PR runs can only read caches from the default branch,
+      # so main is the only place that can populate one for them.
+      - name: Prepare ccache dir
+        run: mkdir -p .ccache
+
+      # Key is namespaced by BOARD. Both release workflows fire on the same push,
+      # so a key of just <prefix>-${{ github.sha }} is identical in both jobs:
+      # whichever finishes first saves, the other collides and is silently
+      # dropped. That is deterministic, not a race -- measured on 693d29cd,
+      # where this job's 1562 objects were the ones discarded.
+      - name: Restore esp-idf ccache
+        uses: actions/cache/restore@v4
         with:
-          # amy + micropython (and nested submodules) are needed to build.
-          submodules: recursive
+          path: .ccache
+          key: esp-idf-ccache-v5.4.1-TULIP4_R11-${{ github.sha }}
+          restore-keys: esp-idf-ccache-v5.4.1-TULIP4_R11-
 
       - name: Build TULIP4_R11 firmware + assemble images
         uses: espressif/esp-idf-ci-action@v1
@@ -57,10 +75,26 @@ jobs:
           target: esp32s3
           path: tulip/esp32s3
           command: >-
+            export IDF_CCACHE_ENABLE=1 &&
+            export CCACHE_DIR="$(cd ../.. && pwd)/.ccache" &&
+            export CCACHE_MAXSIZE=800M &&
             python -m pip install littlefs-python &&
             idf.py -DMICROPY_BOARD=TULIP4_R11 build &&
             cd .. &&
-            python fs_create.py tulip
+            python fs_create.py tulip &&
+            (ccache -s || true)
+
+      # The container wrote these as root; actions/cache runs as the runner.
+      - name: Reclaim ccache ownership after the root container build
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" .ccache
+
+      - name: Save esp-idf ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: esp-idf-ccache-v5.4.1-TULIP4_R11-${{ github.sha }}
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
@@ -131,8 +165,7 @@ jobs:
       contents: write                # upload Tulip_Desktop.zip to the 'tulip' release
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - uses: ./.github/actions/init-submodules
 
       - name: Build Tulip Desktop (universal binary)
         run: |
@@ -264,8 +297,7 @@ jobs:
       contents: write              # upload Tulip_Desktop_Windows.zip to the 'tulip' release
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - uses: ./.github/actions/init-submodules
 
       - name: Generate AMY drum data
         # stdlib-only generator; the build script touches patches.h itself.

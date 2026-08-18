@@ -5,6 +5,18 @@ from tulip import wifi, upgrade
 i2c = None
 display = None # Display instance (unified interface for all display types)
 
+# A sketch's loop(tick) is called every 32nd note and receives the AMY
+# sequencer's absolute tick.  This is the tick span of one of those calls, so
+# `step = tick // amyboard.TICKS_PER_STEP` recovers the bar-locked 32nd-note
+# index (step % 32 == 0 on a downbeat).  Derived from AMY's PPQ rather than
+# hardcoded: 4 quarter notes per bar / 32 steps per bar * PPQ = 6 at 48 PPQ.
+TICKS_PER_STEP = int((4.0 / 32.0) * amy.AMY_SEQUENCER_PPQ)
+
+# Consecutive loop() exceptions before the sketch loop gives up. It fires
+# every 32nd note, so a persistently broken loop() would otherwise flood the
+# console and starve the REPL.
+_MAX_LOOP_FAILS = 8
+
 # Web encoder emulation state (used when running on AMYBOARD_WEB)
 _web_encoder_pos = 0      # cumulative encoder position
 _web_encoder_button = False  # current button state
@@ -207,12 +219,13 @@ class Display:
 
 DEFAULT_SKETCH_SOURCE = """\
 # AMYboard Sketch
-# Code put here runs first, then loop(step) is called every 32nd note,
-# starting on a bar downbeat. step counts 32nd notes on the sequencer's
-# bar-locked grid, so step % 32 == 0 is always a downbeat.
+# Code put here runs first, then loop(tick) is called every 32nd note,
+# starting on a bar downbeat. tick is AMY's sequencer tick, so it can go
+# straight into amy.send(ticks=...). For 32nd-note counting divide it:
+# step = tick // amyboard.TICKS_PER_STEP  (step % 32 == 0 on a downbeat).
 import amyboard, amy
 
-def loop(step):
+def loop(tick):
     pass
 
 # Do not edit. Set automatically by the knobs on AMYboard Online.
@@ -297,112 +310,6 @@ _KNOBS_MARKER = '_auto_generated_knobs = """'
 _KNOBS_END = '"""'
 _KNOBS_MARKER_B = _KNOBS_MARKER.encode("utf-8")
 _KNOBS_END_B = _KNOBS_END.encode("utf-8")
-
-def generate_knobs_text():
-    """Return the full AMY state text (same as zW output) using the C helper."""
-    return tulip.amy_dump_state()
-
-def _strip_all_knobs_blocks(data):
-    """Remove every _auto_generated_knobs = \"\"\"...\"\"\" block from data (bytes).
-    Also strips the preceding comment line on each removed block so we don't
-    leave orphaned comments behind. Returns the cleaned bytes. Idempotent.
-
-    Self-heals files that accidentally ended up with multiple knobs blocks
-    (e.g. from a prior corrupted save that appended instead of replacing)."""
-    comment_b = b"# Do not edit. Set automatically by the knobs on AMYboard Online."
-    while True:
-        start = data.find(_KNOBS_MARKER_B)
-        if start < 0:
-            break
-        end = data.find(_KNOBS_END_B, start + len(_KNOBS_MARKER_B))
-        if end < 0:
-            # Unterminated block — chop from the marker onward.
-            data = data[:start]
-            break
-        # Also absorb the preceding comment line if present, so repeated
-        # strip+re-add doesn't accumulate stray comment lines.
-        cut_from = start
-        comment_idx = data.rfind(comment_b, 0, start)
-        if comment_idx >= 0:
-            # Back up to the newline before the comment (if any) so we remove
-            # the full comment line plus its trailing newline.
-            line_start = data.rfind(b"\n", 0, comment_idx)
-            if line_start < 0:
-                line_start = 0
-            else:
-                line_start += 1  # keep the \n terminating the previous line
-            # Only absorb the comment if the only thing between it and the
-            # marker is whitespace.
-            gap = data[comment_idx + len(comment_b):start]
-            if gap.strip() == b"":
-                cut_from = line_start
-        # Also absorb the closing """ + trailing whitespace up to the next \n.
-        cut_to = end + len(_KNOBS_END_B)
-        # Absorb any trailing whitespace / single newline after the closing quote.
-        while cut_to < len(data) and data[cut_to:cut_to + 1] in (b" ", b"\t"):
-            cut_to += 1
-        if cut_to < len(data) and data[cut_to:cut_to + 1] == b"\n":
-            cut_to += 1
-        data = data[:cut_from] + data[cut_to:]
-    return data
-
-
-def update_sketch_knobs(sketch_path=None):
-    """Read sketch.py, replace _auto_generated_knobs section with current AMY state, write back.
-
-    Works at the byte level so we never trip over non-UTF-8 bytes that may
-    have ended up in the file (e.g. from a previous partial/binary transfer).
-
-    If the file already contains multiple knobs blocks (or fragments from a
-    prior corrupted save), all of them are stripped and a single fresh block
-    is appended. This is self-healing.
-
-    This function is called synchronously from the C-side zA handler via
-    mp_call_function_1, so any uncaught exception would unwind the MicroPython
-    NLR stack and abort the sysex parser mid-message. We wrap the whole thing
-    in a top-level try/except that only emits a stderr log on failure."""
-    try:
-        if sketch_path is None:
-            sketch_path = tulip.root_dir() + "user/current/sketch.py"
-        tulip.stderr_write("update_sketch_knobs: path=%s" % sketch_path)
-        try:
-            data = open(sketch_path, "rb").read()
-        except OSError:
-            tulip.stderr_write("update_sketch_knobs: file missing, creating default")
-            _ensure_current_env_layout()
-            try:
-                data = open(sketch_path, "rb").read()
-            except OSError:
-                tulip.stderr_write("update_sketch_knobs: still can't read, giving up")
-                return
-        try:
-            knobs = generate_knobs_text()
-        except Exception as e:
-            tulip.stderr_write("update_sketch_knobs: generate_knobs_text failed: %s" % e)
-            return
-        tulip.stderr_write("update_sketch_knobs: knobs=%d bytes" % len(knobs))
-        knobs_b = knobs.encode("utf-8") if isinstance(knobs, str) else knobs
-        # Strip every existing knobs block (defensive — self-heal if the
-        # file picked up duplicates from a prior bad save), then append one
-        # fresh block at the end.
-        data = _strip_all_knobs_blocks(data)
-        # Ensure exactly one trailing newline before we append the fresh block.
-        while data.endswith(b"\n\n"):
-            data = data[:-1]
-        if not data.endswith(b"\n"):
-            data = data + b"\n"
-        data = (
-            data
-            + b"\n# Do not edit. Set automatically by the knobs on AMYboard Online.\n"
-            + _KNOBS_MARKER_B + b"\n"
-            + knobs_b
-            + (b"" if knobs_b.endswith(b"\n") else b"\n")
-            + _KNOBS_END_B + b"\n"
-        )
-        with open(sketch_path, "wb") as f:
-            f.write(data)
-    except Exception as e:
-        tulip.stderr_write("update_sketch_knobs: unexpected error: %s: %s" % (type(e).__name__, e))
 
 def _extract_knobs_from_file(filepath):
     """Read sketch.py as bytes and extract the _auto_generated_knobs content without importing.
@@ -599,6 +506,7 @@ def start_amy():
             sys.print_exception(e)
         return
     init_pcm9211()
+    init_gp8413()  # newer GP8413 batches (v1.5 boards) power up half-scale
     # AMY binds its MIDI UART TX to this pin at start; set_midi_type() right after is
     # the single MIDI OUT init sequence (it also holds the unused TRS leg high). It
     # needs AMY's UART driver, which amy_start() installs, so it must come second.
@@ -776,24 +684,35 @@ def run_sketch():
 def _start_sketch_loop(loop_fn):
     """Schedule loop_fn via TulipSequence (every 32nd note).
 
-    Sketch loops ride the AMY sequencer's absolute tick count -- the same
-    clock AMYSequence events fire on. The first call is held until a bar
-    boundary (4 beats), so a sketch that keeps its own step counter starts
-    on the downbeat, in phase with any AMY-sequenced patterns. A sketch can
-    instead declare loop(step): step is the global 32nd-note index on that
-    bar-locked grid (step % 32 == 0 is always a downbeat), which stays in
-    phase even if a callback is ever dropped.
+    A sketch MUST declare loop(tick).  tick is the AMY sequencer's absolute
+    tick count -- the same clock AMYSequence events and `ticks=` scheduling
+    use, so it can be passed straight back to amy.send(ticks=...) without
+    any conversion or clock read.  The first call is held until a bar
+    boundary (4 beats), so a sketch starts on the downbeat in phase with any
+    AMY-sequenced patterns.
+
+    For 32nd-note counting, divide: `step = tick // amyboard.TICKS_PER_STEP`
+    gives the old bar-locked step index, where step % 32 == 0 is a downbeat.
+
+    The argument is not optional.  This used to accept a zero-argument
+    loop() as well, deciding which by calling loop(step) and catching
+    TypeError -- but MicroPython binds arguments before running the body
+    (objfun.c: INIT_CODESTATE precedes mp_execute_bytecode), so an arity
+    error and a TypeError raised *inside* a one-argument loop are
+    indistinguishable at the call site.  A sketch whose first loop() happened
+    to raise TypeError was permanently misfiled as zero-argument and then
+    failed on every subsequent call.  Requiring the argument removes the
+    guess rather than making it cleverer.
     """
     import sequencer
     global _sketch_seq
-    ticks_per_step = int((4.0 / 32.0) * sequencer.PPQ)  # one 32nd note
     ticks_per_bar = 4 * sequencer.PPQ
     _busy = False
     _started = False
-    _takes_step = None
+    _fails = 0
 
     def _guarded_loop(tick):
-        nonlocal _busy, _started, _takes_step
+        nonlocal _busy, _started, _fails
         if _busy:
             return
         _busy = True
@@ -802,23 +721,27 @@ def _start_sketch_loop(loop_fn):
                 if tick % ticks_per_bar:
                     return  # hold loop() until the next downbeat
                 _started = True
-            step = tick // ticks_per_step
-            if _takes_step is None:
-                # First call decides the signature: prefer loop(step), fall
-                # back to loop() for sketches that don't take an argument.
-                try:
-                    loop_fn(step)
-                    _takes_step = True
-                except TypeError:
-                    _takes_step = False
-                    loop_fn()
-            elif _takes_step:
-                loop_fn(step)
-            else:
-                loop_fn()
+            loop_fn(tick)
+            _fails = 0
         except Exception as e:
+            # Uniform for every exception type -- deliberately no special
+            # case for TypeError.  An un-migrated `def loop():` raises one,
+            # but so does a real bug inside a correct loop(tick), and (see
+            # above) the two are indistinguishable here.  The traceback
+            # already says "function takes 0 positional arguments but 1 were
+            # given" when that is what happened.
+            _fails += 1
             print("sketch.loop() error:")
             sys.print_exception(e)
+            if _fails == _MAX_LOOP_FAILS:  # exactly once, not on every later call
+                # Failing every 32nd note floods the console and starves the
+                # REPL. Nothing has succeeded in _MAX_LOOP_FAILS calls, so
+                # stop rather than keep retrying.
+                print("sketch.loop() failed %d times in a row -- stopping the "
+                      "sketch loop. If loop() takes no argument, it now must: "
+                      "`def loop(tick):` (step = tick // amyboard.TICKS_PER_STEP)"
+                      % _fails)
+                stop_sketch()
         finally:
             _busy = False
 
@@ -978,6 +901,17 @@ def init_pcm9211(addr=0x40):
         else:
             print("Write 0x%02x to 0x%02x returned 0x%02x" % (val, reg, r))
 
+def init_gp8413(addr=88):
+    """Select the CV DAC's 5V full-scale output range (register 0x01 = 0x11).
+
+    GP8413 date-code batches differ in their power-up range: 25+ parts
+    (v1.4 boards) default to the 5V full scale the output stage expects,
+    but 26+ parts (v1.5 boards) default to half that, leaving CV out
+    spanning only -10v..0v. 0x11 selects the correct range on both
+    batches (bench-verified a no-op on 25+). The setting is volatile, so
+    this must run every boot before any CV output."""
+    get_i2c().writeto_mem(addr, 0x01, bytes([0x11]))
+
 def set_cv_out(channel=0, synth=1):
     """Route a synth's audio output to a CV channel instead of speakers.
 
@@ -1014,7 +948,11 @@ def cv_out(volts, channel=0):
         tulip.vcv_cv_out(channel, volts)
         return
     addr = 88 # GP8413
-    # With rev1 scaling, 0x0000 -> -10v, 0x7fff -> +10v
+    # With rev1 scaling, 0x0000 -> -10v, 0x7fff -> +10v.
+    # The output stage (TL074, 30K/10K from A3V3) is gain 4 offset -9.9v,
+    # sized for a 5V-full-scale DAC: jack = 4*dac - 9.9. Newer GP8413
+    # batches (v1.5 boards) power up at half that full scale, so
+    # init_gp8413() must have selected the range before writing values.
     val = int(((volts + 10)/20.0) * 0x8000)
     if(val < 0):
         val = 0
@@ -1215,24 +1153,38 @@ def show_neopixels(seesaw_dev=0x49):
 # AMYboard works with three different rotary-encoder accessories on the I2C bus,
 # each with its own wire protocol, encoder count, and LED layout:
 #
-#   "adafruit_single" - Adafruit I2C QT Rotary Encoder (0x36): 1 encoder, 1 LED
-#   "adafruit_quad"   - Adafruit Quad Rotary Encoder Breakout (0x49): 4 enc, 4 LED
+#   "adafruit_single" - Adafruit I2C QT Rotary Encoder (0x36-0x3D): 1 enc, 1 LED
+#   "adafruit_quad"   - Adafruit Quad Rotary Encoder Breakout (0x49-0x50): 4 enc, 4 LED
 #   "m5stack"         - M5Stack Unit 8Encoder (0x41): 8 encoders, 8 LEDs + a toggle
 #   "web"             - the in-browser simulator's single emulated encoder
 #
 # Rather than make every sketch (and the sketch generator) special-case each one,
-# amyboard.encoder() autodetects whichever is connected and returns an Encoder
+# amyboard.encoder() autodetects whatever is connected and returns an Encoder
 # whose API is identical across all of them:
 #
-#   enc = amyboard.encoder()   # autodetect
-#   enc.type                   # "adafruit_quad" | "m5stack" | "web" | ... | None
-#   enc.encoders               # number of encoders (int)
-#   enc.leds                   # number of addressable LEDs (int)
+#   enc = amyboard.encoder()   # autodetect (finds EVERY attached device)
+#   enc.type                   # "adafruit_quad" | "m5stack" | ... | "multi" | None
+#   enc.devices                # list of (type, i2c_addr) per attached device
+#   enc.encoders               # total number of encoders (int)
+#   enc.leds                   # total number of addressable LEDs (int)
 #   enc.read(i)                # cumulative position of encoder i, starts at 0
 #   enc.button(i)              # True while encoder i's push button is held
 #   enc.led(i, r, g, b)        # light encoder i's LED (0..255 each), applied now
 #   enc.reset(i)               # zero encoder i (omit i to zero them all)
+#   enc.invert(True, i)        # make encoder i count the other way (omit i: all)
 #   enc.switch()               # M5Stack toggle (always False on other devices)
+#
+# Multiple devices: the Adafruit breakouts have address jumpers (single: up to 8
+# boards at 0x36-0x3D, quad: up to 8 at 0x49-0x50), and autodetection finds every
+# attached device and presents them as ONE Encoder — indices run across devices in
+# a fixed order (M5Stack first, then quads, then singles, each by ascending I2C
+# address), so e.g. two singles at 0x36 + 0x37 give enc.encoders == 2 with the
+# 0x36 board as encoder 0. Pass addr= (and optionally type=) to bind exactly one
+# specific device instead.
+#
+# Inverted encoders: some encoder hardware revisions count the "wrong" way
+# (clockwise decrements). Pass invert=True to amyboard.encoder() to flip the
+# direction of every read(), or call enc.invert(True, i) for just encoder i.
 #
 # If no encoder is attached (type is None) or the I2C bus errors mid-read, every
 # method returns a safe default, so a sketch written for one device runs unchanged
@@ -1241,6 +1193,11 @@ def show_neopixels(seesaw_dev=0x49):
 _M5_8ENCODER_ADDR = 0x41
 _ADAFRUIT_QUAD_ADDR = 0x49
 _ADAFRUIT_SINGLE_ADDR = 0x36
+
+# Each Adafruit breakout has three address jumpers, so up to 8 boards of each
+# type can share the bus.
+_ADAFRUIT_SINGLE_ADDRS = tuple(range(0x36, 0x3E))  # 0x36..0x3D
+_ADAFRUIT_QUAD_ADDRS = tuple(range(0x49, 0x51))    # 0x49..0x50
 
 # Fixed per-device config. button_pins / neopixel_pin only apply to the seesaw
 # (Adafruit) devices; the M5Stack unit exposes everything through one register map.
@@ -1252,89 +1209,146 @@ _ENCODER_PROFILES = {
     "m5stack":         {"addr": _M5_8ENCODER_ADDR, "encoders": 8, "leds": 8},
 }
 
+# Hardware-ID codes a seesaw chip can report (SAMD09 and the ATtiny 8x6/8x7/161x
+# parts Adafruit ships). Anything else at a candidate address is some other
+# device — the OLED display lives at 0x3C/0x3D, inside the single-encoder
+# jumper range, and an ADS1115 can sit inside the quad range.
+_SEESAW_HW_IDS = (0x55, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89)
 
-def _detect_encoder_type():
-    """Probe the I2C bus and return the connected encoder's type string, or None.
+# How many callbacks a button should be held for before Encoder.button_event returns HELD
+_BUTTON_HOLD_STEPS = 6
 
-    M5Stack is checked first since it has a distinct address; the two Adafruit
-    seesaw devices use different default addresses too."""
+# Return codes from Encoder.button_event
+PRESS = 1
+HELD = 2
+
+def _seesaw_present(addr, delay=0.008):
+    """True if a device at addr answers the seesaw hardware-ID register."""
+    try:
+        i2c = get_i2c()
+        i2c.writeto(addr, bytes([0x00, 0x01]))  # STATUS_BASE, STATUS_HW_ID
+        time.sleep(delay)
+        return i2c.readfrom(addr, 1)[0] in _SEESAW_HW_IDS
+    except OSError:
+        return False
+
+
+def _detect_encoder_devices():
+    """Scan the I2C bus and return every attached encoder as a (type, addr) list.
+
+    Order is fixed: M5Stack first (distinct address), then Adafruit quads, then
+    Adafruit singles, each by ascending I2C address. Candidate seesaw addresses
+    are verified with a hardware-ID probe so the OLED display (0x3C/0x3D) or
+    other devices sharing the jumper ranges are never mistaken for encoders."""
     if web():
-        return "web"
+        return [("web", None)]
     if _vcv():
-        return "vcv"
+        return [("vcv", None)]
     try:
         present = set(get_i2c().scan())
     except Exception:
-        return None
+        return []
+    devices = []
     if _M5_8ENCODER_ADDR in present:
-        return "m5stack"
-    if _ADAFRUIT_QUAD_ADDR in present:
-        return "adafruit_quad"
-    if _ADAFRUIT_SINGLE_ADDR in present:
-        return "adafruit_single"
-    return None
+        devices.append(("m5stack", _M5_8ENCODER_ADDR))
+    for addr in _ADAFRUIT_QUAD_ADDRS:
+        if addr in present and _seesaw_present(addr):
+            devices.append(("adafruit_quad", addr))
+    for addr in _ADAFRUIT_SINGLE_ADDRS:
+        if addr in present and _seesaw_present(addr):
+            devices.append(("adafruit_single", addr))
+    return devices
+
+
+def _detect_encoder_type():
+    """Type string of the first attached encoder device, or None."""
+    devices = _detect_encoder_devices()
+    return devices[0][0] if devices else None
 
 
 class Encoder:
-    """One interface to whichever rotary-encoder accessory is connected.
+    """One interface to every rotary-encoder accessory that's connected.
 
-    Build via amyboard.encoder() (autodetects), or pass type= to force a specific
-    device: "adafruit_single", "adafruit_quad", or "m5stack".
+    Build via amyboard.encoder() (autodetects all attached devices and flattens
+    them into one index space), or force a single device with type=
+    ("adafruit_single", "adafruit_quad", "m5stack") and/or addr= (its I2C
+    address, for boards moved off the default by address jumpers).
 
     Encoder positions returned by read() are zeroed at construction time, so the
     first read() of an untouched encoder is 0 no matter what its raw hardware
     counter happened to be. Buttons are normalized so button(i) is True while
-    held, regardless of each device's underlying active-high/active-low wiring."""
+    held, regardless of each device's underlying active-high/active-low wiring.
+    invert=True (or invert=(False, True, ...) per encoder) flips the direction
+    read() counts, for encoder hardware that increments counterclockwise."""
 
-    def __init__(self, type=None):
+    def __init__(self, type=None, addr=None, invert=False):
         if type is None:
-            type = _detect_encoder_type()
-        self.type = type
-
-        if type == "web":
-            self.encoders = 1
-            self.leds = 0  # no LED in the simulator
-            self._addr = None
-        elif type == "vcv":
-            self.encoders = 1  # the single panel encoder on the Rack module
-            self.leds = 0
-            self._addr = None
+            found = _detect_encoder_devices()
+            if addr is not None:
+                # Bind only the device at this address.
+                found = [(t, a) for (t, a) in found if a == addr]
+        elif type in ("web", "vcv"):
+            found = [(type, None)]
         elif type in _ENCODER_PROFILES:
-            p = _ENCODER_PROFILES[type]
-            self.encoders = p["encoders"]
-            self.leds = p["leds"]
-            self._addr = p["addr"]
-            self._button_pins = p.get("button_pins")
-            self._neopixel_pin = p.get("neopixel_pin")
-            if type in ("adafruit_single", "adafruit_quad"):
-                init_buttons(pins=self._button_pins, seesaw_dev=self._addr)
-                init_neopixels(num=self.leds, pin=self._neopixel_pin, seesaw_dev=self._addr)
+            # Forced type: trust the caller, don't require detection (matches
+            # the missing-hardware behaviour of the seesaw helpers above).
+            found = [(type, addr if addr is not None else _ENCODER_PROFILES[type]["addr"])]
         else:
-            # No encoder detected — a 0-encoder device whose methods all no-op.
-            self.type = None
-            self.encoders = 0
-            self.leds = 0
-            self._addr = None
+            found = []
+
+        self._devs = []
+        self.devices = []  # public: [(type, i2c_addr or None), ...]
+        for t, a in found:
+            if t in ("web", "vcv"):
+                d = {"type": t, "addr": None, "n": 1, "leds": 0}
+            else:
+                p = _ENCODER_PROFILES[t]
+                d = {"type": t, "addr": a, "n": p["encoders"], "leds": p["leds"],
+                     "button_pins": p.get("button_pins"),
+                     "neopixel_pin": p.get("neopixel_pin")}
+                if t in ("adafruit_single", "adafruit_quad"):
+                    init_buttons(pins=d["button_pins"], seesaw_dev=a)
+                    init_neopixels(num=d["leds"], pin=d["neopixel_pin"], seesaw_dev=a)
+            self._devs.append(d)
+            self.devices.append((t, a))
+
+        self.encoders = sum(d["n"] for d in self._devs)
+        self.button_held_steps = [0] * self.encoders
+        self.button_events_queue = []
+        self.leds = sum(d["leds"] for d in self._devs)
+        types = set(t for t, _ in self.devices)
+        # type stays a plain string for single-type setups; "multi" when mixed.
+        self.type = self.devices[0][0] if len(types) == 1 else ("multi" if types else None)
+
+        # Flatten per-device encoder/LED indices into one global index space.
+        self._map = [(d, j) for d in self._devs for j in range(d["n"])]
+        self._led_map = [(d, j) for d in self._devs for j in range(d["leds"])]
+
+        if isinstance(invert, (tuple, list)):
+            self._invert = [bool(invert[i]) if i < len(invert) else False
+                            for i in range(self.encoders)]
+        else:
+            self._invert = [bool(invert)] * self.encoders
 
         # Snapshot each encoder's raw counter so read() starts at 0.
-        self._offset = [0] * max(self.encoders, 1)
-        for i in range(self.encoders):
-            self._offset[i] = self._raw_read(i)
+        self._offset = [self._raw_read(i) for i in range(self.encoders)]
 
     # -- raw, offset-free per-device reads --
 
     def _raw_read(self, i):
-        if self.type == "web":
+        d, j = self._map[i]
+        t = d["type"]
+        if t == "web":
             return _web_encoder_pos
-        if self.type == "vcv":
-            return tulip.vcv_encoder(i)
-        if self.type in ("adafruit_single", "adafruit_quad"):
-            return read_encoder(i, seesaw_dev=self._addr)
-        if self.type == "m5stack":
+        if t == "vcv":
+            return tulip.vcv_encoder(j)
+        if t in ("adafruit_single", "adafruit_quad"):
+            return read_encoder(j, seesaw_dev=d["addr"])
+        if t == "m5stack":
             try:
                 i2c = get_i2c()
-                i2c.writeto(self._addr, bytes([4 * i]))  # counter reg = 4*i, <i (LE)
-                return struct.unpack("<i", i2c.readfrom(self._addr, 4))[0]
+                i2c.writeto(d["addr"], bytes([4 * j]))  # counter reg = 4*j, <i (LE)
+                return struct.unpack("<i", i2c.readfrom(d["addr"], 4))[0]
             except OSError:
                 return 0
         return 0
@@ -1345,68 +1359,114 @@ class Encoder:
         """Cumulative position of encoder i (0-based), starting at 0."""
         if not (0 <= i < self.encoders):
             return 0
-        return self._raw_read(i) - self._offset[i]
+        pos = self._raw_read(i) - self._offset[i]
+        return -pos if self._invert[i] else pos
+
+    def invert(self, invert=True, i=None):
+        """Make encoder i count the other way (omit i to set every encoder).
+
+        invert(True) flips a clockwise turn to decrement; invert(False) restores
+        the hardware's native direction. Sets the state, doesn't toggle it."""
+        if i is None:
+            self._invert = [bool(invert)] * self.encoders
+        elif 0 <= i < self.encoders:
+            self._invert[i] = bool(invert)
 
     def button(self, i=0):
         """True while encoder i's push button is held down."""
         if not (0 <= i < self.encoders):
             return False
-        if self.type == "web":
+        d, j = self._map[i]
+        t = d["type"]
+        if t == "web":
             return _web_encoder_button
-        if self.type == "vcv":
-            return tulip.vcv_encoder_button(i)
-        if self.type in ("adafruit_single", "adafruit_quad"):
-            return read_buttons(pins=(self._button_pins[i],), seesaw_dev=self._addr)[0]
-        if self.type == "m5stack":
+        if t == "vcv":
+            return tulip.vcv_encoder_button(j)
+        if t in ("adafruit_single", "adafruit_quad"):
+            return read_buttons(pins=(d["button_pins"][j],), seesaw_dev=d["addr"])[0]
+        if t == "m5stack":
             try:
                 i2c = get_i2c()
-                i2c.writeto(self._addr, bytes([0x50 + i]))  # button reg, active-low
-                return i2c.readfrom(self._addr, 1)[0] == 0  # 0 == pressed
+                i2c.writeto(d["addr"], bytes([0x50 + j]))  # button reg, active-low
+                return i2c.readfrom(d["addr"], 1)[0] == 0  # 0 == pressed
             except OSError:
                 return False
         return False
 
+    def poll_button_events(self):
+        """Stateful layer that returns a list of button events (button, PRESS/HOLD)."""
+        for i in range(self.encoders):
+            button_down = self.button(i)
+            if button_down:
+                if self.button_held_steps[i] < _BUTTON_HOLD_STEPS:
+                    self.button_held_steps[i] += 1
+                    if self.button_held_steps[i] == _BUTTON_HOLD_STEPS:
+                        self.button_events_queue.append((i, HELD))
+            else:
+                # Button is up
+                if self.button_held_steps[i] > 0:
+                    # Button was down
+                    if self.button_held_steps[i] < _BUTTON_HOLD_STEPS:
+                        self.button_events_queue.append((i, PRESS))
+                    self.button_held_steps[i] = 0
+
+    def button_event(self, encoder=None):
+        """Pull one event from button event stack, either for encoder, or for all."""
+        result = None
+        for i, event in enumerate(self.button_events_queue):
+            if encoder is None or event[0] == encoder:
+                result = event
+                del self.button_events_queue[i]
+                break
+        return result
+
     def led(self, i, r, g, b):
-        """Set encoder i's LED to (r, g, b), each 0..255. Applied immediately."""
+        """Set LED i to (r, g, b), each 0..255. Applied immediately."""
         if not (0 <= i < self.leds):
             return
-        if self.type in ("adafruit_single", "adafruit_quad"):
-            set_neopixel(i, r, g, b, seesaw_dev=self._addr)
-            show_neopixels(seesaw_dev=self._addr)
-        elif self.type == "m5stack":
+        d, j = self._led_map[i]
+        t = d["type"]
+        if t in ("adafruit_single", "adafruit_quad"):
+            set_neopixel(j, r, g, b, seesaw_dev=d["addr"])
+            show_neopixels(seesaw_dev=d["addr"])
+        elif t == "m5stack":
             try:
-                get_i2c().writeto_mem(self._addr, 0x70 + 3 * i, bytes([r, g, b]))  # RGB
+                get_i2c().writeto_mem(d["addr"], 0x70 + 3 * j, bytes([r, g, b]))  # RGB
             except OSError:
                 pass
 
-    def reset(self, i=None):
-        """Zero encoder i back to 0 (omit i to zero every encoder)."""
+    def reset(self, i=None, value=0):
+        """Zero encoder i back to value (or 0) (omit i to zero every encoder)."""
         if i is None:
-            for j in range(self.encoders):
-                self._offset[j] = self._raw_read(j)
+            self._offset = [self._raw_read(i) - value for i in range(self.encoders)]
         elif 0 <= i < self.encoders:
-            self._offset[i] = self._raw_read(i)
+            self._offset[i] = self._raw_read(i) - value
 
     def switch(self):
         """M5Stack 8Encoder toggle-switch state (always False on other devices)."""
-        if self.type == "m5stack":
-            try:
-                i2c = get_i2c()
-                i2c.writeto(self._addr, bytes([0x60]))  # switch reg
-                return i2c.readfrom(self._addr, 1)[0] != 0
-            except OSError:
-                return False
+        for d in self._devs:
+            if d["type"] == "m5stack":
+                try:
+                    i2c = get_i2c()
+                    i2c.writeto(d["addr"], bytes([0x60]))  # switch reg
+                    return i2c.readfrom(d["addr"], 1)[0] != 0
+                except OSError:
+                    return False
         return False
 
 
-def encoder(type=None):
-    """Autodetect the connected rotary-encoder accessory and return an Encoder.
+def encoder(type=None, addr=None, invert=False):
+    """Autodetect the connected rotary-encoder accessories and return an Encoder.
 
-    Detects the Adafruit single (0x36) or quad (0x49) seesaw breakouts and the
-    M5Stack 8Encoder unit (0x41), or the web simulator's emulated encoder. Pass
-    type= ("adafruit_single", "adafruit_quad", "m5stack") to force a device.
+    Finds EVERY attached device — the Adafruit single (0x36-0x3D) and quad
+    (0x49-0x50) seesaw breakouts (multiple boards via their address jumpers) and
+    the M5Stack 8Encoder unit (0x41) — or the web simulator's emulated encoder,
+    and presents them as one Encoder with a flat index space. Pass type=
+    ("adafruit_single", "adafruit_quad", "m5stack") and/or addr= to bind one
+    specific device instead. invert=True flips the counting direction for
+    hardware that increments counterclockwise (per-encoder: enc.invert(True, i)).
     See the Encoder class for the unified read()/button()/led()/reset() API."""
-    return Encoder(type=type)
+    return Encoder(type=type, addr=addr, invert=invert)
 
 
 def monitor_encoders():

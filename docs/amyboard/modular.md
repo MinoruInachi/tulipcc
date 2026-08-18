@@ -26,7 +26,12 @@ Most modular synthesis units operate at 10Vpp, where an audio signal swings betw
 
 ## CV outputs
 
-AMYboard has **two CV outputs** on 3.5mm jacks, powered by a GP8413 12-bit DAC (I2C address `0x58`). The outputs range from approximately **-10V to +10V**, suitable for controlling Eurorack pitch, filter cutoff, or any CV-controlled parameter.
+AMYboard has **two CV outputs** on 3.5mm jacks, powered by a GP8413 15-bit DAC (I2C address `0x58`). The outputs range from approximately **-10V to +10V**, suitable for controlling Eurorack pitch, filter cutoff, or any CV-controlled parameter.
+
+> **v1.5 boards:** the newest production revision uses a DAC chip batch that powers
+> up half-scale. Firmware from August 2026 onward corrects this automatically at
+> every boot; on older firmware CV out spans only -10V..0V (`cv_out(0)` reads about
+> -5V). See [Troubleshooting](troubleshooting.md#cv-out-voltages-are-wrong-v15-boards).
 
 ```python
 import amyboard
@@ -68,7 +73,7 @@ amyboard.set_cv_out(channel=0, synth=0)  # clear the CV mapping
 
 ## CV inputs
 
-AMYboard has **two CV inputs** on 3.5mm jacks, powered by an ADS1015 12-bit ADC (I2C address `0x48`). They accept **-10V to +10V**.
+AMYboard has **two CV inputs** on 3.5mm jacks, powered by an ADS1015 12-bit ADC (I2C address `0x48`). The jacks are safe with **-10V to +10V**, but the ADC can only resolve **-10V to about +6.3V** — voltages above +6.3V read as +6.3V.
 
 ```python
 import amyboard

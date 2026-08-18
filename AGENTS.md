@@ -70,17 +70,30 @@ If an agent makes changes to `amy`, the agent must follow this exact sequence:
 6. Commit the submodule pointer update in `tulipcc`.
 7. Merge/push `tulipcc` to `main`.
 
-### Refresh the generator's vendored AMY docs when the pin changes
+### Refresh the committed amy-derived files when the pin changes
 
-The AMYboard sketch generator (`tulip/server/amyboardworld_db_api.py`) reads a
-**committed snapshot** of `amy/docs/*.md` from `tulip/server/refdocs/amy/`, because
-the `amy` submodule is not checked out in the Railway deploy. Whenever you bump the
-`amy` pin (either flow above), refresh that snapshot so the generator's docs match the
-pinned commit:
+Two **committed snapshots** are derived from amy and must be refreshed whenever you
+bump the `amy` pin (either flow above):
 
-1. `python3 tulip/server/sync_amy_docs.py` (sources from the pinned commit — the local
-   submodule if checked out, else GitHub raw at the pinned SHA).
-2. Commit the updated `tulip/server/refdocs/amy/`.
+1. `tulip/server/refdocs/amy/` — the `amy/docs/*.md` snapshot the AMYboard sketch
+   generator (`tulip/server/amyboardworld_db_api.py`) reads, because the `amy`
+   submodule is not checked out in the Railway deploy. Refresh with
+   `python3 tulip/server/sync_amy_docs.py`.
+2. `tulip/shared/amy_kwmap.h` — the C copy of amy's `_KW_MAP_LIST` keyword map that
+   `tulip.amy_message()` (the C fast path installed over `amy.message`) walks,
+   committed so none of the build systems needs its own codegen step. Refresh
+   with `python3 tulip/shared/gen_amy_kwmap.py`.
+
+Both scripts source from the pinned commit — the local submodule if checked out at
+the pin, else GitHub raw at the pinned SHA. Commit the refreshed outputs alongside
+the pin bump.
+
+CI enforces this: `.github/workflows/amy-pin-check.yml` runs both scripts with
+`--check` on any PR that moves the `amy` gitlink and fails if either snapshot is
+stale. These are the only committed-in-tulipcc files derived from amy — the
+amyboardweb `static/*.generated.js` files are gitignored build products copied from
+the amy submodule's committed `src/*.generated.js` (regenerate those in amy with
+`make c-api`; amy CI keeps them fresh).
 
 ## Testing `tulipcc`
 
@@ -92,6 +105,27 @@ The easiest ways to test `tulipcc` are:
 **Web builds require submodules first.** `webdev.py` (and the per-app `tulip/web/build.sh` and `tulip/amyboardweb/dev.py` it wraps) compile the `amy` and `micropython` submodules to WASM, so the submodules must be bootstrapped before building — run `tulip/shared/grab_submodules.sh` (see Submodule Setup). If `amy/` is empty, the `make web` step fails with `make: *** No rule to make target 'web'`.
 
 `webdev.py` builds AMY once, builds each app's `stage/`, serves each at its own document root (so absolute `/img`, `/editor/`, `/run/` paths match production), and rebuilds an app when its `static/`, `site/` or the shared `assets/` change. To work on a single app instead: `python3 dev.py` in `tulip/amyboardweb` (AMYboard Web, live file-watching — see its `CLAUDE.md`), or `./build.sh` in `tulip/web` to build Tulip Web's `stage/` (what CI runs).
+
+### Python reaches the device by two different routes
+
+Only one of them is a firmware flash, and mixing them up looks exactly like a
+runtime bug:
+
+- `tulip/shared/py/*.py` (`synth.py`, `arpegg.py`, `sequencer.py`, `midi.py`, …)
+  are **frozen into the firmware**, so a normal build + flash picks them up.
+- `tulip/fs/**` (the bundled examples in `tulip/fs/tulip/ex/`, etc.) live on the
+  **device filesystem** and are **not** part of a firmware flash. They need a
+  separate step, run from `tulip/`:
+
+  ```
+  python fs_create.py tulip flash
+  ```
+
+Forget the second one and an edited example silently keeps running its *old*
+copy on device while your firmware-side edits appear to work — which reads as a
+mysterious behavioral bug in code you just changed. When on-device behavior
+contradicts the source in front of you, check which of these two routes the file
+takes before debugging the code.
 
 ## ESP-IDF Build Commands (Required)
 

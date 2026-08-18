@@ -105,7 +105,12 @@ uint16_t *sprite_h_px;//[SPRITES];
 uint8_t *sprite_vis;//[SPRITES];
 uint32_t *sprite_mem;//[SPRITES];
 
+// LVGL renders into this small band buffer (PARTIAL mode); lv_flush_cb_8b blits
+// each finished band into bg. LVGL can't render directly into bg: on hardware the
+// RGB panel scans bg out continuously, so mid-render widget states would be
+// visible as flicker.
 uint8_t * lv_buf;
+#define LV_BUF_BYTES (((H_RES+OFFSCREEN_X_PX)*(V_RES+OFFSCREEN_Y_PX)*BYTES_PER_PIXEL)/10)
 
 #ifdef TAB5
 // LVGL's own plane, laid over the BG at composite time instead of drawn into it.
@@ -1319,6 +1324,15 @@ void lv_flush_cb_8b(lv_display_t * display, const lv_area_t * area, unsigned cha
             lv_overlay_x1[y] = x1;
         }
     }
+#else
+    // In PARTIAL mode px_map holds just this band, rows packed at the band's width
+    // (LV_DRAW_BUF_STRIDE_ALIGN is 1). Copy it into bg, whose rows the display is
+    // scanning out.
+    uint32_t bg_stride = (H_RES+OFFSCREEN_X_PX)*BYTES_PER_PIXEL;
+    uint32_t w = (area->x2 - area->x1 + 1)*BYTES_PER_PIXEL;
+    for(int32_t y = area->y1; y <= area->y2; y++) {
+        memcpy(bg + y*bg_stride + area->x1*BYTES_PER_PIXEL, px_map + (y - area->y1)*w, w);
+    }
 #endif
     // Report the damage only now that the pixels are actually in place. On TAB5
     // this callback runs on the MicroPython task while the display task is
@@ -1350,11 +1364,18 @@ void lvgl_input_kb_read_cb(lv_indev_t * indev, lv_indev_data_t*data) {
 
 void lvgl_input_read_cb(lv_indev_t * indev, lv_indev_data_t*data) {
     if(touch_held) {
-        if(last_touch_x[0] >= 0 && last_touch_x[0] < H_RES && last_touch_y[0] >= 0 && last_touch_y[0] < V_RES) {
-            data->point.x = last_touch_x[0];
-            data->point.y = last_touch_y[0];
-            data->state = LV_INDEV_STATE_PRESSED;
-        }
+        // Clamp to the screen instead of dropping the point -- touch calibration can
+        // map edge touches slightly out of range, and dropping them makes the
+        // launcher / app switcher buttons at the screen corners miss taps
+        int16_t x = last_touch_x[0];
+        int16_t y = last_touch_y[0];
+        if(x < 0) x = 0;
+        if(x >= H_RES) x = H_RES-1;
+        if(y < 0) y = 0;
+        if(y >= V_RES) y = V_RES-1;
+        data->point.x = x;
+        data->point.y = y;
+        data->state = LV_INDEV_STATE_PRESSED;
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
     }
@@ -1416,7 +1437,7 @@ void setup_lvgl() {
 #else
     lv_display_set_color_format(lv_display, LV_COLOR_FORMAT_RGB332);
     lv_display_set_flush_cb(lv_display, lv_flush_cb_8b);
-    lv_display_set_buffers(lv_display, bg, NULL, (H_RES+OFFSCREEN_X_PX)*(V_RES+OFFSCREEN_Y_PX), LV_DISPLAY_RENDER_MODE_DIRECT);
+    lv_display_set_buffers(lv_display, lv_buf, NULL, LV_BUF_BYTES, LV_DISPLAY_RENDER_MODE_PARTIAL);
 #endif
     
     lv_tick_set_cb(u32_ticks_ms);
@@ -1471,6 +1492,12 @@ void display_init(void) {
     // display_reset_bg() still fills only the plane, so the slack stays the black
     // it was allocated as.
     bg = (uint8_t*)calloc_caps(32, 1, (H_RES+OFFSCREEN_X_PX)*(V_RES+OFFSCREEN_Y_PX)*BYTES_PER_PIXEL + H_RES*BYTES_PER_PIXEL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#ifndef TAB5
+    // LVGL's band render buffer (see lv_flush_cb_8b). TAB5 allocates its own in
+    // lv_start(): it renders RGB565 into a full-size buffer and composites from
+    // there, so the band buffer would only be a second, unused allocation.
+    lv_buf = (uint8_t*)calloc_caps(32, 1, LV_BUF_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
     // 614400 bytes
     bg_tfb = (uint8_t*)calloc_caps(32, 1, (H_RES*V_RES), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 

@@ -69,6 +69,55 @@ Default MIDI handlers:
 void amy_enable_juno_filter_midi_handler(); // assigns the Juno-6 MIDI CC handler
 ```
 
+## Cross-platform C API (table-driven)
+
+These C functions are exposed to every host language from a single function
+table in `scripts/gen_amy_c_api.py`. The generator emits the CPython module
+(`c_amy`), the MicroPython bindings (the `tulip` module on Tulip / AMYboard /
+Tulip Desktop / VCV), the web WASM bridge (`amy_c_api` in JS, wired back into
+MicroPython on the web builds), and the Godot `AmySynth` methods — so
+`amy.<name>(...)` in Python behaves identically on every platform. The
+`tulip.amy_*` names are legacy redirects to the same bindings.
+
+To add a function: edit the table in `scripts/gen_amy_c_api.py`, run
+`make c-api`, and commit the regenerated files (CI runs `make check-c-api`).
+The table below is generated from the same source.
+
+Not everything belongs here. `amy.reset_sysclock()` (and its GDScript and JS
+equivalents) is written natively in each binding as a `send()` of
+`reset=RESET_TIMEBASE`: the reset is an ordinary event, so no C entry point is
+needed.
+
+<!-- BEGIN GENERATED C API DOCS - scripts/gen_amy_c_api.py -->
+| Python (all platforms) | C function | MicroPython alias | Godot (`AmySynth`) | What it does |
+|---|---|---|---|---|
+| `amy.send_wire(message)` | `void amy_add_message(char * message)` | `tulip.amy_send` | — | Send a wire-protocol message to AMY |
+| `amy.send_wire_from_sysex(message)` | `void amy_send_wire_from_sysex(char * message)` | `tulip.amy_send_wire_from_sysex` | — | Send a wire message as if from sysex (file-transfer routing applies) |
+| `amy.ticks_ms()` | `uint32_t amy_sysclock()` | `tulip.amy_ticks_ms` | — | Read the AMY millisecond clock |
+| `amy.render_load()` | `float amy_get_render_load()` | `tulip.amy_render_load` | `render_load` | Smoothed fraction of real time AMY spends rendering (0..1) |
+| `amy.set_render_load_threshold(threshold)` | `void amy_set_render_load_threshold(float threshold)` | `tulip.amy_set_render_load_threshold` | `set_render_load_threshold` | Set the render-load fraction that trips the overload failsafe (0 disables) |
+| `amy.bleep(start=0)` | `void amy_bleep(uint32_t start)` | `tulip.amy_bleep` | `bleep` | Play the startup bleep |
+| `amy.sequencer_ticks()` | `uint32_t sequencer_ticks()` | `tulip.amy_sequencer_ticks` | `sequencer_ticks` | Read the sequencer tick count |
+| `amy.process_single_midi_byte(byte, from_web_or_usb=1)` | `void amy_process_single_midi_byte(uint8_t byte, uint8_t from_web_or_usb)` | `tulip.amy_process_single_midi_byte` | — | Feed one MIDI byte to AMY's stream parser |
+| `amy.set_cv_from_osc(cv_channel, osc)` | `void set_cv_from_osc(int cv_channel, int osc)` | `tulip.amy_set_cv_from_osc` | — | Feed external CV input from a mod osc (testing support) |
+| `amy.get_synth_commands` (low-level; see below) | `void *yield_synth_commands(uint8_t synth, char *s, size_t len, bool include_fx, void *state)` | `tulip.amy_get_synth_commands` | — | Read the wire commands that reconstruct synth state (list of str) |
+| `amy.dump_state()` | `char *amy_dump_state_to_string(int *out_len)` | `tulip.amy_dump_state` | `dump_state` | Read the complete replayable AMY state as a wire-command string |
+| `amy.get_output_buffer()` | `int amy_get_output_buffer(int16_t *samples)` | `tulip.amy_get_output_buffer` | — | Read the most recent rendered audio block as bytes (None if none ready) |
+| `amy.get_input_buffer()` | `int amy_get_input_buffer(int16_t *samples)` | `tulip.amy_get_input_buffer` | — | Read the most recent captured input audio block as bytes (None if none ready) |
+
+Notes:
+
+- `amy.get_synth_commands(synth, ...)` is a hand-written wrapper in
+  `amy/__init__.py` adding `patch_num`/`dest_synth` handling on top of the
+  generated backend (which drives the C generator `yield_synth_commands`);
+  it returns the commands newline-joined into one string.
+- `amy.get_output_buffer()` / `amy.get_input_buffer()` return up to 1024
+  bytes of interleaved int16 samples (`None` when no block is ready).
+- `amy.dump_state()` returns the complete replayable engine state as a
+  newline-separated wire-command string.
+
+<!-- END GENERATED C API DOCS -->
+
 ## JavaScript API
 
 AMY provides a high-level JavaScript API (`amy_send`) that mirrors the Python `amy.send()` interface. It is auto-generated from the same source of truth (`amy/__init__.py` and `amy/constants.py`) so parameter names are always identical to Python. The connector and API are bundled into `amy.js`, so you only need two includes:
@@ -153,6 +202,7 @@ amy_start(amy_config);
 | `audio` | `AMY_AUDIO_IS_NONE`, `AMY_AUDIO_IS_I2S`, `AMY_AUDIO_IS_USB_GADGET`, `AMY_AUDIO_IS_MINIAUDIO`| I2S or miniaudio | Which audio interface(s) are active |
 | `write_samples_fn` | fn ptr | `NULL` | If provided, `amy_update` will call this with each new block of samples | 
 | `max_oscs` | Int | 180 | How many oscillators to support |
+| `max_buses` | Int | 4 | How many FX buses to support. No compile-time ceiling — every bus-indexed table is allocated from this at `amy_start`. Each bus costs a few KB of mix buffers even when idle, plus whatever its effects allocate once switched on |
 | `max_sequencer_tags` | Int | 256 | How many sequencer items to handle |
 | `max_voices` | Int | 64 | How many voices |
 | `max_synths` | Int | 64 | How many synths |
@@ -179,10 +229,11 @@ Hook fields in `amy_config_t`:
 | Hook | Signature | Used by | Description |
 | ---- | --------- | ------- | ----------- |
 | `amy_external_render_hook` | `uint8_t (uint16_t osc, SAMPLE *buf, uint16_t len)` | — | Custom oscillator renderer for redirecting the output waveforms on an osc-by-osc level. Return 1 if handled, in which case that osc does not contribute to the normal output. |
-| `amy_external_bus_postprocess_hook` | `void (uint8_t bus, SAMPLE *buf, uint16_t len)` | — | Custom effect processing, called at the end of each bus' effects chain (after EQ/chorus/echo/reverb), before buses are mixed to the output. `buf` is `AMY_NCHANS` sequential (non-interleaved) channel blocks of `len` `SAMPLE`s (S8.23 in `int32_t`, see above) each; modify it in place. Called every block for each bus from 0 up to the highest bus activated so far — so bus 0 is always processed, but a hook installed for bus 2 only starts firing once something (an osc assignment, a bus FX setting) has touched bus 2. |
+| `amy_external_bus_postprocess_hook` | `void (uint16_t bus, SAMPLE *buf, uint16_t len)` | — | Custom effect processing, called at the end of each bus' effects chain (after EQ/chorus/echo/reverb), before buses are mixed to the output. `buf` is `AMY_NCHANS` sequential (non-interleaved) channel blocks of `len` `SAMPLE`s (S8.23 in `int32_t`, see above) each; modify it in place. Called every block for each bus from 0 up to the highest bus activated so far — so bus 0 is always processed, but a hook installed for bus 2 only starts firing once something (an osc assignment, a bus FX setting) has touched bus 2. |
 | `amy_external_coef_hook` | `float (uint16_t channel)` | — | Provide external coefficient values (e.g. CV input). |
 | `amy_external_block_done_hook` | `void (void)` | — | Called after each audio block is rendered. |
 | `amy_external_midi_input_hook` | `void (uint8_t *bytes, uint16_t len, uint8_t is_sysex)` | — | Called when MIDI bytes are received. |
+| `amy_external_midi_output_hook` | `void (uint8_t *bytes, uint16_t len)` | — | Called with every run of bytes AMY sends over MIDI out (notes, clock, sysex responses), before — and regardless of — any device interface configured in `midi`. Use it to forward AMY's MIDI output to a transport AMY doesn't drive itself, e.g. BLE MIDI. May be called from the render/sequencer task; keep it fast. |
 | `amy_external_sequencer_hook` | `void (uint32_t tick_count)` | — | Called on each sequencer tick. |
 | `amy_external_fopen_hook` | `uint32_t (char *filename, const char *mode)` | `zT`, `zD`, `zF` | Open a file on host disk. Returns opaque handle. |
 | `amy_external_fwrite_hook` | `uint32_t (uint32_t fptr, uint8_t *bytes, uint32_t len)` | `zT` | Write bytes to a file opened via fopen hook. |
@@ -190,7 +241,6 @@ Hook fields in `amy_config_t`:
 | `amy_external_fseek_hook` | `void (uint32_t fptr, uint32_t pos)` | `zD` | Seek to position in a file opened via fopen hook. |
 | `amy_external_fclose_hook` | `void (uint32_t fptr)` | `zT`, `zD`, `zF` | Close a file opened via fopen hook. |
 | `amy_external_file_transfer_done_hook` | `void (const char *filename)` | `zT` | Called after a `zT` file transfer completes. On AMYboard, restarts sketch.py. |
-| `amy_external_update_file_hook` | `void (const char *filename)` | `zA` | Called by `zA` to update a file with current AMY state. On AMYboard, splices live knob state into sketch.py. |
 | `amy_external_exec_hook` | `void (const char *code)` | `zP` | Called by `zP` to execute a string on the host. On AMYboard, runs the string as Python via `exec()`. |
 | `amy_external_reboot_hook` | `void (uint8_t mode)` | `zB` | Called by `zB` to reboot the host. `mode` selects which post-reboot state: `0` = bootloader (skip sketch on next boot), `1` = normal reboot (run sketch), `2` = ROM download / flash mode. Handled in pure C before `mp_sched_schedule`. On AMYboard, sets an RTC flag with the requested mode and calls `esp_restart()`. |
 
@@ -234,14 +284,14 @@ Please see [AMY synthesizer details](synth.md) for more explanation on the synth
 A note on list parameters:  When an argument is a list of parameters, you can in general set any subset of those parameters by omitting the values you don't want to change - either by leaving them in their initial `AMY_UNSET` value in C, or by having missing values in Python lists.  For instance, you can set up an envelope that moves immediately to 1, then decase to a sutain level of 0.5 over 200ms, then has a 300ms decay to zero on note-off, with `bp0='0,1,200,0.5,300,0'.  Subsequently, you could change just the sustain level (the 4th value in the list) to 0.2 with `bp0=,,,0.2`.  However, there's at present no way to say ".. and the list should now only be 4 items long.  This only affects breakpoint sets which are variable length, but the net result is that once you have a certain number of breakpoints in a list, you cannot shorten it except by resetting the whole osc and building it all up again.
 
 
-### `synth`s and `voice`s:
+### `synth`s:
 
 | Wire code   | C `amy_event` | Python / JS   | Type-range  | Notes                                 |
 | ------ | -------- | ---------- | ----------  | ------------------------------------- |
 | `i`    | `synth` | `synth`  | 0-31  | Define a set of voices for voice management. |
 | `ic`   | **TODO** | `midi_cc`  | C,L,N,X,O,CMD | MIDI Control Code command for this synth (1-16).  `C`=MIDI CC (0-127), `L`=log mapping (0/1), `N`=min val, `X`=max val, `O`=offset, `CMD`=wire command to execute, where `%i` is replaced by the channel number and `%v` is replaced by the value after min/max/offset/log mapping.  Providing `C` with no further args deletes that CC.  `C=255` deletes all CC mappings for the specified synth. See [#524](https://github.com/shorepine/amy/issues/524) |
 | `id`   | `synth_delay_ms` | `synth_delay` | uint | Delay (in ms) applied to synth note-ons.  Gives time for decay of 'stolen' notes. |
-| `if`   | `synth_flags` | `synth_flags` | uint | Flags for synth creation: 1 = Use MIDI drum note->preset translation; 2 = Drop note-off events. |
+| `if`   | `synth_flags` | `synth_flags` | uint | Flags for synth creation: 1 = Use MIDI drum note->preset translation; 2 = Drop note-off events; 4 = Invert MIDI pedal sense. |
 | `ig`   | `cv_trigger` | `cv_trigger` | uint,uint | Configure external CV event triggering: Gate CV, trigger threshold, reset threshold, pitch CV, pitch scale, pitch offset, wire command template, %v gets pitch value. |
 | `im`   | `grab_midi_notes` | `grab_midi_notes` | 0/1 | Use `amy.send(synth=CHANNEL, grab_midi_notes=0)` to prevent the default direct forwarding of MIDI note-on/offs to synth CHANNEL. |
 | `iM`   | `note_source_channel` | `note_source_channel` | 1-16 | Used internally to mark events that result from MIDI inputs, meaning they won't get forwarded to MIDI out. |
@@ -249,11 +299,10 @@ A note on list parameters:  When an argument is a list of parameters, you can in
 | `io`   | **TODO** | `midi_note_cmd`  | M,L,N,X,O,CMD | MIDI Note on/off command for this synth.  M=MIDI note number, or -1 for all notes.  Other args map the velocity, as for `ic`. `%n` is substituted with the note number. |
 | `ip`   | `pedal` | `pedal` | int | Non-zero means pedal is down (i.e., sustain).  Must be used with `synth`. |
 | `it`   | `to_synth` |  `to_synth` | 0-31 | New synth number, when changing the number (MIDI channel for n=1..16) of an entire synth. |
-| `iv`   | `num_voices` | `num_voices` | int | The number of voices to allocate when defining a synth, alternative to directly specifying voice numbers with `voices=`.  Only valid with `synth=X, patch[_number]=Y`. |
+| `iv`   | `num_voices` | `num_voices` | int | The number of voices to allocate when defining a synth.  Only valid with `synth=X`. |
 | `iV`   | `synth_level` | `synth_level` | float >= 0 | Per-instrument level, default 1.0.  Scales the audio of every osc in the synth at render time (applied at the output stage, just before the pan/bus mix), independent of any osc `amp` settings.  The natural target for a channel volume control (e.g. MIDI CC 7) — works for every synth type, including drum kits whose per-drum oscs carry their own amps. |
 | `iy`   | `bus`   | `bus`   | int | Bus onto which the synth outputs are added (synonym for `y`). |
 | `K`    | `patch_number` | `patch` | uint 0-X | Apply a saved or user patch to a specified synth or voice. Built-ins: 0-127 Juno, 128-255 DX7, 256 piano, 258 legacy GM drums, 384-390 Gamma9001 GM drum kits (see Drum kits below), 1024+ user patches. |
-| `r`    | `voices[]` | `voices` | int[,int] | Comma separated list of voices to send message to, or load patch into. |
 | `u`    | **TODO**| `patch_string` | string | Provide AMY message to define up to 32 patches in RAM with ID numbers (1024-1055) provided via `patch_number`, or directly configure a `synth`. |
 
 
@@ -263,14 +312,15 @@ A note on list parameters:  When an argument is a list of parameters, you can in
 | ------ | -------- | ---------- | ----------  | ------------------------------------- |
 | `v`    | `osc` | `osc` | uint 0 to OSCS-1 | Which oscillator to control |
 | `w`    | `wave` | `wave` | uint 0-21 | Waveform: [0=SINE, PULSE, SAW_DOWN, SAW_UP, TRIANGLE, NOISE, KS, PCM, ALGO, PARTIAL, BYO_PARTIALS, INTERP_PARTIALS, AUDIO_IN0, AUDIO_IN1, AUDIO_EXT0, AUDIO_EXT1, AMY_MIDI, PCM_LEFT, PCM_RIGHT, WAVETABLE, CUSTOM, OFF]. default: 0/SINE |
-| `S`    | `reset_osc`| `reset`  | uint | Resets given oscillator. set to RESET_ALL_OSCS to reset all oscillators, gain and EQ. RESET_TIMEBASE resets the clock (immediately, ignoring `time`). RESET_AMY restarts AMY. RESET_SEQUENCER clears the sequencer.|
+| `ww`   | `mode` | `mode` | uint | Wave-specific modes.  For PCM, we have `PCM_PLAY` (plays through to end), `PCM_PLAY_STOP` (stops immediately on note-off, default), `PCM_LOOP` (observes loop marks in wave, plays through release on note-off), `PCM_LOOP_STOP` (plays loop, stops immediately on note-off), `PCM_LOOP_FOREVER` (loops, and ignores note-offs, expected to be used with an EG). |
+| `S`    | `reset_osc`| `reset`  | uint | Resets given oscillator. set to RESET_ALL_OSCS to reset all oscillators, gain and EQ. RESET_TIMEBASE resets the clock and sequencer tick count to zero. It is an ordinary event, so it works from `amy_add_event()` as well as the wire, and can be scheduled with `ticks=` (or `amy_event.time` from the C API) like any other event; the counters restart at the next audio block boundary, so the reset cannot race the render thread, and events already queued for a future time keep their relative timing across it. (RESET_AMY and RESET_EVENTS are the exceptions: they act the moment the message is parsed, since neither restarting AMY nor emptying the event queue can be carried in a queued event.) RESET_SYNTHS is a deprecated alias for RESET_ALL_OSCS; prefer RESET_ALL_OSCS. RESET_AMY restarts AMY. RESET_SEQUENCER clears the sequencer.|
 | `A`    | `eg0_times[]`, `eg0_values[]` | `bp0`    | string (wire) / arrays (`amy_event`)      | Envelope Generator 0 breakpoints as time(ms),value pairs. Wire/Python format remains comma-separated, e.g. `100,0.5,50,0.25,200,0`. In C `amy_event`, use typed arrays (`eg0_times[i]`, `eg0_values[i]`). The last pair is release (triggers on note off). |
 | `B`    | `eg1_times[]`, `eg1_values[]` | `bp1`    | string (wire) / arrays (`amy_event`)      | Envelope Generator 1 breakpoints. Wire/Python format remains comma-separated; in C `amy_event`, use typed arrays (`eg1_times[i]`, `eg1_values[i]`). |
 | `b`    | `feedback` | `feedback` | float 0-1 | Use for the ALGO synthesis type in FM or for karplus-strong, or to indicate PCM looping (0 off, >0, on) |
 | `c`    | `chained_osc` | `chained_osc` |  uint 0 to OSCS-1 | Chained oscillator.  Note/velocity events to this oscillator will propagate to chained oscillators.  VCF is run only for first osc in chain, but applies to all oscs in chain. |
-| `G`    | `filter_type` | `filter_type` | 0-4 | Filter type: 0 = none (default.) 1 = lowpass, 2 = bandpass, 3 = highpass, 4 = double-order lowpass. |
+| `G`    | `filter_type` | `filter_type` | 0-6 | Filter type: 0 = none (default.) 1 = lowpass, 2 = bandpass, 3 = highpass, 4 = double-order lowpass, 5 = notch, 6 = phaser. |
 | `I`    | `ratio` | `ratio`  | float | For ALGO types, ratio of modulator frequency to  base note frequency  |
-| `L`    | `mod_source` | `mod_source` | 0 to OSCS-1 | Which oscillator is used as an modulation/LFO source for this oscillator. Source oscillator will be silent. |
+| `L`    | `mod_source` | `mod_source` | 0 to OSCS-1, up to two, comma-separated | Which oscillator(s) are used as modulation/LFO sources for this oscillator. Source oscillators will be silent. The first feeds the `mod0` control coefficient and the second `mod1`, so `mod_source=[3, 4]` makes osc 3 the `mod0` input and osc 4 the `mod1` input. |
 | `m`    | `portamento`| `portamento` | uint | Time constant (in ms) for pitch changes when note is changed without intervening note-off.  default 0 (immediate), 100 is good. |
 | `n`    | `midi_note` | `note` | float, but typ. uint 0-127 | Midi note, sets frequency.  Fractional Midi notes are allowed. |
 | `o`    | `algorithm` | `algorithm` | uint 1-32 | DX7 FM algorithm to use for ALGO type |
@@ -319,9 +369,9 @@ These per-oscillator parameters use [CtrlCoefs](synth.md) notation
 
 ### Drum kits (GAMMA9001 builds)
 
-Devices built with `-DGAMMA9001` (Tulip, AMYboard, AMY on the web) carry the Gamma9001 drum sample banks: the full TR-808 bank is baked in as PCM presets 0-18, and 136 more samples (TR-909, Linn 9000, Univox MR-12, Tokyo Synthetics, 80s Power Kit, Percussion) live at presets 256-391, served from a platform-provided blob (linked into the wasm on web; an mmapped `drums` flash partition on ESP32-S3). All of them play directly with `wave=PCM, preset=P`.
+Devices built with `-DGAMMA9001` (Tulip, AMYboard, AMY on the web, the CPython `amy` module) carry the Gamma9001 drum sample banks: the full TR-808 bank is baked in as PCM presets 0-18, and 136 more samples (TR-909, Linn 9000, Univox MR-12, Tokyo Synthetics, 80s Power Kit, Percussion) live at presets 256-391, served from a platform-provided blob (linked into the binary on web and CPython; an mmapped `drums` flash partition on ESP32-S3). All of them play directly with `wave=PCM, preset=P`.
 
-Patches **384-390** are ready-made General MIDI drum kits over these banks -- load one on a synth with `synth_flags=3` and GM note numbers trigger the mapped samples:
+Patches **384-390** are ready-made General MIDI drum kits over these banks -- load one on a synth to make GM note numbers trigger the mapped samples:
 
 | patch | MIDI PC (bank MSB 3) | kit |
 |-------|----------------------|-----|
@@ -339,9 +389,9 @@ Switch kits with `amy.send(synth=10, patch=38x)`, or over MIDI with bank select 
 
 Each of the `y` buses has separate effects units.  You set their parameters with commands such as `amy.send(bus=0, reverb=1)` (or `y0h1`).
 
-The final mixdown of the buses onto the AMY output is controlled by one value per bus passed to the `volume` (`V`) command.
+The final mixdown of the buses onto the AMY output is controlled per bus by the `volume` (`V`) command: `bus=N, volume=X` (`yNVX` on the wire) sets bus N's volume, and with no `bus` it sets bus 0.
 
-Default AMY has 4 buses, 0..3.  If the bus (`y`) is not specified for one of these commands, it defaults to 0.
+Default AMY has 4 buses, 0..3.  Set `max_buses` in `amy_config_t` before `amy_start` to run as many as you have RAM for — there is no compile-time limit.  A bus number outside the configured range is rejected with a warning and treated as bus 0.  If the bus (`y`) is not specified for one of these commands, it defaults to 0.
 
 | Wire code   | C `amy_event` | Python / JS   | Type-range  | Notes                                 |
 | ------ | -------- | ---------- | ----------  | ------------------------------------- |
@@ -354,19 +404,17 @@ Default AMY has 4 buses, 0..3.  If the bus (`y`) is not specified for one of the
 
 | Wire code   | C `amy_event` | Python / JS   | Type-range  | Notes                                 |
 | ------ | -------- | ---------- | ----------  | ------------------------------------- |
-| `H`    | `sequence[3]` | `sequence` | int,int,int | Tick offset, period, tag for sequencing | 
+| `H`    | `ticks[3]` | `ticks` | int[,int[,tag]] | Tick, period, tag for sequencing (see "AMY's sequencer" in synth.md). `tag` omitted: stored but not individually cancelable. `period` also omitted: a one-off event at that tick. **If used in a wire string message**, the `H` **must** be the first character of the message. |
 | `j`    | `tempo` | `tempo`  | float | The tempo (BPM, quarter notes) of the sequencer. Defaults to 108.0. |
 | `zY`   | **TODO** | `sequencer_run` | 0/1 | Sequencer transport: `zY1` starts the sequencer, `zY0` stops it.  Lets a host drive playback without MIDI clock sync (see `external_midi_sync`). |
 | `zC`   | **TODO** | `external_midi_sync` | 0/1/2 | MIDI clock sync: 1 = the sequencer follows incoming MIDI realtime clock/start/stop (0xF8/0xFA/0xFC); 2 = AMY is the clock master, sending those messages (0xF8 at 24 PPQ from the internal tempo, 0xFA/0xFC on transport start/stop); 0 (default) = internal clock, neither follows nor sends. |
 | `N`    | `latency_ms`| `latency_ms` | uint | Sets latency in ms. default 0 (see LATENCY) |
 | `s`    | `pitch_bend` | `pitch_bend` | float | Sets the global pitch bend, by default modifying all note frequencies by (fractional) octaves up or down |
-| `t`    | `time` | `time` | uint | Request playback time relative to some fixed start point on your host, in ms. Allows precise future scheduling. |
-| `V`    | `volume`| `volume` | float, float, ...  | Volume knob for each bus in the final mixdown, default 1.0 |
+| `V`    | `volume`| `volume` | float  | Volume knob for the addressed bus (`bus`/`y`, default 0) in the final mixdown, default 1.0 |
 | `g`    | `client` | `client` | uint | Client number for Alles distributed synthesis. |
 | `W`    | `external_channel` | `external_channel` | uint | External channel routing (used by Tulip for CV output). |
 | `D`    | **TODO** | `debug`  |  uint, 2-4  | 2 shows queue sample, 3 shows oscillator data, 4 shows modified oscillator. Will interrupt audio! |
 | `zT`   | **TODO**| `transfer_file` | string,uint | Transfer a file to the host. Params: destination filename, file size. See `hooks` for writing files on host disk. |
-| `zA`   | **TODO**| `update_file` | string (optional) | Update a file on disk with current AMY state via `update_file_hook`. Default path: `/user/current/sketch.py`. On AMYboard, splices `_auto_generated_knobs` section with live state. The filename is "rest of message": a trailing `Z` end-of-message marker is stripped, so interior capital-`Z` characters (e.g. `/user/ZFILE.py`) are preserved. Filenames whose last character is `Z` are not addressable. |
 | `zD`   | **TODO**| `dump_sysex` | string (optional) | Dump data over MIDI sysex (base64-encoded, wrapped with SPSS manufacturer ID `00 03 45`). With no params (`zDZ`): dumps all active instrument state. With a filename (`zD/user/current/sketch.pyZ`): reads file and sends it. The filename is "rest of message": a trailing `Z` end-of-message marker is stripped, so interior capital-`Z` characters (e.g. `/user/ZFILE.py`) are preserved. Filenames whose last character is `Z` are not addressable. |
 | `zP`   | **TODO**| `exec` | string | Execute code on the host via `amy_external_exec_hook`. On AMYboard, runs the string as Python (e.g. `zPimport amyboard; amyboard.restart_sketch()`). Max 255 chars. The code string is "rest of message": a trailing `Z` end-of-message marker is stripped, so interior capital-`Z` characters in the code are preserved. Code whose last character is `Z` is not expressible. |
 | `zI`   | **TODO**| `ping` | (none) | Ping the host. Replies with a short sysex frame `F0 00 03 45 'O' 'K' F7` so the caller can confirm the board is alive and sysex is flowing. Handled entirely in pure C (no scheduler needed). |

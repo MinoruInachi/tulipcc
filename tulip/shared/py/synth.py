@@ -8,43 +8,12 @@ from patches import drumkit
 from tulip_queue import Queue
 import midi
 
-# One-shot sequencer tags. AMY fires a sequence entry with period 0 exactly once
-# at its absolute tick and then frees it, so these only have to stay unique long
-# enough for the pending events to fire. They count down from the top of the tag
-# space so they cannot collide with sequencer.py, which allocates upwards from 0.
-_ONESHOT_TAG_TOP = 255
-_oneshot_tag = _ONESHOT_TAG_TOP
-
-
-def _next_oneshot_tag():
-    global _oneshot_tag
-    tag = _oneshot_tag
-    _oneshot_tag -= 1
-    if _oneshot_tag < 128:
-        _oneshot_tag = _ONESHOT_TAG_TOP
-    return tag
-
-
-def _sequence_for(sequence, ticks):
-    """Let callers say ticks=N to mean 'fire once at absolute sequencer tick N'.
-
-    AMY expresses that as sequence=(tick, period, tag) with period 0; see
-    sequencer.c. amy.sequencer_ticks() returns the current tick to offset from.
-    """
-    if ticks is None or sequence is not None:
-        return sequence
-    # Emit the wire string directly. amy.parse_list_or_comma_string() only
-    # expands a `list`; a tuple would fall through to str() and be sent as
-    # "(1234, 0, 255)".
-    return "%d,%d,%d" % (int(ticks), 0, _next_oneshot_tag())
-
-
 class PatchSynth:
     """Manage a polyphonic synthesizer by rotating among a fixed pool of voices.
 
     Provides methods:
-      synth.note_on(midi_note, velocity, time=None, sequence=None, ticks=None)
-      synth.note_off(midi_note, time=None, sequence=None, ticks=None)
+      synth.note_on(midi_note, velocity, ticks=None)
+      synth.note_off(midi_note, ticks=None)
       synth.all_notes_off()
       synth.program_change(patch) changes preset for all voices.
       synth.control_change(control, value) modifies a parameter for all voices.
@@ -122,23 +91,21 @@ class PatchSynth:
     def amy_send(self, **kwargs):
         amy.send(synth=self.synth, **kwargs)
 
-    def note_off(self, note, time=None, sequence=None, ticks=None):
-        self.amy_send(note=note, vel=0, time=time,
-                      sequence=_sequence_for(sequence, ticks))
-        
+    def note_off(self, note, ticks=None):
+        self.amy_send(note=note, vel=0, ticks=ticks)
+
     def all_notes_off(self):
         self.note_off(note=0)  # Note=0 means all notes off.
 
-    def note_on(self, note, velocity=1, time=None, sequence=None, ticks=None, **kwargs):
+    def note_on(self, note, velocity=1, ticks=None, **kwargs):
         self.deferred_init()
         if self.synth is None:
             # Note on after synth.release()?
             raise ValueError('PatchSynth note on with no AMY synth - synth has been released?')
-        sequence = _sequence_for(sequence, ticks)
         if velocity == 0:
-            self.note_off(note, time=time, sequence=sequence)
+            self.note_off(note, ticks=ticks)
         else:  # Velocity > 0, note on.
-            self.amy_send(note=note, vel=velocity, time=time, sequence=sequence, **kwargs)
+            self.amy_send(note=note, vel=velocity, ticks=ticks, **kwargs)
 
     def sustain(self, state):
         """Turn sustain on/off."""

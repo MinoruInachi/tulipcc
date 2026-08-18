@@ -439,7 +439,7 @@ tulip.defer(hello, 123, 1500) # will be called 1500ms later
 
 ## Music / sound
 
-Tulip comes with the AMY synthesizer, a very full featured 120-oscillator synth that supports FM, PCM, subtractive and additive synthesis, partial synthesis, filters, and much more. See the [AMY documentation](https://github.com/shorepine/amy/blob/main/README.md) for more information, Tulip's version of AMY comes with stereo sound, chorus and reverb. It includes a "small" version of the PCM patch set (29 patches) alongside all the Juno-6 and DX7 patches. It also has support for loading WAVE files in Tulip as samples. 
+Tulip comes with the AMY synthesizer, a very full featured 250-oscillator synth that supports FM, PCM, subtractive and additive synthesis, partial synthesis, filters, and much more. See the [AMY documentation](https://github.com/shorepine/amy/blob/main/README.md) for more information, Tulip's version of AMY comes with stereo sound, chorus and reverb. It includes a "small" version of the PCM patch set (29 patches) alongside all the Juno-6 and DX7 patches. It also has support for loading WAVE files in Tulip as samples. 
 
 Once connected to Wi-Fi, Tulip can also control an [Alles mesh.](https://github.com/shorepine/alles/blob/main/README.md) Alles is a wrapper around AMY that lets you control the synthesizer over Wi-Fi to remote speakers, or other computers or Tulips. Connect any number of Alles speakers to the wifi to have instant surround sound! See the Alles [getting started tutorial](https://github.com/shorepine/alles/blob/main/getting-started.md) for more information and for more music examples.
 
@@ -473,14 +473,14 @@ synth1.note_off(50)
 The `OscSynth` synth lets yo directly control parameters of an AMY oscillator as a managed synth:
 
 ```python
-syn = synth.OscSynth(wave=amy.PCM, patch=10) # PCM wave type, patch=10 (808 Cowbell)
+syn = synth.OscSynth(wave=amy.PCM, preset=10) # PCM wave type, preset=10 (808 Cowbell)
 ```
 
 You can use `OscSynth` and `amy.load_sample` to load samples from WAV files on Tulip storage:
 
 ```python
-amy.load_sample('sample.wav', patch=50)
-s = synth.OscSynth(wave=amy.PCM, patch=50)
+amy.load_sample('sample.wav', preset=50)
+s = synth.OscSynth(wave=amy.PCM, preset=50)
 s.note_on(60, 1.0)
 ```
 
@@ -503,9 +503,10 @@ You can use `amy.py` to control the AMY synthesizer directly.
 amy.drums() # plays a test song
 amy.volume(4) # change volume
 amy.reset() # stops all music / sounds playing
-amy.send(voices='0', load_patch=129, note=45, vel=1) # plays a tone
-amy.send(voices='0', pan=0) # set to the right channel
-amy.send(voices='0', pan=1) # set to the left channel
+amy.send(synth=1, patch=129, num_voices=1) # set up a DX7 patch on synth 1
+amy.send(synth=1, note=45, vel=1) # plays a tone
+amy.send(synth=1, pan=0) # set to the left channel
+amy.send(synth=1, pan=1) # set to the right channel
 
 # start mesh mode (control multiple speakers over wifi)
 # once mesh mode is set, you can't go back to local mode until you restart Tulip. 
@@ -514,26 +515,27 @@ alles.mesh(local_ip='192.168.50.4') # useful for setting a network on Tulip Desk
 
 alles.map() # returns booted Alles synths on the mesh
 
-amy.send(voices='0', load_patch=101, note=50, vel=1) # all Alles speakers in a mesh will respond
-amy.send(voices='0', load_patch=101, note=50, vel=1, client=2) # just a certain client
+amy.send(synth=1, patch=101, num_voices=1) # load a patch on every Alles speaker in the mesh
+amy.send(synth=1, note=50, vel=1) # all Alles speakers in a mesh will respond
+amy.send(synth=1, note=50, vel=1, client=2) # just a certain client
 ```
 
 To load your own WAVE files as samples you can play like an instrument, use `amy.load_sample`:
 
 ```python
 # To save space / RAM, you may want to downsample your WAVE files to 11025 or 22050Hz. We detect SR automatically.
-amy.load_sample("flutea4.wav", patch=50) # samples are converted to mono if they are stereo. patch # can be anything
+amy.load_sample("flutea4.wav", preset=50) # samples are converted to mono if they are stereo. preset # can be anything
 
 # You can optionally tell us the loop start and end point (in samples), and base MIDI note of the sample.
 # We can detect this in WAVE file metadata if it exists! (Many sample packs include this.)
-amy.load_sample("flutea4.wav", midinote=81, loopstart=1020, loopend=1500, patch=50)
+amy.load_sample("flutea4.wav", midinote=81, loopstart=1020, loopend=1500, preset=50)
 
-# The patch number can now be used in AMY's PCM sample player. 
-amy.send(osc=20, wave=amy.PCM, patch=50, vel=1, note=50)
+# The preset number can now be used in AMY's PCM sample player. 
+amy.send(osc=20, wave=amy.PCM, preset=50, vel=1, note=50)
 
-# You can unload already allocated patches:
-amy.unload_sample(patch) # frees the RAM and the patch slot
-amy.reset() # frees all allocated PCM patches
+# You can unload already allocated presets:
+amy.unload_sample(50) # frees the RAM and the preset slot
+amy.reset() # frees all allocated PCM presets
 ```
 
 On Tulip Desktop or Web, or with an AMYboard / AMYchip connected to a hardware Tulip over I2C, you can use audio input as well. This is brand new and we're still working out a good API for it. For now, you can set any oscillator to be fed by the L or R channel of an audio input. 
@@ -568,56 +570,6 @@ chord = music.Chord("F:min7")
 for i,note in enumerate(chord.midinotes()):
     amy.send(wave=amy.SINE,osc=i*9,note=note,vel=0.25)
 ```
-
-## Low level sample access and direct audio playback
-
-**[PLEASE NOTE -- LOW LEVEL SAMPLE ACCESS DOES NOT CURRENTLY WORK, BUT WE ARE WORKING ON IT](https://github.com/shorepine/amy/issues/349)**
-
-You can access the audio input (`AUDIO_IN0/1`) sample buffer per frame (on Tulip Desktop, Web, and future devices with audio input support), and you can also set two external audio channels (`AUDIO_EXT0/1`) from Python. This lets you synthesize audio in Python, or do things like stream WAV files from disk to the audio output. 
-
-To do so, you need to register an AMY frame callback in Tulip. In this example, we open a WAV file and read it 256 frames per block, and set those frames to the EXT0/1 oscillators, which we initialize as AMY oscillators 0 and 1, with their pan set to left and right. 
-
-```python
-# Play a wav file through AMY, streaming from disk
-import amy_wave
-f = amy_wave.open(wav_filename,'rb')
-
-def cb(x):
-    frames = f.readframes(256)
-    if(len(frames)!=1024): # file done. stop the AMY frame callback.
-        frames = bytes(1024)
-        tulip.amy_block_done_callback()
-    # Sets the stereo channel buffer EXT0/EXT1 from the frames bytes
-    tulip.amy_set_external_input_buffer(frames)
-
-amy.reset()
-amy.send(osc=0,wave=amy.AUDIO_EXT0, pan=0, vel=1)
-amy.send(osc=1,wave=amy.AUDIO_EXT1, pan=1, vel=1)
-tulip.amy_block_done_callback(cb)
-```
-
-To sample incoming audio (on devices that support it), use `tulip.amy_get_input_buffer`:
-
-```python
-buf = bytes()
-tick_start = 0
-ms = 2000
-
-def sample(x):
-    global buf
-    buf = buf + tulip.amy_get_input_buffer()
-    # stop "recording" to buf after ms
-    if(tulip.ticks_ms() > tick_start + ms): 
-        tulip.amy_block_done_callback()
-        play()
-
-tick_start = tulip.ticks_ms()
-print("Recording for 2s. Make sure audio input is on!")
-tulip.amy_block_done_callback(sample)
-# Then buf will have stereo frames of audio to do whatever you want with.
-```
-
-Please note: on Tulip CC hardware, you do not have much compute time left per block to do much. Reading files, saving to memory or doing simple synthesis works, but most anything more complicated you should write your effects / synthesis code in C, as part of AMY.
 
 ## Music sequencer
 

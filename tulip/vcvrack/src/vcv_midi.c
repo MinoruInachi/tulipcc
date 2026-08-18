@@ -2,7 +2,7 @@
 //
 // Publishes a virtual MIDI in/out pair named "AMYboard VCV" so amyboard.com's
 // editor (Chrome WebMIDI, "control" mode) sees the Rack module exactly like a
-// hardware AMYboard: sketch transfer (zT), knobs (zA), run-python (zP), dumps
+// hardware AMYboard: sketch transfer (zT), run-python (zP), dumps
 // (zD), ping (zI) all flow over sysex.
 //
 // Backends: CoreMIDI virtual source/destination on macOS, an ALSA sequencer
@@ -14,7 +14,7 @@
 //  - shorepine sysex (F0 00 03 45 ...): zI answered here in C (like
 //    parse_sysex does on hardware); everything else is queued to the
 //    MicroPython thread (mp_embed.c), which processes it with
-//    amy_add_message_from_sysex() and then emits the AK — the same
+//    amy_send_wire_from_sysex() and then emits the AK — the same
 //    process-on-MP-thread-then-ack design as AMYBOARD's scheduled
 //    tulip_amy_send_sysex, without needing AMY's ring slots.
 //  - other sysex -> amy_event_midi_message_received() so Python
@@ -32,7 +32,7 @@
 #include <pthread.h>
 
 extern void convert_midi_bytes_to_messages(uint8_t *data, size_t len, uint8_t usb);
-extern void amy_event_midi_message_received(uint8_t *data, uint32_t len, uint8_t sysex, uint32_t time);
+extern void amy_event_midi_message_received(uint8_t *data, uint32_t len, uint8_t sysex);
 extern uint32_t amy_sysclock(void);
 void midi_out(uint8_t *bytes, uint16_t len);
 // mp_embed.c: queue a shorepine control payload for the MP thread (which
@@ -64,13 +64,13 @@ static void handle_sysex_frame(uint8_t *frame, int len) {
                 amyboard_vcv_exec("import amyboard; amyboard.restart_sketch()");
             return;
         }
-        // Everything else (zT/zD/zP/zA/zY, base64 transfer chunks): process
+        // Everything else (zT/zD/zP/zY, base64 transfer chunks): process
         // on the MP thread, which acks after handling.
         amyboard_vcv_sysex_push(payload, plen);
         return;
     }
     // Non-shorepine sysex: hand to the firmware's Python midi callback path.
-    amy_event_midi_message_received(frame, (uint32_t)len, 1, amy_sysclock());
+    amy_event_midi_message_received(frame, (uint32_t)len, 1);
 }
 
 // Feed raw MIDI 1.0 bytes (possibly containing partial sysex across calls).

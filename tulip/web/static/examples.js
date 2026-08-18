@@ -111,9 +111,11 @@ if __name__ == '__main__':
 import music, tulip
 amy.load_sample(tulip.root_dir()+'sys/ex/bcla3.wav', preset=10)
 s = synth.OscSynth(wave=amy.PCM, preset=10)
+TICKS_PER_MS = 108 * 48 / 60000.0
+base_ticks = tulip.seq_ticks()
 for i,note in enumerate(music.Chord('F:min7').midinotes()):
-    s.note_on(note+24, 1, time=i*4000)
-    s.note_off(note+24, time=20000)
+    s.note_on(note+24, 1, ticks=round(base_ticks + i*4000*TICKS_PER_MS))
+    s.note_off(note+24, ticks=round(base_ticks + 20000*TICKS_PER_MS))
 `},{
     't':'music',
     'd':'Play all the built in sound patches (by @drepetto)',
@@ -141,6 +143,8 @@ tulip_analog_synth = None
 tulip_drums = None
 tulip_pcm_synth = None
 tulip_wave_synth = None
+
+TICKS_PER_MS = 108 * 48 / 60000.0
 
 def print_instructions():
     print(upysh.clear)
@@ -187,8 +191,9 @@ def print_sound_info_and_play(play):
                 tulip_wave_synth = midi.OscSynth(wave=amy.KS,feedback=0.996)
             else:
                 tulip_wave_synth = midi.OscSynth(wave=waveform_amys[sound_number])
-            tulip_wave_synth.note_on(60,0.75,time=tulip.amy_ticks_ms() + 10)
-            tulip_wave_synth.note_off(60, time=tulip.amy_ticks_ms() + 510)
+            base_ticks = tulip.seq_ticks()
+            tulip_wave_synth.note_on(60,0.75,ticks=round(base_ticks + 10*TICKS_PER_MS))
+            tulip_wave_synth.note_off(60, ticks=round(base_ticks + 510*TICKS_PER_MS))
 
     elif sound_type == 3 or sound_type == 4 or sound_type == 5:
         if sound_type == 3:
@@ -200,15 +205,16 @@ def print_sound_info_and_play(play):
         print(" synth patches number:", sound_number)
         if play:
             tulip_analog_synth.program_change(sound_number)
-            
-            tulip_analog_synth.note_on(50,0.75,time=tulip.amy_ticks_ms() + 10)
-            tulip_analog_synth.note_off(50, time=tulip.amy_ticks_ms() + 510)
 
-            tulip_analog_synth.note_on(52,0.75,time=tulip.amy_ticks_ms() + 520)
-            tulip_analog_synth.note_off(52, time=tulip.amy_ticks_ms() + 1020)
+            base_ticks = tulip.seq_ticks()
+            tulip_analog_synth.note_on(50,0.75,ticks=round(base_ticks + 10*TICKS_PER_MS))
+            tulip_analog_synth.note_off(50, ticks=round(base_ticks + 510*TICKS_PER_MS))
 
-            tulip_analog_synth.note_on(54,0.75,time=tulip.amy_ticks_ms() + 1030)
-            tulip_analog_synth.note_off(54, time=tulip.amy_ticks_ms() + 1530)
+            tulip_analog_synth.note_on(52,0.75,ticks=round(base_ticks + 520*TICKS_PER_MS))
+            tulip_analog_synth.note_off(52, ticks=round(base_ticks + 1020*TICKS_PER_MS))
+
+            tulip_analog_synth.note_on(54,0.75,ticks=round(base_ticks + 1030*TICKS_PER_MS))
+            tulip_analog_synth.note_off(54, ticks=round(base_ticks + 1530*TICKS_PER_MS))
 
 def update_sound_number(scan):
     global sound_type, sound_number, sound_types, tulip_analog_synth, tulip_drums, tulip_pcm_synth, tulip_wave_synth
@@ -352,23 +358,26 @@ def make_patch(x):
     amy.send(osc=0, wave=amy.ALGO, algorithm=5, algo_source="1,2,3,4", bp0="0,1,147,0", bp1="0,1,179,1", freq="0,1,0,0,1,1")
     amy.stop_store_patch(1024)
 
+TICKS_PER_MS = 108 * 48 / 60000.0
+
 def next(t):
     s = synth.PatchSynth(num_voices=8, patch=1024)
     p = music.Progression(["I", "vi", "IV", "V"], music.Key("E:maj"))
     chord_len = 2000
     note_len = 500
     start = 2000
+    base_ticks = tulip.seq_ticks()
     for x,chord in enumerate(p.chords):
         # Play a chord
         chord_time = (x*chord_len)
         for i,note in enumerate(chord.midinotes()):
-            s.note_on(note-12, 1, time=start+chord_time)
-            s.note_off(note-12, time=start+chord_time+chord_len-100)
+            s.note_on(note-12, 1, ticks=round(base_ticks + (start+chord_time)*TICKS_PER_MS))
+            s.note_off(note-12, ticks=round(base_ticks + (start+chord_time+chord_len-100)*TICKS_PER_MS))
         # And a little arp over it
         for i,note in enumerate(chord.midinotes()):
             note_time = (x*chord_len)+(i*note_len)
-            s.note_on(note, 1, time=start+note_time)
-            s.note_off(note, time=start+note_time+100)
+            s.note_on(note, 1, ticks=round(base_ticks + (start+note_time)*TICKS_PER_MS))
+            s.note_off(note, ticks=round(base_ticks + (start+note_time+100)*TICKS_PER_MS))
 midi.config.reset()
 tulip.defer(make_patch, None, 500)
 tulip.defer(next, None, 1500)
@@ -571,7 +580,7 @@ def process_key( key ):
             note_num = 36 + 12 * math.log( ratio ) / math.log( 2 )
             print( f"note_num: {note_num}" )
                   
-            amy.send(voices=0,patch=patch_num,note=note_num,vel=1)
+            amy.send(synth=1,note=note_num,vel=1)
             
         pass
     
@@ -589,11 +598,11 @@ def process_key( key ):
         #print(1)
         patch_num += 1
         print(f'patch_num: {patch_num}')
-        amy.send(osc=0,vel=0)
+        amy.send(synth=1,patch=patch_num)
     elif key == 22:#print(-1)
         patch_num -= 1
         print(f'patch_num: {patch_num}')
-        amy.send(osc=0,vel=0)
+        amy.send(synth=1,patch=patch_num)
 
     else:   
         print("unhandled key: %d" % (key))
@@ -601,7 +610,8 @@ def process_key( key ):
 
 
 patch_num = 129
-amy.send(voices=0,patch=patch_num,note=45,vel=1)
+amy.send(synth=1,patch=patch_num,num_voices=1)
+amy.send(synth=1,note=45,vel=1)
 
 tulip.key_scan(1)
 tulip.keyboard_callback( process_key )
@@ -1192,12 +1202,14 @@ prev_midi_val = 60
 def beat_callback(t):
     global app, cnt, prev_midi_val
     
+    # t is the tick this step fired on; scheduling for it keeps the note on
+    # the beat even though this callback runs a moment later.
     midi_val = app.grid.get_note_in_column(cnt)
     if midi_val > 0:
-        app.synth.note_on(midi_val, 0.6, time=t)
+        app.synth.note_on(midi_val, 0.6, ticks=t)
         prev_midi_val = midi_val
     else:
-        app.synth.note_off(prev_midi_val, time=t)
+        app.synth.note_off(prev_midi_val, ticks=t)
 
     cnt += 1
     if cnt > NoteGrid.TIMES - 1:
@@ -1285,97 +1297,5 @@ def run(screen):
 
 if __name__ == '__main__':
         run(tulip.UIScreen())
-`},{
-    't':'deprecated',
-    'd':'Directly play a wav file',
-    'c':`
-# wav.py
-# plays a wavfile from amy external audio
-
-import amy_wave
-f = None
-try:
-    f = amy_wave.open(wav_filename,'rb')
-except:
-    print("Upload a wav file and type >>> wav_filename='file.wav' first.")
-
-def cb(x):
-    frames = f.readframes(256)
-    if(len(frames)!=1024):
-        frames = bytes(1024)
-        tulip.amy_block_done_callback()
-    tulip.amy_set_external_input_buffer(frames)
-
-if(f is not None):
-    amy.reset()
-    amy.send(osc=0,wave=amy.AUDIO_EXT0, pan=0, vel=1)
-    amy.send(osc=1,wave=amy.AUDIO_EXT1, pan=1, vel=1)
-    tulip.amy_block_done_callback(cb)
-`},{
-    't':'deprecated',
-    'd':'Sample audio in and play it as an instrument',
-    'c':`
-# sample.py 
-# try sampling audio to pcm memorypcm
-
-import tulip, amy, synth, music
-
-buf = bytes()
-t = 0
-tick_start = 0
-ms = 2000
-syn = None
-
-def play():
-    amy.send(reset=amy.RESET_TIMEBASE+amy.RESET_ALL_OSCS)
-    amy.load_sample_bytes(buf, stereo=True, patch=50, loopstart=0, loopend=int(amy.AMY_SAMPLE_RATE*(ms/1000.0)))
-    syn = synth.OscSynth(wave=amy.PCM, patch=50)
-    for i,note in enumerate(music.Chord('F:min7').midinotes()):
-        syn.note_on(note+24, 1, time=i*1000)
-        syn.note_off(note+24, time=5000)
-
-def sample(x):
-    global buf, syn
-    buf = buf + tulip.amy_get_input_buffer()
-    if(tulip.ticks_ms() > tick_start + ms): 
-        tulip.amy_block_done_callback()
-        play()
-
-tick_start = tulip.ticks_ms()
-print("Recording for 2s. Make sure audio input is on!")
-tulip.amy_block_done_callback(sample)
-`
-},{
-    'd':'Generate audio buffers in Python',
-    't':'deprecated',
-    'c':`
-# makes a sine wave. obviously, it's easier to do this in AMY directly! 
-# but just showing how to do it for any audio synthesis in python
-from ulab import numpy as np
-import ulab
-freq = 440.0
-amp = 32767
-lut_size = 512
-count = 0
-lut = np.array(amp * np.sin(np.linspace(0,2*np.pi,lut_size,endpoint=False)), dtype=np.int16)
-# freq/2 because we send stereo buffer in this example
-step_size = ((freq/2.0) * lut_size) / float(amy.AMY_SAMPLE_RATE)
-index = 0
-
-def cb(x):
-    global count
-    t = np.array(np.arange(count*512,count*512+512)*step_size)
-    samples = ulab.user.arraymodlut(lut, t);
-    tulip.amy_set_external_input_buffer(samples.tobytes())
-    if(count==1000):  # stop
-        tulip.amy_block_done_callback()
-        amy.reset()
-    count = count + 1
-
-amy.reset()
-amy.send(osc=0,wave=amy.AUDIO_EXT0, pan=0, vel=1)
-amy.send(osc=1,wave=amy.AUDIO_EXT1, pan=1, vel=1)
-tulip.amy_block_done_callback(cb)
-`
-}
+`}
 ]

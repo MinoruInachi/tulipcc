@@ -61,7 +61,7 @@ amy.send(osc=0, vel=0)
 
 ### Using patches
 
-AMY has hundreds of built-in patches: 0-127 are Juno-6 analog, 128-255 are DX7 FM, 256 is piano, and 384-390 are the General MIDI drum kits — 384 TR-808, 385 TR-909, 386 Linn 9000, 387 Univox MR-12, 388 Tokyo Synthetics, 389 80s Power Kit, 390 Percussion. Load a kit on a synth with `synth_flags=3` and play GM note numbers (36=kick, 38=snare, 42=hat...) to trigger drums; switch kits with `amy.send(synth=10, patch=38x)` or over MIDI with bank select MSB 3 (CC0=3) + program change 0-6.
+AMY has hundreds of built-in patches: 0-127 are Juno-6 analog, 128-255 are DX7 FM, 256 is piano, and 384-390 are the General MIDI drum kits — 384 TR-808, 385 TR-909, 386 Linn 9000, 387 Univox MR-12, 388 Tokyo Synthetics, 389 80s Power Kit, 390 Percussion. Load a kit on a synth and play GM note numbers (36=kick, 38=snare, 42=hat...) to trigger drums; switch kits with `amy.send(synth=10, patch=38x)` or over MIDI with bank select MSB 3 (CC0=3) + program change 0-6.
 In general, a patch will use multiple oscs.  `synth` is our abstraction to manage multiple oscs at the same time.
 
 ```python
@@ -130,15 +130,17 @@ import amyboard
 amyboard.cv_out(5.0, channel=0)    # Output 5V on CV out 1
 volts = amyboard.cv_in(channel=0)   # Read CV in 1
 
-# Rotary encoders.  amyboard.encoder() autodetects whichever accessory is
-# connected (Adafruit single/quad or M5Stack 8Encoder) and gives one API for all.
-enc = amyboard.encoder()
-print(enc.type, enc.encoders)       # e.g. "m5stack" 8
+# Rotary encoders.  amyboard.encoder() autodetects every attached accessory
+# (Adafruit single/quad or M5Stack 8Encoder) and gives one API for all --
+# multiple boards (via their address jumpers) combine into one flat index space.
+enc = amyboard.encoder()            # pass invert=True if yours counts backwards
+print(enc.type, enc.encoders)       # e.g. "m5stack" 8; enc.devices lists (type, addr)
 print(enc.read(0))                  # position of encoder 0 (starts at 0)
 print(enc.button(0))                # True while held
 if enc.leds:
     enc.led(0, 0, 64, 0)            # light encoder 0's LED dim green
-# See accessories.md for the legacy per-device read_encoder()/read_buttons() helpers.
+# See accessories.md for multi-board details, invert, and the legacy
+# per-device read_encoder()/read_buttons() helpers.
 
 # OLED display (if connected)
 amyboard.init_display()
@@ -163,7 +165,7 @@ See the [Modular Synth Setup](modular.md) page for detailed CV and encoder examp
 
 ## The sketch.py startup script
 
-AMYboard automatically runs `sketch.py` from your current environment directory on boot. The top-level code runs once at startup, and if you define a `loop()` function it will be called repeatedly (~60ms interval). Use it to set up your default configuration:
+AMYboard automatically runs `sketch.py` from your current environment directory on boot. The top-level code runs once at startup, and if you define a `loop(tick)` function it will be called every 32nd note of the sequencer -- an interval of `7500 / tempo` ms, so 69 ms at the default tempo of 108 and 125 ms at tempo 60. See [How often is `loop()` called?](faq.md#how-often-is-loop-called) if you need a faster callback. Use it to set up your default configuration:
 
 ```python
 # /user/current/sketch.py
@@ -171,12 +173,12 @@ import amy, amyboard
 
 # Set up my preferred patches
 amy.send(synth=1, patch=0, num_voices=6)      # Channel 1: Juno patch 0, 6-voice poly
-amy.send(synth=10, num_voices=1, patch=384, synth_flags=3)    # Channel 10: TR-808 GM drum kit (note 36=kick, ...; drum kits are single-voice, always num_voices=1). Kits 385-390: 909/Linn/MR-12/Synthetics/Power/Percussion.
+amy.send(synth=10, patch=384)                 # Channel 10: TR-808 GM drum kit (note 36=kick, ...; uses default num_voices=1). Kits 385-390: 909/Linn/MR-12/Synthetics/Power/Percussion.
 
 # Set CV out 1 to 0V on startup
 amyboard.cv_out(0.0, channel=0)
 
-def loop():
+def loop(tick):
     pass
 ```
 
@@ -240,25 +242,36 @@ First, copy the files you want to the card on your computer. Then insert it into
 
 ## Working with MIDI in Python
 
+To receive MIDI, register a callback with `midi.add_callback()`. Your function is called once per incoming message, with the message as a `bytes` object:
+
 ```python
-import tulip
+import midi
 
-# Set up a MIDI callback
-def my_midi_callback(is_sysex):
-    if is_sysex:
-        return  # Ignore sysex
-    message = tulip.midi_in()
-    while message is not None and len(message) > 0:
-        # message is a bytes object
-        status = message[0]
-        if status & 0xF0 == 0x90:  # Note on
-            note = message[1]
-            vel = message[2]
-            print(f"Note on: {note} velocity: {vel}")
-        # Maybe there are more messages queued?
-        message = tulip.midi_in()
+def my_midi_callback(message):
+    status = message[0]
+    if status & 0xF0 == 0x90:  # Note on
+        note = message[1]
+        vel = message[2]
+        print(f"Note on: {note} velocity: {vel}")
 
-tulip.midi_callback(my_midi_callback)
+midi.add_callback(my_midi_callback)
+# ... later, to stop receiving:
+midi.remove_callback(my_midi_callback)
+```
+
+You can register as many callbacks as you like; they all receive every message. This is how AMYboard's own features (like `amyboard.show_midi_ccs()`) listen for MIDI, and the factory self-test uses the same pattern for its MIDI loopback check.
+
+Note that AMYboard's system MIDI dispatcher drains the incoming MIDI queue for you at boot, so polling `tulip.midi_in()` yourself will always return `None` — the dispatcher has already consumed each message and handed it to the registered callbacks. Likewise, don't call `tulip.midi_callback()` directly: that would replace the system dispatcher and silently break everything else listening for MIDI. Always use `midi.add_callback()` / `midi.remove_callback()`.
+
+For sysex messages, set `midi.sysex_callback` to a function; it receives the full sysex payload as `bytes`:
+
+```python
+import midi
+
+def my_sysex_callback(payload):
+    print("sysex:", payload.hex())
+
+midi.sysex_callback = my_sysex_callback
 ```
 
 ### Sending MIDI out
@@ -283,8 +296,8 @@ import amy
 amy.send(osc=0, wave=amy.AMY_MIDI)                    # osc 0 now sends MIDI instead of audio
 
 # Play a MIDI note on channel 1 every quarter note (48 ticks), held for an eighth note.
-amy.send(osc=0, note=60, vel=1, sequence="0,48,1")    # note on  at tick 0  of each period
-amy.send(osc=0, note=60, vel=0, sequence="24,48,2")   # note off at tick 24 of each period
+amy.send(osc=0, note=60, vel=1, ticks="0,48,1")    # note on  at tick 0  of each period
+amy.send(osc=0, note=60, vel=0, ticks="24,48,2")   # note off at tick 24 of each period
 ```
 
 `amy.AMY_MIDI` always sends on MIDI channel 1, and notes that arrived over MIDI in are not echoed back out. See the [AMY MIDI docs](https://github.com/shorepine/amy/blob/main/docs/midi.md#sending-midi-out) for the full details.
