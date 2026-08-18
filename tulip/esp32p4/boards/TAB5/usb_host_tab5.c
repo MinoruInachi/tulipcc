@@ -154,9 +154,15 @@ static usb_transfer_t *s_mouse_in;
 static uint16_t s_mouse_bytes = MOUSE_BYTES;
 static uint8_t s_mouse_interval;
 static bool s_mouse_polling;
-static int16_t s_mouse_x, s_mouse_y;
+static bool s_mouse_report_logged;
+// The pointer sprite is placed from the shared mouse_x_pos/mouse_y_pos globals
+// (see display_frame_done_generic()), so the accumulated position has to live
+// there and not in a file-local copy.
 
-static bool s_boot_protocol_requested;
+// SET_PROTOCOL is per interface, so the keyboard and the mouse each need their
+// own flag. A single shared one meant that on a combo device only whichever
+// interface was claimed first was ever put into boot protocol.
+static bool s_kb_boot_requested, s_mouse_boot_requested;
 
 static int64_t s_vbus_off_since;
 
@@ -487,16 +493,19 @@ static void boot_protocol_cb(usb_transfer_t *transfer)
     (void)transfer;
 }
 
-// SET_PROTOCOL(boot) on the control endpoint, so keyboards that default to
-// report protocol send the 8-byte boot report decode_keyboard_report() expects.
-static void request_boot_protocol(usb_device_handle_t device_handle)
+// SET_PROTOCOL(boot) on the control endpoint, so HID devices that default to
+// report protocol send the fixed-layout boot reports the decoders expect.
+// wIndex is the interface number: a mouse sitting on interface 1 that was sent
+// wIndex 0 never leaves report protocol, and its native report (16-bit
+// displacements, or a leading report ID) then decodes as jitter.
+static void request_boot_protocol(usb_device_handle_t device_handle, uint8_t interface)
 {
-    static const uint8_t setup[8] = {
+    const uint8_t setup[8] = {
         0x21, // host to device, class, interface
         0x0B, // SET_PROTOCOL
-        0x00, 0x00, // boot protocol
-        0x00, 0x00,
-        0x00, 0x00,
+        0x00, 0x00, // wValue = 0, boot protocol
+        interface, 0x00, // wIndex = interface
+        0x00, 0x00, // wLength = 0
     };
 
     usb_transfer_t *ctrl_transfer = NULL;
@@ -516,7 +525,6 @@ static void request_boot_protocol(usb_device_handle_t device_handle)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "boot protocol request failed: %s", esp_err_to_name(err));
     }
-    s_boot_protocol_requested = true;
 }
 
 /* ------------------------------------------------------------ HID: keyboard */
@@ -671,8 +679,9 @@ static void prepare_endpoint_hid_kb(const void *p)
     s_kb_interval = endpoint->bInterval;
     s_kb_ready = true;
 
-    if (!s_boot_protocol_requested) {
-        request_boot_protocol(s_dev_kb);
+    if (!s_kb_boot_requested) {
+        request_boot_protocol(s_dev_kb, s_intf_kb);
+        s_kb_boot_requested = true;
     }
     ESP_LOGI(TAG, "USB keyboard ready (%d byte reports)", s_kb_bytes);
 }
@@ -706,29 +715,45 @@ static void mouse_transfer_cb(usb_transfer_t *transfer)
         }
         return;
     }
-    if (transfer->actual_num_bytes < (int)sizeof(hid_mouse_input_report_boot_t) + 1) {
+    const uint8_t *p = transfer->data_buffer;
+    const int n = transfer->actual_num_bytes;
+
+    // The layout is worth one line in the log the first time a mouse reports:
+    // if a device turns out not to honour SET_PROTOCOL(boot) this says so
+    // immediately instead of showing up as unexplained pointer jitter.
+    if (!s_mouse_report_logged) {
+        ESP_LOGI(TAG, "mouse report is %d bytes: %02x %02x %02x %02x %02x %02x %02x %02x",
+                 n, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+        s_mouse_report_logged = true;
+    }
+
+    if (n < (int)sizeof(hid_mouse_input_report_boot_t)) {
         return;
     }
 
-    // Byte 0 is the report ID; the boot report follows.
+    // A boot-protocol report is [buttons][x][y], plus an optional wheel byte,
+    // and carries no report ID. Anything longer than that is a report-protocol
+    // device whose reports are ID-prefixed, so skip the ID there and only
+    // there -- skipping it unconditionally read x out of the y byte and y out
+    // of the wheel byte, which is what made the pointer shake.
     const hid_mouse_input_report_boot_t *report =
-        (const hid_mouse_input_report_boot_t *)(transfer->data_buffer + 1);
+        (const hid_mouse_input_report_boot_t *)(n > 4 ? p + 1 : p);
 
-    s_mouse_x += report->x_displacement;
-    s_mouse_y += report->y_displacement;
-    if (s_mouse_x < 0) s_mouse_x = 0;
-    if (s_mouse_y < 0) s_mouse_y = 0;
-    if (s_mouse_x >= H_RES) s_mouse_x = H_RES - 1;
-    if (s_mouse_y >= V_RES) s_mouse_y = V_RES - 1;
+    mouse_x_pos += report->x_displacement;
+    mouse_y_pos += report->y_displacement;
+    if (mouse_x_pos < 0) mouse_x_pos = 0;
+    if (mouse_y_pos < 0) mouse_y_pos = 0;
+    if (mouse_x_pos >= H_RES) mouse_x_pos = H_RES - 1;
+    if (mouse_y_pos >= V_RES) mouse_y_pos = V_RES - 1;
 
-    last_touch_x[0] = s_mouse_x;
-    last_touch_y[0] = s_mouse_y;
+    last_touch_x[0] = mouse_x_pos;
+    last_touch_y[0] = mouse_y_pos;
     enable_mouse_pointer(); // no-op once installed
 
     // A held button 1 is a touch down, everything else is a touch up. That is
     // the same mapping the S3 uses, and it is what lets the mouse drive the same
     // UI the panel does.
-    send_touch_to_micropython(s_mouse_x, s_mouse_y, report->buttons.button1 ? 0 : 1);
+    send_touch_to_micropython(mouse_x_pos, mouse_y_pos, report->buttons.button1 ? 0 : 1);
 }
 
 static bool check_interface_desc_boot_mouse(const void *p, usb_device_handle_t device_handle)
@@ -787,12 +812,13 @@ static void prepare_endpoint_hid_mouse(const void *p)
     s_mouse_in->callback = mouse_transfer_cb;
     s_mouse_in->context = NULL;
     s_mouse_interval = endpoint->bInterval;
-    s_mouse_x = H_RES / 2;
-    s_mouse_y = V_RES / 2;
+    mouse_x_pos = H_RES / 2;
+    mouse_y_pos = V_RES / 2;
     s_mouse_ready = true;
 
-    if (!s_boot_protocol_requested) {
-        request_boot_protocol(s_dev_mouse);
+    if (!s_mouse_boot_requested) {
+        request_boot_protocol(s_dev_mouse, s_intf_mouse);
+        s_mouse_boot_requested = true;
     }
     ESP_LOGI(TAG, "USB mouse ready");
 }
@@ -933,7 +959,7 @@ static void release_keyboard(void)
     free_transfer(&s_kb_in);
     // So a keyboard plugged back in is asked for boot protocol again rather than
     // being left in whatever report mode it powers up in.
-    s_boot_protocol_requested = false;
+    s_kb_boot_requested = false;
     err = usb_host_device_close(s_client, s_dev_kb);
     if (err != ESP_OK) {
         s_close_errors++;
@@ -953,7 +979,8 @@ static void release_mouse(void)
     s_mouse_claimed = s_mouse_ready = s_mouse_polling = false;
     disable_mouse_pointer();
     free_transfer(&s_mouse_in);
-    s_boot_protocol_requested = false;
+    s_mouse_boot_requested = false;
+    s_mouse_report_logged = false;
     if (!shared_with_keyboard) {
         err = usb_host_device_close(s_client, s_dev_mouse);
         if (err != ESP_OK) {

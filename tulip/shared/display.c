@@ -323,6 +323,19 @@ bool display_frame_done_generic() {
     #ifdef ESP_PLATFORM
     #ifndef TDECK
     if(mouse_pointer_status) {
+        // The pointer moves without any drawing call having damaged the screen,
+        // so it has to report its own damage: ports that recompose only the
+        // dirty rows (Tab5) otherwise repaint the pointer just when something
+        // else happens to dirty those rows, which reads as the pointer tearing
+        // and stuttering as it moves. Both the rows it is leaving and the rows
+        // it is arriving at need it, or the old pointer stays on screen.
+        if(sprite_x_px[0] != (uint16_t)mouse_x_pos || sprite_y_px[0] != (uint16_t)mouse_y_pos) {
+            int y_from = sprite_y_px[0];
+            int y_to = mouse_y_pos;
+            int y0 = (y_from < y_to) ? y_from : y_to;
+            int y1 = ((y_from > y_to) ? y_from : y_to) + sprite_h_px[0];
+            display_mark_dirty_rows(y0, y1);
+        }
         sprite_x_px[0] = mouse_x_pos;
         sprite_y_px[0] = mouse_y_pos;
     }

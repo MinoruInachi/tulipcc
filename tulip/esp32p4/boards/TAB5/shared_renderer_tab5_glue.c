@@ -6,6 +6,8 @@
  * runtime plumbing once esp32p4 links the complete Tulip UI/runtime path.
  */
 
+// Pointer sprite position. display_frame_done_generic() reads these every frame
+// to place sprite 0; usb_host_tab5.c's mouse_transfer_cb() accumulates into them.
 int16_t mouse_x_pos = 0;
 int16_t mouse_y_pos = 0;
 
