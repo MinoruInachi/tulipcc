@@ -108,10 +108,13 @@ static mp_obj_t tulip_amy_ticks_ms(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(tulip_amy_ticks_ms_obj, tulip_amy_ticks_ms);
 
-// The rest of the AMY surface the `amy` Python package binds to on MicroPython.
-// These are not optional extras: amy/__init__.py assigns them in one block, so
-// a single missing name silently disables ticks_ms(), get_synth_commands() and
-// everything after it.
+// The AMY surface the `amy` Python package binds to on MicroPython. amy's
+// _capi_resolve() looks each one up as tulip.amy_<name> independently and
+// substitutes a stub that raises NotImplementedError for the names a board does
+// not have, so an unbound function costs only itself. The other Tulip targets
+// take these from amy's generated amy_c_api_mp.inc (see shared/modtulip.c); TAB5
+// writes its own so that everything reaching into AMY can check first that AMY
+// is there -- see tab5_amy_require_audio().
 static mp_obj_t tulip_amy_get_synth_commands(size_t n_args, const mp_obj_t *args) {
     char cmd[MAX_MESSAGE_LEN];
     void *state = NULL;
@@ -139,14 +142,101 @@ static mp_obj_t tulip_amy_set_render_load_threshold(mp_obj_t threshold_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(tulip_amy_set_render_load_threshold_obj, tulip_amy_set_render_load_threshold);
 
-static mp_obj_t tulip_amy_send(mp_obj_t message_obj) {
+// AMY exists only once amy_start() has run, which is what tab5_audio_ready()
+// reports; the board reaches Python with it false if the codec, I2S or the
+// render task failed to come up. Reading uninitialised AMY state is merely
+// meaningless, but amy_get_input_buffer() walks a block amy_start() mallocs, so
+// there it is a null dereference. Raise rather than crash.
+static void tab5_amy_require_audio(void) {
     if (!tab5_audio_ready()) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("AMY audio is not ready"));
     }
+}
+
+static mp_obj_t tulip_amy_send(mp_obj_t message_obj) {
+    tab5_amy_require_audio();
     amy_add_message((char *)mp_obj_str_get_str(message_obj));
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(tulip_amy_send_obj, tulip_amy_send);
+
+// A wire message that arrived over sysex: the file-transfer routing in
+// transfer.c applies to it, which is how amy.send_wire_from_sysex() differs
+// from amy.send().
+static mp_obj_t tulip_amy_send_wire_from_sysex(mp_obj_t message_obj) {
+    tab5_amy_require_audio();
+    amy_send_wire_from_sysex((char *)mp_obj_str_get_str(message_obj));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tulip_amy_send_wire_from_sysex_obj, tulip_amy_send_wire_from_sysex);
+
+// The startup chime. `start` is the tick to play it at; 0 means now.
+static mp_obj_t tulip_amy_bleep(size_t n_args, const mp_obj_t *args) {
+    tab5_amy_require_audio();
+    amy_bleep(n_args > 0 ? (uint32_t)mp_obj_get_int(args[0]) : (uint32_t)0);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_amy_bleep_obj, 0, 1, tulip_amy_bleep);
+
+// Feed one byte to AMY's MIDI stream parser. The Tab5's own USB-A MIDI already
+// goes straight into AMY (tulip_amy_midi_hook); this is for Python-side sources.
+static mp_obj_t tulip_amy_process_single_midi_byte(size_t n_args, const mp_obj_t *args) {
+    tab5_amy_require_audio();
+    uint8_t byte = (uint8_t)mp_obj_get_int(args[0]);
+    uint8_t from_web_or_usb = (n_args > 1) ? (uint8_t)mp_obj_get_int(args[1]) : (uint8_t)1;
+    amy_process_single_midi_byte(byte, from_web_or_usb);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_amy_process_single_midi_byte_obj, 1, 2, tulip_amy_process_single_midi_byte);
+
+// Drive a CV channel from a mod oscillator. The Tab5 has no CV jacks, but AMY's
+// test suite and any patch built on an AMYboard sketch expect the call to work.
+static mp_obj_t tulip_amy_set_cv_from_osc(mp_obj_t cv_channel_obj, mp_obj_t osc_obj) {
+    tab5_amy_require_audio();
+    set_cv_from_osc(mp_obj_get_int(cv_channel_obj), mp_obj_get_int(osc_obj));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(tulip_amy_set_cv_from_osc_obj, tulip_amy_set_cv_from_osc);
+
+// AMY's whole state as a replayable wire string. amy_dump_state_to_string()
+// mallocs, so the copy into a Python str has to be followed by a free.
+static mp_obj_t tulip_amy_dump_state(void) {
+    tab5_amy_require_audio();
+    int len = 0;
+    char *dump = amy_dump_state_to_string(&len);
+    if (dump == NULL) mp_raise_msg(&mp_type_MemoryError, NULL);
+    mp_obj_t result = mp_obj_new_str(dump, len);
+    free(dump);
+    return result;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_amy_dump_state_obj, tulip_amy_dump_state);
+
+// One block of interleaved stereo samples, as bytes. Sized from AMY's own
+// constants rather than a literal: the generated wrappers assume a 256-frame
+// stereo int16 block fits in 1KB, and it does exactly.
+#define TAB5_AMY_BLOCK_SAMPLES (AMY_BLOCK_SIZE * AMY_NCHANS)
+
+static mp_obj_t tulip_amy_get_output_buffer(void) {
+    tab5_amy_require_audio();
+    output_sample_type samples[TAB5_AMY_BLOCK_SAMPLES];
+    int n = amy_get_output_buffer(samples);
+    // 0 means amy_fill_buffer() has not run yet, so there is no block to read.
+    if (n == 0) return mp_const_none;
+    return mp_obj_new_bytes((const uint8_t *)samples, n);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_amy_get_output_buffer_obj, tulip_amy_get_output_buffer);
+
+// The audio-in block. The Tab5 renders with AMY_AUDIO_IS_NONE and feeds the
+// codec itself, so nothing fills this yet and it reads as silence -- it is bound
+// so that code written against the AMYboard runs here rather than raising.
+static mp_obj_t tulip_amy_get_input_buffer(void) {
+    tab5_amy_require_audio();
+    output_sample_type samples[TAB5_AMY_BLOCK_SAMPLES];
+    int n = amy_get_input_buffer(samples);
+    if (n == 0) return mp_const_none;
+    return mp_obj_new_bytes((const uint8_t *)samples, n);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_amy_get_input_buffer_obj, tulip_amy_get_input_buffer);
 
 static mp_obj_t tulip_midi_callback(size_t n_args, const mp_obj_t *args) {
     s_tab5_midi_cb = n_args == 0 ? mp_const_none : args[0];
@@ -1552,6 +1642,13 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_amy_render_load), MP_ROM_PTR(&tulip_amy_render_load_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_set_render_load_threshold), MP_ROM_PTR(&tulip_amy_set_render_load_threshold_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_send), MP_ROM_PTR(&tulip_amy_send_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_send_wire_from_sysex), MP_ROM_PTR(&tulip_amy_send_wire_from_sysex_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_bleep), MP_ROM_PTR(&tulip_amy_bleep_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_process_single_midi_byte), MP_ROM_PTR(&tulip_amy_process_single_midi_byte_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_set_cv_from_osc), MP_ROM_PTR(&tulip_amy_set_cv_from_osc_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_dump_state), MP_ROM_PTR(&tulip_amy_dump_state_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_get_output_buffer), MP_ROM_PTR(&tulip_amy_get_output_buffer_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_get_input_buffer), MP_ROM_PTR(&tulip_amy_get_input_buffer_obj) },
     { MP_ROM_QSTR(MP_QSTR_midi_callback), MP_ROM_PTR(&tulip_midi_callback_obj) },
     { MP_ROM_QSTR(MP_QSTR_midi_in), MP_ROM_PTR(&tulip_midi_in_obj) },
     { MP_ROM_QSTR(MP_QSTR_midi_out), MP_ROM_PTR(&tulip_midi_out_obj) },
