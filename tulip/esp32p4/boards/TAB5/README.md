@@ -117,3 +117,28 @@ ulab's own defaults apply (`ULAB_MAX_DIMS` 2, complex on, scipy on); override
 them with `add_compile_definitions()` in `mpconfigboard.cmake` if a sketch
 needs more dimensions or a smaller build. Note ulab's numpy is a subset --
 there is no `np.abs`, for instance.
+
+## matplotlib
+
+A small `matplotlib.pyplot` is frozen into the firmware and draws through the
+`tulip.bg_*` primitives, so it pairs directly with ulab -- ulab does the
+arrays, matplotlib draws them:
+
+```python
+from ulab import numpy as np
+import matplotlib.pyplot as plt
+
+x = np.linspace(0, 4 * np.pi, 300)
+plt.plot(x, np.sin(x), label='sin')
+plt.plot(x, np.cos(x), 'r--', label='cos')
+plt.grid(True); plt.legend()
+plt.full_screen(True)     # take the whole screen; full_screen(False) gives it back
+plt.show()
+```
+
+`tulip.run('plotdemo')` is a four-page tour. Full reference, including the
+documented deviations from upstream matplotlib, is in
+[docs/matplotlib.md](../../../../docs/matplotlib.md). The package lives in
+`tulip/shared/py/matplotlib/` and is named in this board's
+`boards/manifest.py`, which -- unlike the other ports -- lists its frozen
+files individually. It costs about 42 KB of app flash.

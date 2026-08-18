@@ -61,6 +61,12 @@ freeze("$(MPY_DIR)/../tulip/shared/py", (
 	"world_web.py",
 	"worldui.py",
 ))
+# matplotlib.pyplot, drawn with the tulip.bg_* primitives.  A package rather
+# than a module, so it needs package() -- the other ports freeze all of
+# shared/py with a bare freeze(<dir>), which walks subdirectories and picks
+# this up on its own; only this board lists its frozen files individually.
+package("matplotlib", base_path="$(MPY_DIR)/../tulip/shared/py")
+
 # AMYboard's python module, so Tulip can run AMYboard World sketches
 # (world.amyboard.download). CV helpers no-op on Tulip; I2C accessories work.
 freeze("$(MPY_DIR)/../tulip/shared/amyboard-py", "amyboard.py")

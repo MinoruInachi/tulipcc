@@ -250,6 +250,9 @@ class UIScreen():
         self.name = name
         self.alttab_button = None
         self.quit_button = None
+        # Only the REPL screen gets one, but draw_task_bar() has to be able to
+        # ask whether it already exists on any screen.
+        self.launcher_button = None
         self.alttab_cb_data = {}
         self.quit_cb_data = {}
         self.launcher_cb_data = {}
@@ -280,8 +283,15 @@ class UIScreen():
                 self.alttab_button.delete()
                 self.alttab_button = None
 
-        if(self.quit_button is None):
-            if(self.name != "repl"):
+        # Each branch guards on the button it actually creates. These used to
+        # share one `if self.quit_button is None` test, which the REPL branch
+        # never satisfies -- the REPL gets a launcher button, never a quit
+        # button -- so every present() of the REPL screen stacked another
+        # launcher button on top of the last one, complete with its own click
+        # handler. present() runs on boot, on every app quit and on every
+        # return from a script that borrowed the screen, so they piled up.
+        if(self.name != "repl"):
+            if(self.quit_button is None):
                 self.quit_button = lv.button(self.group)
                 self.quit_button.set_style_bg_color(pal_to_lv(128), lv.PART.MAIN)
                 self.quit_button.set_style_radius(0,lv.PART.MAIN)
@@ -290,7 +300,8 @@ class UIScreen():
                 _style_task_bar_button(self.quit_button, quit_label)
                 self.quit_button.align_to(self.alttab_button, lv.ALIGN.OUT_LEFT_MID,0,0)
                 self.quit_button.add_event_cb(self.screen_quit_callback, lv.EVENT.CLICKED, self.quit_cb_data)
-            else:
+        else:
+            if(self.launcher_button is None):
                 self.launcher_button = lv.button(self.group)
                 self.launcher_button.set_style_bg_color(pal_to_lv(36), lv.PART.MAIN)
                 self.launcher_button.set_style_radius(0,lv.PART.MAIN)
