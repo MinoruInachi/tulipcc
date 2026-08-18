@@ -402,6 +402,17 @@ Tulip CC has the capability to connect to a Wi-Fi network, and Python's native r
 # Join a wifi network (not needed on Tulip Desktop or Web)
 tulip.wifi("ssid", "password")
 
+# Set the Wi-Fi regulatory domain as you join. The default "01" (world safe mode)
+# leaves channels 12-14 closed, so an AP parked up there -- routers in Japan often
+# are -- stays invisible until you name its country. (Tab5 only for now.)
+tulip.wifi("ssid", "password", country="JP")
+
+# Read or set the regulatory domain on its own. Wi-Fi has to be started first,
+# so this is for after a tulip.wifi() call. A second argument of False pins the
+# country instead of letting the AP's own beacon override it.
+tulip.wifi_country()      # -> "JP"
+tulip.wifi_country("JP")
+
 # Get IP address or check if connected
 ip_address = tulip.ip() # returns None if not connected
 

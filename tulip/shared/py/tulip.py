@@ -490,13 +490,26 @@ def set_time():
     ntptime.settime()
 
 
-def wifi(ssid, passwd, wait_timeout=10):
-    import network, time
+def wifi(ssid, passwd, wait_timeout=10, country=None):
+    import network, time, _tulip
     if (not hasattr(network, 'WLAN')) or (not hasattr(network, 'STA_IF')):
         print("wifi is not available on this build")
         return None
     sta_if = network.WLAN(network.STA_IF)
     sta_if.active(True)
+    if country is not None:
+        # network.country() is not the call that does this on an ESP32: it only
+        # stores two bytes that the cyw43 (Pico W) driver reads, and nothing in
+        # the ESP-IDF path ever looks at them. The regulatory domain there goes
+        # through esp_wifi_set_country_code(), which is what _tulip.wifi_country()
+        # wraps -- and the default "01" (world safe mode) is what keeps channels
+        # 12-14 closed, so a JP AP parked up there is invisible until this runs.
+        # It has to come after active(True) started the driver and before
+        # connect(), or the scan never reaches those channels.
+        if hasattr(_tulip, 'wifi_country'):
+            _tulip.wifi_country(country)
+        elif hasattr(network, 'country'):
+            network.country(country)
     if board() == "TAB5":
         if sta_if.isconnected() and sta_if.config('ssid') == ssid:
             return sta_if.ifconfig()[0]

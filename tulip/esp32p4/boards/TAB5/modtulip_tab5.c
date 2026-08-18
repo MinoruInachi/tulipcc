@@ -8,6 +8,7 @@
 #include "esp_timer.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "../../../../amy/src/amy.h"
@@ -1500,6 +1501,40 @@ static mp_obj_t tulip_usb_host_power(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_usb_host_power_obj, 0, 1, tulip_usb_host_power);
 
+// Wi-Fi regulatory domain, set with no wifi country code and read back with
+// none. MicroPython's network.country() is not this: it only stores two bytes
+// that extmod/network_cyw43.c reads, and nothing in the ESP-IDF path ever looks
+// at them, so on this board it is silently a no-op. The stack takes its country
+// through esp_wifi_set_country_code(), and the default "01" (world safe mode)
+// is what keeps channels 12-14 closed -- a "JP" AP parked up there is invisible
+// to scan and connect until this is called.
+//
+// esp_wifi_init() has to have run first (network.WLAN().active(True)), and the
+// setting has to land before connect(). With ieee80211d left on, this is the
+// country used for scanning and the AP's own country IE takes over once
+// associated; pass False to pin it regardless of what the AP advertises.
+static mp_obj_t tulip_wifi_country(size_t n_args, const mp_obj_t *args) {
+    if (n_args == 0) {
+        // Two ISO letters plus the third octet, plus room for the terminator.
+        char code[4] = {0};
+        esp_err_t err = esp_wifi_get_country_code(code);
+        if (err != ESP_OK) {
+            mp_raise_msg(&mp_type_RuntimeError,
+                         MP_ERROR_TEXT("could not read the wifi country (is wifi started?)"));
+        }
+        return mp_obj_new_str(code, strlen(code));
+    }
+    const char *code = mp_obj_str_get_str(args[0]);
+    bool ieee80211d = (n_args > 1) ? mp_obj_is_true(args[1]) : true;
+    esp_err_t err = esp_wifi_set_country_code(code, ieee80211d);
+    if (err != ESP_OK) {
+        mp_raise_msg(&mp_type_RuntimeError,
+                     MP_ERROR_TEXT("could not set the wifi country (started? code supported?)"));
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_wifi_country_obj, 0, 2, tulip_wifi_country);
+
 // Last-resort on-screen error report for when the Python UI stack fails to come
 // up. Drawn through the text framebuffer, which display_tab5.c has running long
 // before MicroPython starts, so it still works when nothing else on screen does.
@@ -1726,6 +1761,7 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_key_wait), MP_ROM_PTR(&tulip_key_wait_obj) },
     { MP_ROM_QSTR(MP_QSTR_usb_status), MP_ROM_PTR(&tulip_usb_status_obj) },
     { MP_ROM_QSTR(MP_QSTR_usb_host_power), MP_ROM_PTR(&tulip_usb_host_power_obj) },
+    { MP_ROM_QSTR(MP_QSTR_wifi_country), MP_ROM_PTR(&tulip_wifi_country_obj) },
 };
 
 static MP_DEFINE_CONST_DICT(tulip_module_globals, tulip_module_globals_table);

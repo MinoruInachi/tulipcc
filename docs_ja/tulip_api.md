@@ -404,6 +404,17 @@ Tulip CC は Wi-Fi ネットワークに接続でき、Python 標準の requests
 # wifi ネットワークに接続します（Tulip Desktop と Web では不要）
 tulip.wifi("ssid", "password")
 
+# 接続と同時に Wi-Fi の規制ドメインを設定します。デフォルトの "01"（world safe
+# mode）ではチャンネル 12〜14 が閉じたままなので、そこにいる AP は（日本のルータ
+# ではよくあります）国コードを指定するまで見えません。（現状は Tab5 のみ）
+tulip.wifi("ssid", "password", country="JP")
+
+# 規制ドメインだけを読み書きします。Wi-Fi が起動している必要があるので、
+# tulip.wifi() を呼んだ後で使います。第 2 引数に False を渡すと、AP のビーコンに
+# 上書きさせずに国コードを固定します。
+tulip.wifi_country()      # -> "JP"
+tulip.wifi_country("JP")
+
 # IP アドレスを取得、または接続状態を確認します
 ip_address = tulip.ip() # 未接続なら None を返します
 
