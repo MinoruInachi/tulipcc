@@ -145,9 +145,20 @@ static int s_prev_band_y1 = TAB5_SHARED_RENDER_H;
 /* Panel refresh signal, so the loop paces to the display instead of a fixed
  * vTaskDelay stacked on top of however long the frame happened to take. */
 static SemaphoreHandle_t s_vsync_sem = NULL;
-/* Redraw at least this often even when nothing reported a change, so a missed
- * display_mark_dirty() shows up as a stale second, not a frozen screen. */
-#define TAB5_FORCED_REDRAW_FRAMES 30
+/* Redraw the panel even when nothing reported a change, so a missed
+ * display_mark_dirty() shows up as a stale second rather than a frozen screen --
+ * but a slice of it at a time. The display task is serial and a whole 720-row
+ * frame costs ~130ms of composite + convert + rotate, so redrawing all of it in
+ * one go parked every damage band behind a 130ms stall roughly once a second:
+ * drums.py's beat LEDs stopped following the sequencer for a third of a step,
+ * several times a bar. A slice is ~17ms, and eight of them one every four frames
+ * cover the screen in the same ~0.9s for the same rows per second. */
+#define TAB5_FORCED_SLICE_FRAMES 4
+#define TAB5_FORCED_SLICES 8
+#define TAB5_FORCED_SLICE_ROWS ((TAB5_SHARED_RENDER_H + TAB5_FORCED_SLICES - 1) / TAB5_FORCED_SLICES)
+/* A slice waits for a frame that has no damage of its own (see below). If every
+ * frame has some, it cannot wait for ever. */
+#define TAB5_FORCED_SLICE_MAX_FRAMES (TAB5_FORCED_SLICE_FRAMES * 8)
 static int s_provider_width = BSP_LCD_H_RES;
 static int s_provider_height = BSP_LCD_V_RES;
 static bool s_shared_provider_active = false;
@@ -482,23 +493,35 @@ static void tab5_render_bridge_tick_rotated(int band_y0, int band_y1)
      * write the live buffer. */
     void *target_fb = (s_dsi_fb_count > 1) ? s_dsi_fb[s_dsi_fb_next] : s_dsi_fb[0];
 
-    /* The back buffer is one frame behind, so it also needs whatever the
-     * previous frame changed -- otherwise a partial update would resurrect
-     * stale pixels every time the buffers alternate. */
-    if (s_dsi_fb_count > 1) {
-        const int prev_y0 = s_prev_band_y0;
-        const int prev_y1 = s_prev_band_y1;
-        s_prev_band_y0 = band_y0;
-        s_prev_band_y1 = band_y1;
-        if (prev_y1 > prev_y0) {
-            if (prev_y0 < band_y0) band_y0 = prev_y0;
-            if (prev_y1 > band_y1) band_y1 = prev_y1;
-        }
-    }
     if (band_y0 < 0) band_y0 = 0;
     if (band_y1 > s_provider_height) band_y1 = s_provider_height;
     if (band_y1 <= band_y0) {
         return;
+    }
+
+    /* The framebuffer that is not on screen is a frame behind, so it also needs
+     * the rows the previous frame changed, or a partial update resurrects stale
+     * pixels every time the two alternate. Only the rotate has to be repeated:
+     * the stage buffer is a persistent full-screen image, and nothing has
+     * touched those rows in it since they were composed. Keeping the two runs
+     * apart rather than unioning them is the point -- a safety slice at the top
+     * of the screen and a beat LED at the bottom used to redraw everything in
+     * between, 130ms of work for 130 rows of it. */
+    int prev_y0 = 0;
+    int prev_y1 = 0;
+    if (s_dsi_fb_count > 1) {
+        prev_y0 = s_prev_band_y0;
+        prev_y1 = s_prev_band_y1;
+        s_prev_band_y0 = band_y0;
+        s_prev_band_y1 = band_y1;
+        if (prev_y0 < 0) prev_y0 = 0;
+        if (prev_y1 > s_provider_height) prev_y1 = s_provider_height;
+        /* Touching or overlapping runs cost less as one rotate than two. */
+        if (prev_y1 > prev_y0 && prev_y0 <= band_y1 && prev_y1 >= band_y0) {
+            if (prev_y0 < band_y0) band_y0 = prev_y0;
+            if (prev_y1 > band_y1) band_y1 = prev_y1;
+            prev_y0 = prev_y1 = 0;
+        }
     }
     s_band_rows = (uint32_t)(band_y1 - band_y0);
 
@@ -542,6 +565,9 @@ static void tab5_render_bridge_tick_rotated(int band_y0, int band_y1)
     if (target_fb != NULL) {
         const int64_t t_rot = esp_timer_get_time();
         if (!tab5_ppa_rotate_to_fb(target_fb, band_y0, band_y1 - band_y0)) {
+            tab5_cpu_rotate_to_fb((uint16_t *)target_fb);
+        } else if (prev_y1 > prev_y0 &&
+                   !tab5_ppa_rotate_to_fb(target_fb, prev_y0, prev_y1 - prev_y0)) {
             tab5_cpu_rotate_to_fb((uint16_t *)target_fb);
         }
         const int64_t t_pres = esp_timer_get_time();
@@ -738,26 +764,40 @@ void run_tab5_display(void *arg)
 
     ESP_LOGI(TAG, "Tab5 display task is running (Tulip render bridge mode)");
     uint32_t frames_since_forced = 0;
+    int forced_slice = 0;
     while (1) {
         const int64_t busy_start_us = esp_timer_get_time();
 
         /* Recompose only when something said it changed. At the REPL nothing
          * does, and skipping frees the memory bandwidth that audio needs. */
-        const bool forced = (++frames_since_forced >= TAB5_FORCED_REDRAW_FRAMES);
+        frames_since_forced++;
         int band_y0 = 0;
         int band_y1 = TAB5_SHARED_RENDER_H;
         const bool have_damage = display_take_dirty_rows(&band_y0, &band_y1);
-        if (forced) {
-            /* Periodic safety redraw: a mutator that forgot to report its
-             * damage costs half a second of staleness, not a frozen screen.
-             * The counter resets only here, not on every band redraw -- doing
-             * that meant anything that damaged a few rows more often than
-             * twice a second (a blinking cursor, drums.py's beat LEDs)
-             * postponed the safety net forever, which is exactly when it is
-             * needed. */
-            band_y0 = 0;
-            band_y1 = TAB5_SHARED_RENDER_H;
+        /* Periodic safety redraw, one slice of the screen per turn. It waits
+         * for a frame with no damage of its own, because merging a slice with a
+         * band at the other end of the screen redraws everything in between --
+         * which is the whole-frame cost this is here to avoid. The counter
+         * resets only when a slice is actually drawn, so a busy screen delays
+         * the net rather than postponing it forever (which is what resetting on
+         * every band redraw used to do); past TAB5_FORCED_SLICE_MAX_FRAMES it
+         * merges anyway and accepts the one wide frame. */
+        bool forced = false;
+        if (frames_since_forced >= TAB5_FORCED_SLICE_FRAMES &&
+            (!have_damage || frames_since_forced >= TAB5_FORCED_SLICE_MAX_FRAMES)) {
+            const int slice_y0 = forced_slice * TAB5_FORCED_SLICE_ROWS;
+            int slice_y1 = slice_y0 + TAB5_FORCED_SLICE_ROWS;
+            if (slice_y1 > TAB5_SHARED_RENDER_H) slice_y1 = TAB5_SHARED_RENDER_H;
+            if (have_damage) {
+                if (slice_y0 < band_y0) band_y0 = slice_y0;
+                if (slice_y1 > band_y1) band_y1 = slice_y1;
+            } else {
+                band_y0 = slice_y0;
+                band_y1 = slice_y1;
+            }
+            forced_slice = (forced_slice + 1) % TAB5_FORCED_SLICES;
             frames_since_forced = 0;
+            forced = true;
         }
         if (have_damage || forced) {
             tab5_render_bridge_tick_rows(band_y0, band_y1);
