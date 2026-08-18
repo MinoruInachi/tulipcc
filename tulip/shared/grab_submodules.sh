@@ -11,6 +11,7 @@ else
     echo "Syncing submodules for first build..."
     git submodule update --init amy
     git submodule update --init micropython
+    git submodule update --init ulab
     cd micropython
     git submodule update --init lib/axtls
     git submodule update --init lib/libffi
@@ -20,6 +21,14 @@ else
     git submodule update --init lib/tinyusb
     cd ..
     touch .submodules_ok
+fi
+
+# ulab (numpy/scipy for MicroPython) arrived after .submodules_ok became a thing,
+# so checkouts that were already set up would never pick it up from the block
+# above. Init it whenever it is missing instead -- cheap, and idempotent.
+if [ ! -f "ulab/code/micropython.cmake" ]; then
+    echo "Fetching ulab submodule..."
+    git submodule update --init ulab
 fi
 
 # Patch micropython/mpy-cross/Makefile for newer Apple clang tightenings.

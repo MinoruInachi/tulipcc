@@ -8,6 +8,14 @@ set(MICROPY_PY_TINYUSB ON)
 
 get_filename_component(AMY_DIR ${MICROPY_BOARD_DIR}/../../../../amy ABSOLUTE)
 
+# ulab (numpy/scipy subset) as a MicroPython user C module. Built in rather than
+# passed on the idf.py command line so a plain `idf.py -DMICROPY_BOARD=TAB5
+# build` gets it; -DUSER_C_MODULES=... on the command line still wins.
+get_filename_component(ULAB_DIR ${MICROPY_BOARD_DIR}/../../../../ulab ABSOLUTE)
+if(NOT USER_C_MODULES AND EXISTS ${ULAB_DIR}/code/micropython.cmake)
+    set(USER_C_MODULES ${ULAB_DIR}/code/micropython.cmake)
+endif()
+
 set(BOARD_DEFINITION1 TAB5)
 set(BOARD_DEFINITION2 TAB5)
 

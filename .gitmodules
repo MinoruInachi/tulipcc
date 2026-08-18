@@ -9,3 +9,6 @@
 [submodule "tinycc"]
 	path = tinycc
 	url = https://github.com/TinyCC/tinycc
+[submodule "ulab"]
+	path = ulab
+	url = https://github.com/v923z/micropython-ulab

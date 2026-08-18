@@ -89,3 +89,31 @@ The following APIs are intentionally not exposed yet:
 - `display_clock`, `display_start`, `display_stop`, and `display_restart`: the
 	MIPI display task does not yet support safe runtime teardown and recreation.
 - Hardware MIDI APIs: no Tab5 MIDI transport backend is integrated yet.
+
+## ulab (numpy / scipy)
+
+The firmware links [ulab](https://github.com/v923z/micropython-ulab) as a
+MicroPython user C module, so `numpy`- and `scipy`-style array maths are
+available on the board:
+
+```python
+from ulab import numpy as np
+from ulab import scipy as sp
+
+x = np.sin(np.linspace(0, 2 * 3.14159, num=256, endpoint=False))
+X = np.fft.fft(x)              # complex ndarray -- this build has complex on
+np.linalg.inv(np.array([[4, 1], [1, 3]], dtype=np.float))
+sp.optimize.newton(lambda v: v * v - 2.0, 1.0, tol=1e-6, rtol=1e-6)
+```
+
+`ulab` lives in the `ulab` submodule at the repo root and is wired in by
+`mpconfigboard.cmake`, which points `USER_C_MODULES` at
+`ulab/code/micropython.cmake`. That is a default, not a hard-code:
+`idf.py -DUSER_C_MODULES=... build` still wins, and the build falls back to no
+user modules when the submodule is not checked out. It costs about 150 KB of
+app flash.
+
+ulab's own defaults apply (`ULAB_MAX_DIMS` 2, complex on, scipy on); override
+them with `add_compile_definitions()` in `mpconfigboard.cmake` if a sketch
+needs more dimensions or a smaller build. Note ulab's numpy is a subset --
+there is no `np.abs`, for instance.

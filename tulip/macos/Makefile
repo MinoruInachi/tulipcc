@@ -44,6 +44,14 @@ FROZEN_MANIFEST ?= variants/manifest.py
 # This should be configured by the mpconfigvariant.mk
 PROG = tulip.$(WHICH_ARCH)
 
+# ulab (numpy/scipy subset) as a user C module. py.mk globs
+# $(USER_C_MODULES)/*/micropython.mk, so this points at the submodule root and
+# picks up ulab/code/micropython.mk. Must be set before py.mk is included.
+# Guarded so a checkout without the submodule still builds.
+ifneq ($(wildcard $(TOP)/../ulab/code/micropython.mk),)
+USER_C_MODULES = $(TOP)/../ulab
+endif
+
 # qstr definitions (must come before including py.mk)
 QSTR_DEFS = $(TOP)/ports/unix/qstrdefsport.h
 QSTR_GLOBAL_DEPENDENCIES = $(VARIANT_DIR)/mpconfigvariant.h
