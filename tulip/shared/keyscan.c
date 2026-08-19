@@ -16,6 +16,50 @@ uint8_t last_scan[8] = {0,0,0,0,0,0,0,0};
 // Keep track of key_remaps
 key_remap key_remaps[MAX_KEY_REMAPS];
 
+/*
+ * The Japanese IME's key queue.
+ *
+ * While ime_active the key path hands every key to the IME and to nothing else --
+ * not the REPL, not LVGL, not the editor -- because a key the IME is going to
+ * turn into part of 「日本語」 must not also arrive somewhere as a Latin letter.
+ * The IME itself is Python (shared/py/ime.py): the dictionary is a deflate stream
+ * that only MicroPython's deflate module can open, and once the dictionary is in
+ * Python the conversion belongs there too.
+ *
+ * A queue rather than a callback per key, because mp_sched_schedule() silently
+ * fails when its queue is full and MICROPY_SCHEDULER_DEPTH is 4. Keys land here
+ * from the keyboard task and the IME drains them from a callback scheduled once
+ * per frame, so a full scheduler queue costs a frame of latency instead of a lost
+ * keystroke. 64 is far more than the deepest burst a person can type in 16ms.
+ */
+uint8_t ime_active = 0;
+#define IME_KEY_RING 64
+static volatile uint16_t ime_ring[IME_KEY_RING];
+static volatile uint8_t ime_ring_w = 0;
+static volatile uint8_t ime_ring_r = 0;
+
+void ime_push_key(uint16_t key) {
+    uint8_t next = (uint8_t)((ime_ring_w + 1) % IME_KEY_RING);
+    // Full. Drop the newest rather than advancing the read pointer: losing the
+    // key just pressed is confusing, but losing one from the middle of a
+    // half-composed reading is worse.
+    if(next == ime_ring_r) return;
+    ime_ring[ime_ring_w] = key;
+    ime_ring_w = next;
+}
+
+// -1 when the queue is empty.
+int32_t ime_take_key(void) {
+    if(ime_ring_r == ime_ring_w) return -1;
+    uint16_t key = ime_ring[ime_ring_r];
+    ime_ring_r = (uint8_t)((ime_ring_r + 1) % IME_KEY_RING);
+    return (int32_t)key;
+}
+
+void ime_flush_keys(void) {
+    ime_ring_r = ime_ring_w;
+}
+
 
 // Go _FROM_ cp437 to utf8 bytes
 const uint8_t cp437_to_utf8[] = {
@@ -491,7 +535,28 @@ uint16_t scan_ascii(uint8_t code, uint32_t modifier) {
 extern int16_t lvgl_is_repl;
 extern mp_obj_t keyboard_callback, ui_quit_callback, ui_switch_callback;
 
-void send_key_to_micropython(uint16_t c) {
+// allow_ime is false for keys the IME itself is forwarding on to the app. Without
+// it, tulip.key_send() would hand every forwarded key straight back to the IME.
+extern mp_obj_t ime_callback;
+static void deliver_key(uint16_t c, uint8_t allow_ime) {
+    // The IME comes before everything except the interrupt char: a key it is
+    // going to fold into a Japanese character must not also reach the REPL as a
+    // Latin letter. Ctrl-C still gets through, so a wedged IME is escapable.
+    if(allow_ime && c != mp_interrupt_char) {
+        if(c == TULIP_IME_TOGGLE && ime_callback != NULL) {
+            // Arm the flag so the frame ISR starts scheduling the drain, then let
+            // the IME see the key and decide whether this turned it on or off --
+            // it has a preedit line to clean up on the way out. Ignored entirely
+            // when no IME is loaded, so this key cannot deafen the keyboard.
+            ime_active = 1;
+            ime_push_key(c);
+            return;
+        }
+        if(ime_active) {
+            ime_push_key(c);
+            return;
+        }
+    }
     // handle the global system hotkeys before anything else. we have two, ctrl-tab and ctrl-q 
     if(c==17) {
         if(ui_quit_callback != NULL) 
@@ -527,6 +592,15 @@ void send_key_to_micropython(uint16_t c) {
             }
         }
     }
+}
+
+void send_key_to_micropython(uint16_t c) {
+    deliver_key(c, 1);
+}
+
+// What tulip.key_send() calls: injection, and the path the IME forwards through.
+void send_key_to_micropython_no_ime(uint16_t c) {
+    deliver_key(c, 0);
 }
 
 #endif // !TAB5

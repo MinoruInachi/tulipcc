@@ -52,7 +52,9 @@ SYSTEM_HOME = "../fs/%s" % (fs_source)
 
 # Copy over only these extensions (compared case-insensitively, so .MID
 # and .mid both match).
-good_exts = [".txt", ".png", ".py", ".json", ".obj", ".wav", ".mid"]
+# .z is the IME dictionary (fs/tulip/ime/jdic.z), a deflate stream rather than
+# anything readable -- see shared/gen_jdict.py.
+good_exts = [".txt", ".png", ".py", ".json", ".obj", ".wav", ".mid", ".z"]
 # And these folders
 source_folders = ['app','ex','im']
 

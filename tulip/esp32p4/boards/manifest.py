@@ -27,6 +27,7 @@ freeze("$(MPY_DIR)/../tulip/shared/py", (
 	"chunk.py",
 	"drums.py",
 	"editor.py",
+	"ime.py",
 	"juno6.py",
 	"learn_midi_codes.py",
 	"m58angle.py",

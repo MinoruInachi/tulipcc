@@ -41,12 +41,14 @@ MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_frame_cb);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_frame_arg);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_touch_cb);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_midi_cb);
+MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_ime_cb);
 
 #define s_tab5_process_defers_cb MP_STATE_PORT(tab5_process_defers_cb)
 #define s_tab5_frame_cb MP_STATE_PORT(tab5_frame_cb)
 #define s_tab5_frame_arg MP_STATE_PORT(tab5_frame_arg)
 #define s_tab5_touch_cb MP_STATE_PORT(tab5_touch_cb)
 #define s_tab5_midi_cb MP_STATE_PORT(tab5_midi_cb)
+#define s_tab5_ime_cb MP_STATE_PORT(tab5_ime_cb)
 
 static void tab5_process_python_defers(void) {
     nlr_buf_t nlr;
@@ -84,6 +86,14 @@ void tulip_frame_isr(void) {
     }
     if (s_tab5_frame_cb != MP_OBJ_NULL && s_tab5_frame_cb != mp_const_none &&
         mp_sched_schedule(s_tab5_frame_cb, s_tab5_frame_arg)) {
+        mp_hal_wake_main_task();
+    }
+    // The IME drains its key queue from here rather than being called once per
+    // key: mp_sched_schedule() fails silently when its queue is full, and this way
+    // that costs a frame of latency instead of a keystroke. It has its own slot
+    // because tulip.frame_callback() is a single slot that belongs to the app.
+    if (ime_active && s_tab5_ime_cb != MP_OBJ_NULL && s_tab5_ime_cb != mp_const_none &&
+        mp_sched_schedule(s_tab5_ime_cb, mp_const_none)) {
         mp_hal_wake_main_task();
     }
 }
@@ -1024,6 +1034,15 @@ static mp_obj_t tulip_tfb_font(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_tfb_font_obj, 0, 1, tulip_tfb_font);
 
+// tulip.tfb_size() -> (columns, rows) actually on screen in the current font.
+static mp_obj_t tulip_tfb_size(void) {
+    mp_obj_t tuple[2];
+    tuple[0] = mp_obj_new_int(display_tfb_visible_cols());
+    tuple[1] = mp_obj_new_int(display_tfb_visible_rows());
+    return mp_obj_new_tuple(2, tuple);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_tfb_size_obj, tulip_tfb_size);
+
 // The raw HID scan codes currently held down: the modifier byte, then the six
 // rollover slots. usb_host_tab5.c copies every keyboard report into last_scan,
 // so this is the same view the S3 gives. tulip.joyk() is built on it, and
@@ -1338,7 +1357,30 @@ static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_keyboard_callback_obj, 0, 1, tu
 
 extern int mp_interrupt_char;
 
-bool tab5_keyboard_deliver_key(uint16_t key) {
+// allow_ime is false for keys the IME itself is forwarding on to the app. Without
+// it, tulip.key_send() would hand every forwarded key straight back to the IME.
+static bool tab5_deliver_key(uint16_t key, bool allow_ime) {
+    // The IME comes before everything except the interrupt char. A key it is
+    // going to fold into a Japanese character must not also arrive at the REPL,
+    // LVGL or the editor as a Latin letter, so this returns "consumed" and the
+    // caller skips the LVGL indev too. Ctrl-C still gets through, which is what
+    // makes a wedged IME escapable.
+    if (allow_ime && key != mp_interrupt_char) {
+        if (key == TULIP_IME_TOGGLE && s_tab5_ime_cb != MP_OBJ_NULL &&
+            s_tab5_ime_cb != mp_const_none) {
+            // Arm the flag so the frame ISR starts scheduling the drain, then let
+            // the IME see the key and decide whether this turned it on or off --
+            // it has a preedit line to clean up on the way out. Ignored entirely
+            // when no IME is loaded, so this key cannot deafen the keyboard.
+            ime_active = 1;
+            ime_push_key(key);
+            return true;
+        }
+        if (ime_active) {
+            ime_push_key(key);
+            return true;
+        }
+    }
     bool callback_consumed = _tab5_keyboard_cb != MP_OBJ_NULL && _tab5_keyboard_cb != mp_const_none;
     if (callback_consumed) {
         mp_sched_schedule(_tab5_keyboard_cb, mp_obj_new_int(key));
@@ -1368,16 +1410,24 @@ bool tab5_keyboard_deliver_key(uint16_t key) {
     return callback_consumed;
 }
 
+bool tab5_keyboard_deliver_key(uint16_t key) {
+    return tab5_deliver_key(key, true);
+}
+
 // Inject a key as if the hardware keyboard had produced it -- what ui.py's soft
 // keyboard types with. This is the same entry point tulip_key_send() uses on the
 // other boards (send_key_to_micropython); it stops one step short of LVGL's
 // keypad indev, exactly as that one does, because a soft keyboard bound to an
 // LVGL text area already feeds it directly.
-static mp_obj_t tulip_key_send(mp_obj_t key_obj) {
-    tab5_keyboard_deliver_key((uint16_t)mp_obj_get_int(key_obj));
+// tulip.key_send(key) -- goes through the IME, so ui.py's on-screen keyboard can
+// type Japanese too. tulip.key_send(key, False) skips it, which is how the IME
+// forwards the keys it decided not to eat; without that it would feed itself.
+static mp_obj_t tulip_key_send(size_t n_args, const mp_obj_t *args) {
+    bool allow_ime = (n_args > 1) ? mp_obj_is_true(args[1]) : true;
+    tab5_deliver_key((uint16_t)mp_obj_get_int(args[0]), allow_ime);
     return mp_const_none;
 }
-static MP_DEFINE_CONST_FUN_OBJ_1(tulip_key_send_obj, tulip_key_send);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_key_send_obj, 1, 2, tulip_key_send);
 
 /*
  * Keyboard remapping, for the USB-A keyboard.
@@ -1437,6 +1487,68 @@ static mp_obj_t tulip_key_remaps_clear(void) {
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(tulip_key_remaps_clear_obj, tulip_key_remaps_clear);
+
+/*
+ * The Japanese IME's C side, which is only plumbing -- the engine is
+ * shared/py/ime.py. Three things have to happen in C and nothing else does:
+ * keys have to be taken away from the REPL/LVGL/editor synchronously, they have
+ * to be queued so a full scheduler queue cannot lose one, and committed text has
+ * to reach whatever has focus.
+ */
+
+// tulip.ime(True/False) -> take over the keyboard / hand it back
+// tulip.ime() -> is the IME holding the keyboard?
+static mp_obj_t tulip_ime(size_t n_args, const mp_obj_t *args) {
+    if (n_args == 0) return mp_obj_new_bool(ime_active);
+    uint8_t want = mp_obj_is_true(args[0]) ? 1 : 0;
+    if (!want) {
+        // Anything still queued was typed at the IME, so it is not text the app
+        // underneath asked for. Drop it rather than replaying it as Latin.
+        ime_flush_keys();
+    }
+    ime_active = want;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_ime_obj, 0, 1, tulip_ime);
+
+// tulip.ime_callback(fn) -- scheduled once per frame while the IME is active, to
+// drain the key queue. Its own slot, so it does not take tulip.frame_callback().
+static mp_obj_t tulip_ime_callback(size_t n_args, const mp_obj_t *args) {
+    s_tab5_ime_cb = (n_args > 0) ? args[0] : mp_const_none;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_ime_callback_obj, 0, 1, tulip_ime_callback);
+
+// tulip.ime_key() -> the next queued key code, or None when the queue is empty.
+static mp_obj_t tulip_ime_key(void) {
+    int32_t key = ime_take_key();
+    if (key < 0) return mp_const_none;
+    return mp_obj_new_int(key);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_ime_key_obj, tulip_ime_key);
+
+extern void editor_insert_string(const char *text);
+
+// tulip.editor_insert("日本語") -- commit text into the editor at its cursor.
+// The per-key path inserts one byte, which cannot carry a Japanese character.
+static mp_obj_t tulip_editor_insert(mp_obj_t text_obj) {
+    editor_insert_string(mp_obj_str_get_str(text_obj));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tulip_editor_insert_obj, tulip_editor_insert);
+
+// tulip.key_send_str("日本語") -- push text into the REPL's input as if typed.
+// One tx_char() per byte: stdin_ringbuf is a byte ring, so UTF-8 goes in fine.
+// Whether the REPL then accepts it is readline's business, not ours.
+static mp_obj_t tulip_key_send_str(mp_obj_t text_obj) {
+    size_t len = 0;
+    const char *text = mp_obj_str_get_data(text_obj, &len);
+    for (size_t i = 0; i < len; i++) {
+        tx_char((unsigned char)text[i]);
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tulip_key_send_str_obj, tulip_key_send_str);
 
 // Block for one key and report what produced it: (character, scan code,
 // modifier). tulip.remap() uses this to learn a key before remapping it.
@@ -1741,6 +1853,7 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_collisions), MP_ROM_PTR(&tulip_collisions_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_str), MP_ROM_PTR(&tulip_tfb_str_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_font), MP_ROM_PTR(&tulip_tfb_font_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tfb_size), MP_ROM_PTR(&tulip_tfb_size_obj) },
     { MP_ROM_QSTR(MP_QSTR_keys), MP_ROM_PTR(&tulip_keys_obj) },
     { MP_ROM_QSTR(MP_QSTR_touch), MP_ROM_PTR(&tulip_touch_obj) },
     { MP_ROM_QSTR(MP_QSTR_touch_delta), MP_ROM_PTR(&tulip_touch_delta_obj) },
@@ -1773,6 +1886,11 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_key_send), MP_ROM_PTR(&tulip_key_send_obj) },
     { MP_ROM_QSTR(MP_QSTR_key_remap), MP_ROM_PTR(&tulip_key_remap_obj) },
     { MP_ROM_QSTR(MP_QSTR_key_remaps_clear), MP_ROM_PTR(&tulip_key_remaps_clear_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ime), MP_ROM_PTR(&tulip_ime_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ime_callback), MP_ROM_PTR(&tulip_ime_callback_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ime_key), MP_ROM_PTR(&tulip_ime_key_obj) },
+    { MP_ROM_QSTR(MP_QSTR_editor_insert), MP_ROM_PTR(&tulip_editor_insert_obj) },
+    { MP_ROM_QSTR(MP_QSTR_key_send_str), MP_ROM_PTR(&tulip_key_send_str_obj) },
     { MP_ROM_QSTR(MP_QSTR_key_wait), MP_ROM_PTR(&tulip_key_wait_obj) },
     { MP_ROM_QSTR(MP_QSTR_usb_status), MP_ROM_PTR(&tulip_usb_status_obj) },
     { MP_ROM_QSTR(MP_QSTR_usb_host_power), MP_ROM_PTR(&tulip_usb_host_power_obj) },

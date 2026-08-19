@@ -34,6 +34,24 @@ uint8_t convert_ucs_to_utf8(uint16_t ucs, char *out);
 uint8_t convert_uc16_to_cp437(uint16_t code);
 uint32_t keycode_to_ctrl_key(uint16_t key);
 
+// The Japanese IME key queue. See the comment in keyscan.c.
+//
+// The key that hands the keyboard to the IME and takes it back, handled in the
+// key path itself so it works no matter who owns the keyboard. Ctrl-\ (FS)
+// because it is the one control code nothing in Tulip already means something by:
+// Ctrl-Q and Ctrl-Tab are the global hotkeys, Ctrl-C interrupts, Ctrl-D resets,
+// and the editor has most of the rest. A JIS keyboard's own 変換 or 半角/全角 key
+// can be pointed at it from boot.py:
+//
+//     tulip.key_remap(0x8a, 0, 0x1c)   # 変換
+//     tulip.key_remap(0x35, 0, 0x1c)   # 半角/全角 (JIS position)
+#define TULIP_IME_TOGGLE 0x1c
+
+extern uint8_t ime_active;
+void ime_push_key(uint16_t key);
+int32_t ime_take_key(void);
+void ime_flush_keys(void);
+
 #define MAX_KEY_REMAPS 64
 
 typedef struct key_remap {

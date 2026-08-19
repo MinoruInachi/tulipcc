@@ -873,6 +873,15 @@ STATIC mp_obj_t tulip_tfb_font(size_t n_args, const mp_obj_t *args) {
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_tfb_font_obj, 0, 1, tulip_tfb_font);
 
+// tulip.tfb_size() -> (columns, rows) actually on screen in the current font.
+STATIC mp_obj_t tulip_tfb_size(size_t n_args, const mp_obj_t *args) {
+    mp_obj_t tuple[2];
+    tuple[0] = mp_obj_new_int(display_tfb_visible_cols());
+    tuple[1] = mp_obj_new_int(display_tfb_visible_rows());
+    return mp_obj_new_tuple(2, tuple);
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_tfb_size_obj, 0, 0, tulip_tfb_size);
+
 // fps = tulip.fps()
 STATIC mp_obj_t tulip_fps(size_t n_args, const mp_obj_t *args) {
     return mp_obj_new_float_from_f(reported_fps);
@@ -1159,6 +1168,8 @@ void mp_schedule_lv() {
     mp_sched_schedule((mp_obj_t)&mp_lv_task_handler_obj, mp_const_none);
 }
 
+mp_obj_t ime_callback = NULL;
+
 void tulip_frame_isr() {
     mp_schedule_lv();
     if(frame_callback != NULL) {
@@ -1168,6 +1179,13 @@ void tulip_frame_isr() {
 #ifdef ESP_PLATFORM
         //mp_hal_wake_main_task_from_isr();
 #endif
+    }
+    // The IME drains its key queue from here rather than being called once per
+    // key: mp_sched_schedule() fails silently when its queue is full, and this way
+    // that costs a frame of latency instead of a keystroke. It has its own slot
+    // because tulip.frame_callback() is a single slot that belongs to the app.
+    if(ime_active && ime_callback != NULL) {
+        mp_sched_schedule(ime_callback, mp_const_none);
     }
 }
 
@@ -1600,12 +1618,82 @@ STATIC mp_obj_t tulip_key_scan(size_t n_args, const mp_obj_t *args) {
 STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_key_scan_obj, 1, 1, tulip_key_scan);
 
 void send_key_to_micropython(uint16_t key);
+void send_key_to_micropython_no_ime(uint16_t key);
+// tulip.key_send(key) -- goes through the IME, so ui.py's on-screen keyboard can
+// type Japanese too. tulip.key_send(key, False) skips it, which is how the IME
+// forwards the keys it decided not to eat; without that it would feed itself.
 STATIC mp_obj_t tulip_key_send(size_t n_args, const mp_obj_t *args) {
+    if(n_args > 1 && !mp_obj_is_true(args[1])) {
+        send_key_to_micropython_no_ime(mp_obj_get_int(args[0]));
+        return mp_const_none;
+    }
     send_key_to_micropython(mp_obj_get_int(args[0]));
     return mp_const_none;
 }
 
-STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_key_send_obj, 1, 1, tulip_key_send);
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_key_send_obj, 1, 2, tulip_key_send);
+
+/*
+ * The Japanese IME's C side, which is only plumbing -- the engine is
+ * shared/py/ime.py. Three things have to happen in C and nothing else does:
+ * keys have to be taken away from the REPL/LVGL/editor synchronously, they have
+ * to be queued so a full scheduler queue cannot lose one, and committed text has
+ * to reach whatever has focus.
+ */
+
+// tulip.ime(True/False) -> take over the keyboard / hand it back
+// tulip.ime() -> is the IME holding the keyboard?
+STATIC mp_obj_t tulip_ime(size_t n_args, const mp_obj_t *args) {
+    if(n_args == 0) return mp_obj_new_bool(ime_active);
+    uint8_t want = mp_obj_is_true(args[0]) ? 1 : 0;
+    if(!want) {
+        // Anything still queued was typed at the IME, so it is not text the app
+        // underneath asked for. Drop it rather than replaying it as Latin.
+        ime_flush_keys();
+    }
+    ime_active = want;
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_ime_obj, 0, 1, tulip_ime);
+
+// tulip.ime_callback(fn) -- scheduled once per frame while the IME is active, to
+// drain the key queue. Its own slot, so it does not take tulip.frame_callback().
+STATIC mp_obj_t tulip_ime_callback(size_t n_args, const mp_obj_t *args) {
+    ime_callback = (n_args > 0) ? args[0] : NULL;
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_ime_callback_obj, 0, 1, tulip_ime_callback);
+
+// tulip.ime_key() -> the next queued key code, or None when the queue is empty.
+STATIC mp_obj_t tulip_ime_key(size_t n_args, const mp_obj_t *args) {
+    int32_t key = ime_take_key();
+    if(key < 0) return mp_const_none;
+    return mp_obj_new_int(key);
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_ime_key_obj, 0, 0, tulip_ime_key);
+
+extern void editor_insert_string(const char *text);
+
+// tulip.editor_insert("日本語") -- commit text into the editor at its cursor.
+// The per-key path inserts one byte, which cannot carry a Japanese character.
+STATIC mp_obj_t tulip_editor_insert(size_t n_args, const mp_obj_t *args) {
+    editor_insert_string(mp_obj_str_get_str(args[0]));
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_editor_insert_obj, 1, 1, tulip_editor_insert);
+
+// tulip.key_send_str("日本語") -- push text into the REPL's input as if typed.
+// One tx_char() per byte: stdin_ringbuf is a byte ring, so UTF-8 goes in fine.
+// Whether the REPL then accepts it is readline's business, not ours.
+STATIC mp_obj_t tulip_key_send_str(size_t n_args, const mp_obj_t *args) {
+    size_t len = 0;
+    const char *text = mp_obj_str_get_data(args[0], &len);
+    for(size_t i=0;i<len;i++) {
+        tx_char((unsigned char)text[i]);
+    }
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_key_send_str_obj, 1, 1, tulip_key_send_str);
 
 
 STATIC mp_obj_t tulip_bg_bezier(size_t n_args, const mp_obj_t *args) {
@@ -1862,6 +1950,7 @@ STATIC const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_tfb_restore), MP_ROM_PTR(&tulip_tfb_restore_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_update), MP_ROM_PTR(&tulip_tfb_update_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_font), MP_ROM_PTR(&tulip_tfb_font_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tfb_size), MP_ROM_PTR(&tulip_tfb_size_obj) },
     { MP_ROM_QSTR(MP_QSTR_fps), MP_ROM_PTR(&tulip_fps_obj) },
     { MP_ROM_QSTR(MP_QSTR_gpu), MP_ROM_PTR(&tulip_gpu_obj) },
     { MP_ROM_QSTR(MP_QSTR_bg_pixel), MP_ROM_PTR(&tulip_bg_pixel_obj) },
@@ -1904,6 +1993,11 @@ STATIC const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_key), MP_ROM_PTR(&tulip_key_obj) },
     { MP_ROM_QSTR(MP_QSTR_key_scan), MP_ROM_PTR(&tulip_key_scan_obj) },
     { MP_ROM_QSTR(MP_QSTR_key_send), MP_ROM_PTR(&tulip_key_send_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ime), MP_ROM_PTR(&tulip_ime_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ime_callback), MP_ROM_PTR(&tulip_ime_callback_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ime_key), MP_ROM_PTR(&tulip_ime_key_obj) },
+    { MP_ROM_QSTR(MP_QSTR_editor_insert), MP_ROM_PTR(&tulip_editor_insert_obj) },
+    { MP_ROM_QSTR(MP_QSTR_key_send_str), MP_ROM_PTR(&tulip_key_send_str_obj) },
     { MP_ROM_QSTR(MP_QSTR_gpu_reset), MP_ROM_PTR(&tulip_gpu_reset_obj) },
     { MP_ROM_QSTR(MP_QSTR_bg_circle), MP_ROM_PTR(&tulip_bg_circle_obj) },
     { MP_ROM_QSTR(MP_QSTR_bg_bezier), MP_ROM_PTR(&tulip_bg_bezier_obj) },

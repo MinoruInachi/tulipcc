@@ -596,6 +596,31 @@ void editor_insert_character(int c) {
 	move_cursor(cursor_x+1, cursor_y);
 }
 
+// Insert a whole UTF-8 string at the cursor. editor_insert_character() takes one
+// byte and is what the keyboard drives; the IME commits several bytes at once --
+// 「日本語」 is nine of them and three characters -- and going through the
+// per-byte path would leave the line mid-sequence between calls and repaint it
+// three times.
+void editor_insert_string(const char *text) {
+    if(text == NULL || text[0] == 0) return;
+    // This is reachable from Python as tulip.editor_insert(), so it has to be
+    // safe when no editor is running rather than trusting the caller.
+    if(text_lines == NULL || lines == 0 || (uint16_t)(cursor_y + y_offset) >= lines) return;
+    dirty = 1;
+    char *source_line = text_lines[cursor_y + y_offset];
+    uint16_t source_len = strlen(source_line);
+    uint16_t add = strlen(text);
+    char *dest_line = (char*)editor_malloc(source_len + add + 1);
+    memcpy(dest_line, source_line, cursor_x);
+    memcpy(dest_line + cursor_x, text, add);
+    memcpy(dest_line + cursor_x + add, source_line + cursor_x, source_len - cursor_x);
+    dest_line[source_len + add] = 0;
+    editor_free(source_line);
+    text_lines[cursor_y + y_offset] = dest_line;
+    string_at_row(dest_line, -1, cursor_y);
+    move_cursor(cursor_x + add, cursor_y);
+}
+
 void editor_linestart() {
 	move_cursor(0, cursor_y);
 }

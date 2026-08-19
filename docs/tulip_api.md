@@ -379,6 +379,68 @@ def touch_callback(up):
 tulip.touch_callback(cb)
 ```
 
+### Japanese input (IME)
+
+`ime` is a Japanese input method: romaji in, kana and kanji out. It needs the
+Japanese console font, so it is on the boards that have that -- Tab5, Tulip
+Desktop and Tulip Web -- and not on the ESP32-S3 ones. Put this in `boot.py`:
+
+```python
+import ime
+ime.start()
+```
+
+`Ctrl-\` then hands the keyboard to the IME and takes it back. On a JIS keyboard
+you can point its own key at that instead, from `boot.py`:
+
+```python
+tulip.key_remap(0x8a, 0, 0x1c)   # 変換 key
+tulip.key_remap(0x35, 0, 0x1c)   # 半角/全角 key, JIS position
+```
+
+While the IME holds the keyboard, what you type appears on a 変換 strip along the
+bottom console row rather than going straight into the line -- committed text is
+what reaches the editor, an LVGL text area, or the REPL. Typing:
+
+| key | while typing a reading | while a segment is converted |
+|---|---|---|
+| `a`-`z` | romaji, becoming kana as it resolves | commits, then starts a new reading |
+| space | convert the longest reading the dictionary knows | next candidate |
+| ↑ / ↓ | — | previous / next candidate |
+| → | — | accept this segment, convert what is left |
+| ← | — | shrink the segment by one kana |
+| return | commit the kana as typed | commit the candidate |
+| backspace | delete one kana | back to the unconverted reading |
+| escape | throw the whole thing away | back to the unconverted reading |
+| `,` `.` `-` `[` `]` `/` | become 、 。 ー 「 」 ・ | |
+| `A`-`Z`, digits | commit, then pass through | commit, then pass through |
+
+`nn` is not ん. `n` before anything that cannot continue な行 is, so `kanji` is
+かんじ and `konnichiwa` is こんにちわ; `n'` is the explicit single ん, which is also
+how you type ほんや (`hon'ya`, since `honya` is ほにゃ).
+
+The conversion is per-segment, not per-sentence: there is no morphological
+analyser here, so space converts the longest reading the dictionary has from where
+you are and → moves on to the rest. `にほんごにゅうりょく` + space + → + return gives
+日本語入力.
+
+Katakana and hiragana are always offered as the last two candidates, so anything
+the dictionary does not have can still be set -- press space and cycle to them.
+
+```python
+ime.start()                  # arm it, and load the dictionary (about 2 seconds)
+ime.start(False)             # arm it without the dictionary: kana only
+ime.stop()                   # disarm; the keyboard goes back to normal
+ime.target(my_textarea)      # send committed text to this instead of guessing
+ime.target(None)             # back to guessing: LVGL focus, else editor, else REPL
+tulip.ime()                  # is the IME holding the keyboard right now?
+```
+
+The dictionary is `/sys/ime/jdic.z`: 59073 readings, built from the Google mozc
+OSS dictionary (BSD-3-Clause, vocabulary from IPAdic) by
+`tulip/shared/gen_jdict.py`. It is not SKK-JISYO, which is the obvious choice and
+is GPL. Without it the IME still does kana.
+
 ## I2C / Grove / Mabee
 
 Tulip hardware has a I2C port on the side for connecting a variety of input or output devices. We currently support the following:

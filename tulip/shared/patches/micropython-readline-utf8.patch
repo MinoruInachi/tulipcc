@@ -1,0 +1,282 @@
+diff --git a/shared/readline/readline.c b/shared/readline/readline.c
+index f44f6cca4..8bf1df364 100644
+--- a/shared/readline/readline.c
++++ b/shared/readline/readline.c
+@@ -106,10 +106,99 @@ typedef struct _readline_t {
+     uint8_t auto_indent_state;
+     #endif
+     const char *prompt;
++    // TULIP_READLINE_UTF8: a multibyte character arrives one byte per call, and
++    // is held here until it is complete so that it can be inserted and echoed in
++    // one piece. See tulip/shared/patches/micropython-readline-utf8.patch.
++    char utf8_buf[4];
++    uint8_t utf8_len;
++    uint8_t utf8_need;
+ } readline_t;
+ 
+ static readline_t rl;
+ 
++/* TULIP_READLINE_UTF8
++ *
++ * Upstream readline is bytes all the way through: it accepts only 32..126 as
++ * printable, moves the cursor one byte at a time, and passes byte counts to
++ * mp_hal_move_cursor_back() as though a byte were a column. None of that holds
++ * for Japanese, where a character is three bytes and two columns, so the REPL
++ * simply dropped it -- which is what stopped Tulip's IME from typing at the
++ * prompt (tulip/shared/py/ime.py).
++ *
++ * What is added: cursor_pos stays a byte index, but a step is now a whole
++ * character, and a line that contains any byte over 0x7f is redrawn whole rather
++ * than by byte arithmetic. A pure ASCII line takes the original path unchanged,
++ * byte for byte, so the REPL everyone already uses is not touched.
++ */
++static bool rl_utf8_cont(byte c) {
++    return (c & 0xc0) == 0x80;
++}
++
++// East Asian Wide and Fullwidth: the characters that take two columns.
++static bool rl_utf8_wide(uint32_t cp) {
++    return (cp >= 0x1100 && cp <= 0x115f)
++           || (cp >= 0x2e80 && cp <= 0xa4cf)
++           || (cp >= 0xac00 && cp <= 0xd7a3)
++           || (cp >= 0xf900 && cp <= 0xfaff)
++           || (cp >= 0xfe30 && cp <= 0xfe6f)
++           || (cp >= 0xff00 && cp <= 0xff60)
++           || (cp >= 0xffe0 && cp <= 0xffe6);
++}
++
++// Bytes in the character ending at `pos`, not going below `floor`.
++static size_t rl_utf8_back(size_t pos, size_t floor) {
++    size_t n = 1;
++    while (pos - n > floor && rl_utf8_cont((byte)rl.line->buf[pos - n])) {
++        n++;
++    }
++    return n;
++}
++
++// Bytes in the character starting at `pos`.
++static size_t rl_utf8_forward(size_t pos) {
++    size_t len = rl.line->len;
++    if (pos >= len) {
++        return 0;
++    }
++    size_t n = 1;
++    while (pos + n < len && rl_utf8_cont((byte)rl.line->buf[pos + n])) {
++        n++;
++    }
++    return n;
++}
++
++// Display columns occupied by the bytes in [from, to).
++static uint rl_utf8_cols(size_t from, size_t to) {
++    uint cols = 0;
++    size_t i = from;
++    while (i < to) {
++        byte c = (byte)rl.line->buf[i];
++        size_t n = 1;
++        while (i + n < to && rl_utf8_cont((byte)rl.line->buf[i + n])) {
++            n++;
++        }
++        if (n == 3) {
++            uint32_t cp = ((uint32_t)(c & 0x0f) << 12)
++                | ((uint32_t)((byte)rl.line->buf[i + 1] & 0x3f) << 6)
++                | ((uint32_t)((byte)rl.line->buf[i + 2] & 0x3f));
++            cols += rl_utf8_wide(cp) ? 2 : 1;
++        } else {
++            cols += 1;
++        }
++        i += n;
++    }
++    return cols;
++}
++
++static bool rl_utf8_dirty(void) {
++    for (size_t i = rl.orig_line_len; i < rl.line->len; i++) {
++        if ((byte)rl.line->buf[i] >= 0x80) {
++            return true;
++        }
++    }
++    return false;
++}
++
+ #if MICROPY_REPL_EMACS_WORDS_MOVE
+ static size_t cursor_count_word(int forward) {
+     const char *line_buf = vstr_str(rl.line);
+@@ -155,6 +244,10 @@ int readline_process_char(int c) {
+     int redraw_step_back = 0;
+     bool redraw_from_cursor = false;
+     int redraw_step_forward = 0;
++    // TULIP_READLINE_UTF8: captured before any edit, because an edit destroys the
++    // bytes whose width the redraw would otherwise have to measure.
++    bool utf8_was_dirty = rl_utf8_dirty();
++    uint utf8_old_cols = utf8_was_dirty ? rl_utf8_cols(rl.orig_line_len, rl.cursor_pos) : 0;
+     if (rl.escape_seq == ESEQ_NONE) {
+         if (CHAR_CTRL_A <= c && c <= CHAR_CTRL_E && vstr_len(rl.line) == rl.orig_line_len) {
+             // control character with empty line
+@@ -233,6 +326,11 @@ int readline_process_char(int c) {
+                 #else
+                 int nspace = 1;
+                 #endif
++                if (nspace == 1) {
++                    // TULIP_READLINE_UTF8: a whole character, or the rest of it
++                    // would be left behind as an invalid sequence.
++                    nspace = rl_utf8_back(rl.cursor_pos, rl.orig_line_len);
++                }
+ 
+                 // do the backspace
+                 vstr_cut_out_bytes(rl.line, rl.cursor_pos - nspace, nspace);
+@@ -288,12 +386,42 @@ int readline_process_char(int c) {
+                 redraw_step_forward = compl_len;
+             }
+         #endif
+-        } else if (32 <= c && c <= 126) {
+-            // printable character
+-            vstr_ins_char(rl.line, rl.cursor_pos, c);
++        } else if (c >= 32 && c != 127) {
++            // printable character. TULIP_READLINE_UTF8: 127 is excluded rather
++            // than everything over 126, so the bytes of a multibyte character get
++            // in. They are gathered until the sequence is complete and inserted
++            // together -- one at a time would echo a half-decoded character and
++            // redraw against a line that is briefly not valid UTF-8.
++            if (c >= 0x80) {
++                if (rl.utf8_need == 0) {
++                    if ((c & 0xe0) == 0xc0) {
++                        rl.utf8_need = 2;
++                    } else if ((c & 0xf0) == 0xe0) {
++                        rl.utf8_need = 3;
++                    } else if ((c & 0xf8) == 0xf0) {
++                        rl.utf8_need = 4;
++                    } else {
++                        // A continuation byte with no lead byte in front of it.
++                        return -1;
++                    }
++                    rl.utf8_len = 0;
++                }
++                rl.utf8_buf[rl.utf8_len++] = (char)c;
++                if (rl.utf8_len < rl.utf8_need) {
++                    return -1;
++                }
++                for (uint8_t i = 0; i < rl.utf8_len; i++) {
++                    vstr_ins_byte(rl.line, rl.cursor_pos + i, rl.utf8_buf[i]);
++                }
++                redraw_step_forward = rl.utf8_len;
++                rl.utf8_len = 0;
++                rl.utf8_need = 0;
++            } else {
++                vstr_ins_char(rl.line, rl.cursor_pos, c);
++                redraw_step_forward = 1;
++            }
+             // set redraw parameters
+             redraw_from_cursor = true;
+-            redraw_step_forward = 1;
+         }
+     } else if (rl.escape_seq == ESEQ_ESC) {
+         switch (c) {
+@@ -384,7 +512,8 @@ right_arrow_key:
+ #endif
+                 // right arrow
+                 if (rl.cursor_pos < rl.line->len) {
+-                    redraw_step_forward = 1;
++                    // TULIP_READLINE_UTF8: a character, not a byte.
++                    redraw_step_forward = rl_utf8_forward(rl.cursor_pos);
+                 }
+             } else if (c == 'D') {
+ #if MICROPY_REPL_EMACS_KEYS
+@@ -392,7 +521,8 @@ left_arrow_key:
+ #endif
+                 // left arrow
+                 if (rl.cursor_pos > rl.orig_line_len) {
+-                    redraw_step_back = 1;
++                    // TULIP_READLINE_UTF8: a character, not a byte.
++                    redraw_step_back = rl_utf8_back(rl.cursor_pos, rl.orig_line_len);
+                 }
+             } else if (c == 'H') {
+                 // home
+@@ -418,7 +548,9 @@ end_key:
+ delete_key:
+ #endif
+                 if (rl.cursor_pos < rl.line->len) {
+-                    vstr_cut_out_bytes(rl.line, rl.cursor_pos, 1);
++                    // TULIP_READLINE_UTF8: a whole character, or the rest of it
++                    // would be left behind as an invalid sequence.
++                    vstr_cut_out_bytes(rl.line, rl.cursor_pos, rl_utf8_forward(rl.cursor_pos));
+                     redraw_from_cursor = true;
+                 }
+             } else {
+@@ -464,25 +596,47 @@ delete_key:
+ redraw:
+ #endif
+ 
+-    // redraw command prompt, efficiently
+-    if (redraw_step_back > 0) {
+-        mp_hal_move_cursor_back(redraw_step_back);
+-        rl.cursor_pos -= redraw_step_back;
+-    }
+-    if (redraw_from_cursor) {
+-        if (rl.line->len < last_line_len) {
+-            // erase old chars
+-            mp_hal_erase_line_from_cursor(last_line_len - rl.cursor_pos);
++    // TULIP_READLINE_UTF8: the byte arithmetic below treats a byte as a column,
++    // which a multibyte character is not -- and after an edit the bytes it used to
++    // occupy are gone, so their width is no longer measurable. So a line holding
++    // any non-ASCII byte is redrawn whole, walking back to the start of the
++    // editable region by the column count captured before the edit. A pure ASCII
++    // line takes the original path unchanged.
++    if (utf8_was_dirty || rl_utf8_dirty()) {
++        size_t new_pos = rl.cursor_pos - redraw_step_back + redraw_step_forward;
++        uint back = utf8_was_dirty ? utf8_old_cols : (uint)(rl.cursor_pos - rl.orig_line_len);
++        if (back > 0) {
++            mp_hal_move_cursor_back(back);
++        }
++        mp_hal_erase_line_from_cursor(0);
++        mp_hal_stdout_tx_strn(rl.line->buf + rl.orig_line_len,
++                              rl.line->len - rl.orig_line_len);
++        rl.cursor_pos = new_pos;
++        uint tail = rl_utf8_cols(new_pos, rl.line->len);
++        if (tail > 0) {
++            mp_hal_move_cursor_back(tail);
++        }
++    } else {
++        // redraw command prompt, efficiently
++        if (redraw_step_back > 0) {
++            mp_hal_move_cursor_back(redraw_step_back);
++            rl.cursor_pos -= redraw_step_back;
++        }
++        if (redraw_from_cursor) {
++            if (rl.line->len < last_line_len) {
++                // erase old chars
++                mp_hal_erase_line_from_cursor(last_line_len - rl.cursor_pos);
++            }
++            // draw new chars
++            mp_hal_stdout_tx_strn(rl.line->buf + rl.cursor_pos, rl.line->len - rl.cursor_pos);
++            // move cursor forward if needed (already moved forward by length of line, so move it back)
++            mp_hal_move_cursor_back(rl.line->len - (rl.cursor_pos + redraw_step_forward));
++            rl.cursor_pos += redraw_step_forward;
++        } else if (redraw_step_forward > 0) {
++            // draw over old chars to move cursor forwards
++            mp_hal_stdout_tx_strn(rl.line->buf + rl.cursor_pos, redraw_step_forward);
++            rl.cursor_pos += redraw_step_forward;
+         }
+-        // draw new chars
+-        mp_hal_stdout_tx_strn(rl.line->buf + rl.cursor_pos, rl.line->len - rl.cursor_pos);
+-        // move cursor forward if needed (already moved forward by length of line, so move it back)
+-        mp_hal_move_cursor_back(rl.line->len - (rl.cursor_pos + redraw_step_forward));
+-        rl.cursor_pos += redraw_step_forward;
+-    } else if (redraw_step_forward > 0) {
+-        // draw over old chars to move cursor forwards
+-        mp_hal_stdout_tx_strn(rl.line->buf + rl.cursor_pos, redraw_step_forward);
+-        rl.cursor_pos += redraw_step_forward;
+     }
+ 
+     #if MICROPY_REPL_AUTO_INDENT
+@@ -553,6 +707,10 @@ void readline_init(vstr_t *line, const char *prompt) {
+     rl.orig_line_len = line->len;
+     rl.escape_seq = ESEQ_NONE;
+     rl.escape_seq_buf[0] = 0;
++    // TULIP_READLINE_UTF8: a sequence cut short by Ctrl-C or Enter must not leak
++    // its first bytes into the next line.
++    rl.utf8_len = 0;
++    rl.utf8_need = 0;
+     rl.hist_cur = -1;
+     rl.cursor_pos = rl.orig_line_len;
+     rl.prompt = prompt;

@@ -66,4 +66,28 @@ CFLAGS += -Wno-unknown-warning-option -Wno-unterminated-string-initialization -W
 MK
     fi
 fi
+
+# Teach micropython's readline about UTF-8, so the REPL can accept Japanese.
+#
+# Upstream readline is bytes throughout: it takes only 32..126 as printable and
+# hands byte counts to mp_hal_move_cursor_back() as though a byte were a column.
+# Neither holds for a language where a character is three bytes and two columns,
+# and the first of them is why the REPL silently dropped every Japanese character
+# typed at it -- see tulip/shared/py/ime.py. The patch makes a cursor step a whole
+# character and redraws a line containing non-ASCII whole rather than by byte
+# arithmetic; a pure ASCII line takes the original path untouched.
+#
+# Gated on the TULIP_READLINE_UTF8 marker the patch introduces, so it is
+# idempotent and picks itself up when the micropython pin moves.
+if [ -f micropython/shared/readline/readline.c ]; then
+    if ! grep -q "TULIP_READLINE_UTF8" micropython/shared/readline/readline.c; then
+        echo "Patching micropython readline for UTF-8..."
+        if ! (cd micropython && git apply ../tulip/shared/patches/micropython-readline-utf8.patch); then
+            echo "WARNING: readline UTF-8 patch did not apply. The build will work," >&2
+            echo "         but the REPL will drop Japanese input. Regenerate it with:" >&2
+            echo "         cd micropython && git diff -- shared/readline/readline.c \\" >&2
+            echo "             > ../tulip/shared/patches/micropython-readline-utf8.patch" >&2
+        fi
+    fi
+fi
 popd > /dev/null
