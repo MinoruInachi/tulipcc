@@ -652,15 +652,6 @@ class IME:
                 # Anything else ends the conversion and is then handled fresh.
                 self._commit_all()
                 self.key(k)
-        # Follow the LVGL focus. An app can move it without the IME ever seeing a
-        # key, and the coloured cursor has to go with it. Every fifteenth frame is
-        # often enough for something a person does with a finger, and keeps this
-        # off the per-key path.
-        if self.state != _OFF:
-            self._lv_tick += 1
-            if self._lv_tick >= 15:
-                self._lv_tick = 0
-                self._lv_cursor(True)
                 return
             self._refresh()
             return
@@ -761,6 +752,15 @@ class IME:
             if k is None:
                 break
             self.key(k)
+        # Follow the LVGL focus. An app can move it without the IME ever seeing a
+        # key, and the coloured cursor has to go with it. Every fifteenth frame is
+        # often enough for something a person does with a finger, and keeps this
+        # off the per-key path.
+        if self.state != _OFF:
+            self._lv_tick += 1
+            if self._lv_tick >= 15:
+                self._lv_tick = 0
+                self._lv_cursor(True)
 
 
 _ime = IME()
