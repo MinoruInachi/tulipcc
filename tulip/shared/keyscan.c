@@ -529,8 +529,10 @@ uint16_t scan_ascii(uint8_t code, uint32_t modifier) {
         case KEY_KATAKANAHIRAGANA: return TULIP_IME_TOGGLE;
         // ろ and ¥ are where a JIS keyboard keeps its backslash and underscore, and
         // a Python user needs both. This is what Windows and macOS do with them.
-        case KEY_RO: if(shift) return '_'; else return '\\';
-        case KEY_YEN: if(shift) return '|'; else return '\\';
+        // They take ctrl for the same reason KEY_BACKSLASH above does: on a JIS
+        // keyboard these ARE the backslash key, so Ctrl-\ is only reachable here.
+        case KEY_RO: if(ctrl) return 28; if(shift) return '_'; else return '\\';
+        case KEY_YEN: if(ctrl) return 28; if(shift) return '|'; else return '\\';
 
         // We return extended codes for these, and get converted to ANSI for the repl down the line
         case KEY_UP: return 259; 

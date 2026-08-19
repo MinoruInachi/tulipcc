@@ -621,3 +621,28 @@ def stop():
 def target(obj=None):
     """Send committed text to `obj` (anything with .add_text) instead of guessing."""
     _ime.target = obj
+
+
+def keytest(on=True):
+    """Print what each key produces, to find the one that toggles the IME.
+
+    28 is the toggle. If the key you want prints something else, point it at 28:
+
+        tulip.key_remap(<scan>, 0, 0x1c)
+
+    where <scan> is the raw HID code this also prints. Takes over
+    tulip.keyboard_callback() while it runs, so the editor will not see keys --
+    ime.keytest(False) puts it back.
+    """
+    if not on:
+        tulip.keyboard_callback()
+        print("ime: key test off")
+        return
+
+    def _report(k):
+        held = tulip.keys()
+        print("key %d   modifier 0x%02x   scan %s"
+              % (k, held[0], [h for h in held[1:] if h]))
+
+    tulip.keyboard_callback(_report)
+    print("ime: press keys. 28 is the toggle. ime.keytest(False) to stop.")
