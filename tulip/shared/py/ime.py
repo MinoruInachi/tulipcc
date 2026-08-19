@@ -725,7 +725,12 @@ class IME:
             self._refresh()
             return
 
-        if "a" <= ch <= "z":
+        # Letters are romaji. So is the apostrophe, but only straight after a
+        # lone 'n': n' is the one entry in _ROMAJI that is not all letters, and
+        # without this it never reached _romaji_step() at all -- only a-z was fed
+        # to it, so the documented way of typing ほんや (hon'ya) did nothing.
+        # A ' anywhere else is still a '.
+        if ("a" <= ch <= "z") or (ch == "'" and self.pending == "n"):
             self.pending += ch
             kana, self.pending = _romaji_step(self.pending)
             self.reading += kana
