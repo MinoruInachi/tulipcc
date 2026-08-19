@@ -1023,6 +1023,17 @@ void display_tfb_cursor(uint16_t x, uint16_t y) {
     TFBbg[y*TFB_COLS + x] = tfb_bg_pal_color;
 }
 
+// Repaint the cursor where it already is. Its colour is decided when it is
+// painted and the console only paints it when something is written, so switching
+// the IME on or off left the old colour up until the next keystroke echoed.
+// Main-task only: display_tfb_update() builds through a single shared scratch
+// row, so this must not run against a console write on another task.
+void display_tfb_refresh_cursor(void) {
+    if(!tfb_active) return;
+    display_tfb_cursor(tfb_x_col, tfb_y_row);
+    display_tfb_update(tfb_y_row);
+}
+
 void display_tfb_uncursor(uint16_t x, uint16_t y) {
     if(x > 0 && x < TFB_COLS && y < TFB_ROWS && TFB[y*TFB_COLS+x] == TFB_WIDE_CONT) x--;
     if(x < TFB_COLS && y < TFB_ROWS) {

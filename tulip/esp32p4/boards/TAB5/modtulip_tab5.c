@@ -1507,6 +1507,9 @@ static mp_obj_t tulip_ime(size_t n_args, const mp_obj_t *args) {
         ime_flush_keys();
     }
     ime_active = want;
+    // The cursor says which language the keyboard is in, so it has to change at
+    // the moment the IME does, not at the next thing that prints.
+    display_tfb_refresh_cursor();
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_ime_obj, 0, 1, tulip_ime);

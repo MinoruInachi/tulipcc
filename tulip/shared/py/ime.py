@@ -549,6 +549,10 @@ class IME:
                 self.state = _KANA
                 self.load()
                 self._refresh()
+                # C armed ime_active from the key path already. Setting it again
+                # from here is what repaints the cursor: the key path runs on the
+                # keyboard task and must not touch the console.
+                tulip.ime(True)
             else:
                 # Handing the keyboard back. Anything half-composed is committed
                 # rather than thrown away, which is what every IME does on the way
