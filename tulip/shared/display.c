@@ -1132,10 +1132,14 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg
         uint16_t ch = str[i];
         if(ch == 8)  { // backspace , go backwards (don't delete)
             display_tfb_uncursor(tfb_x_col, tfb_y_row);
+            // Exactly one cell, the same as ESC [ 1 D -- callers count columns and
+            // use whichever is shorter. Stepping over the right half of a
+            // fullwidth character as well was wrong for that reason: readline
+            // sends one \b per column and takes the \b path only up to four of
+            // them, so a Japanese line moved back twice as far as it asked to and
+            // the ESC [ K behind it ate the prompt. The cursor never lands on a
+            // continuation cell anyway -- display_tfb_cursor() snaps off it.
             if(tfb_x_col > 0) tfb_x_col--;
-            // A fullwidth character is two cells, and its right half is not a
-            // place the cursor can sit. Step over it.
-            if(tfb_x_col > 0 && TFB[tfb_y_row*TFB_COLS+tfb_x_col] == TFB_WIDE_CONT) tfb_x_col--;
         }
         if(ch > 127) { // unicode
             // Decode to the codepoint and decide what to do with it, rather than
