@@ -418,9 +418,13 @@ ime.keytest(False)   # stop
 `ime.start()` is cheap -- it only arms the toggle. The dictionary is read the
 first time you switch the IME on, which takes about two seconds and happens once.
 
-While the IME holds the keyboard, what you type appears on a 変換 strip along the
-bottom console row rather than going straight into the line -- committed text is
-what reaches the editor, an LVGL text area, or the REPL. Typing:
+While the IME holds the keyboard the console cursor is orange, so you can tell
+which language the next keystroke is in without typing one. What you type appears
+on a 変換 strip along the bottom console row rather than going straight into the
+line -- committed text is what reaches the editor, an LVGL text area, or the
+REPL. The strip is only there while something is being composed; between one word
+and the next the bottom row goes back to the console, and the cursor is what says
+the IME still has the keyboard. Typing:
 
 | key | while typing a reading | while a segment is converted |
 |---|---|---|

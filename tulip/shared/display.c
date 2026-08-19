@@ -1012,7 +1012,14 @@ void display_tfb_cursor(uint16_t x, uint16_t y) {
     f = f | FORMAT_FLASH;
     f = f | FORMAT_INVERSE;
     TFBf[y*TFB_COLS + x] = f;
-    TFBfg[y*TFB_COLS + x] = tfb_fg_pal_color;
+    // A different colour while the IME holds the keyboard. It needs an
+    // always-on indicator and there is nowhere on screen to put one: the 変換
+    // strip exists only while you are composing, the bottom row is where the
+    // console itself types once it has scrolled full, and a badge anywhere but
+    // column 0 is not even drawn, because a row stops rendering at its first
+    // empty cell. The cursor costs no space at all and is where the eye already
+    // is. Inverse video paints the block from the foreground colour.
+    TFBfg[y*TFB_COLS + x] = ime_active ? color_332(255,160,0) : tfb_fg_pal_color;
     TFBbg[y*TFB_COLS + x] = tfb_bg_pal_color;
 }
 
@@ -1023,6 +1030,10 @@ void display_tfb_uncursor(uint16_t x, uint16_t y) {
         if(f & FORMAT_FLASH) f = f - FORMAT_FLASH;
         if(f & FORMAT_INVERSE) f = f - FORMAT_INVERSE;
         TFBf[y*TFB_COLS + x] = f;
+        // The cursor overwrote this cell's colour on the way in, so put the
+        // console's back: without it the character the IME cursor was last on
+        // stays orange after the cursor has moved off it.
+        TFBfg[y*TFB_COLS + x] = tfb_fg_pal_color;
     }
     display_mark_dirty_rows(y * tfb_font_height_current(), (y + 1) * tfb_font_height_current());
 }

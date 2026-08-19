@@ -24,6 +24,21 @@
 # MicroPython's deflate module can open, and once the dictionary is in Python the
 # conversion belongs in Python too.
 #
+# THE STRIP IS ONLY HALF THE INDICATOR
+#
+# The strip exists while you are composing, so between one word and the next
+# there was nothing saying the keyboard was still Japanese. The console cursor
+# turns orange instead, for as long as the IME holds the keyboard -- see
+# display_tfb_cursor() in tulip/shared/display.c.
+#
+# Nothing on screen could be given up for a badge. The bottom row is where the
+# console itself types once it has scrolled full, so a permanent bar there hides
+# the line being worked on -- which is the whole reason the strip goes away
+# between words. And a badge anywhere but column 0 is not even drawn: a row stops
+# rendering at its first empty cell, so a four-cell badge at the right margin
+# needs the whole row padded with spaces, which draws a full-width band. The
+# cursor takes no space and is where the eye already is.
+#
 # WHY THE 変換 STRIP RATHER THAN INLINE PREEDIT
 #
 # Composing text has to be shown before it is committed, and the three places it
@@ -362,6 +377,19 @@ class IME:
         # TFB renderer only draws FORMAT_INVERSE.
         tulip.tfb_str(0, row, (text + " " * cols)[:cols], 0x80, 255, 0)
 
+    def _refresh(self):
+        """The strip is up only while there is something on it.
+
+        Between words there is nothing to show, and the bottom row belongs to the
+        console again; the orange cursor is what says the IME still has the
+        keyboard.
+        """
+        if self.state != _OFF and (self.state == _CONV or self.reading
+                                   or self.pending or self.committed):
+            self._draw_strip()
+        else:
+            self._restore_strip()
+
     def _strip_text(self):
         head = "[あ] " + self.committed
         if self.state == _CONV:
@@ -520,14 +548,14 @@ class IME:
                 self._need_japanese_font()
                 self.state = _KANA
                 self.load()
-                self._draw_strip()
+                self._refresh()
             else:
                 # Handing the keyboard back. Anything half-composed is committed
                 # rather than thrown away, which is what every IME does on the way
                 # out.
                 self._commit_all()
-                self._restore_strip()
                 self.state = _OFF
+                self._refresh()
                 tulip.ime(False)
             return
 
@@ -565,7 +593,7 @@ class IME:
                 self._commit_all()
                 self.key(k)
                 return
-            self._draw_strip()
+            self._refresh()
             return
 
         # _KANA: gathering a reading.
@@ -580,7 +608,7 @@ class IME:
                 self._restore_strip()
                 self._forward(k)
                 return
-            self._draw_strip()
+            self._refresh()
             return
 
         if k == _ESC:
@@ -603,14 +631,14 @@ class IME:
                 self.pending = ""
             if self.reading:
                 self._convert()
-                self._draw_strip()
+                self._refresh()
             else:
                 self._forward(k)
             return
 
         if k == _TAB or k == _CTRL_U:
             if self._kana_convert(k == _TAB):
-                self._draw_strip()
+                self._refresh()
             else:
                 self._forward(k)
             return
@@ -634,14 +662,14 @@ class IME:
                 self.reading += _romaji_flush(self.pending)
                 self.pending = ""
             self.reading += _PUNCT[ch]
-            self._draw_strip()
+            self._refresh()
             return
 
         if "a" <= ch <= "z":
             self.pending += ch
             kana, self.pending = _romaji_step(self.pending)
             self.reading += kana
-            self._draw_strip()
+            self._refresh()
             return
 
         if "A" <= ch <= "Z":
@@ -685,8 +713,8 @@ def start(load_dictionary=False):
 
 def stop():
     if _ime.state != _OFF:
-        _ime._restore_strip()
         _ime.state = _OFF
+        _ime._refresh()
     tulip.ime(False)
     tulip.ime_callback()
 
