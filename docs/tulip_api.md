@@ -390,14 +390,29 @@ import ime
 ime.start()
 ```
 
-The **変換** key then hands the keyboard to the IME and takes it back, as does
-**かな** and, on a keyboard without them, **`Ctrl-\`**. Nothing to configure: those
-two JIS keys used to decode to nothing at all, and switching input is what they
-mean. The 半角/全角 key sits where a US keyboard keeps its backtick, so it is left
-alone by default -- point it at the toggle yourself if you want it:
+Four keys hand the keyboard to the IME and take it back, so that every keyboard
+has one it can actually press: **変換**, **かな**, **`Ctrl-Space`** and **`Ctrl-\`**.
+
+`Ctrl-Space` is the one every other Japanese input method uses, and it is two
+dedicated keys everywhere. `Ctrl-\` is not: the Tab5's own 70-key keyboard reaches
+backslash through its Sym layer, where ctrl cannot be held as well. 変換 and かな
+are free on a JIS keyboard -- they used to decode to nothing at all -- and
+switching input is exactly what they mean.
+
+The 半角/全角 key sits where a US keyboard keeps its backtick, so it is left alone
+by default. Point it at the toggle yourself if you want it:
 
 ```python
 tulip.key_remap(0x35, 0, 0x1c)   # 半角/全角 key, JIS position
+```
+
+For a keyboard that can press none of the four, find out what it does send and
+bind that:
+
+```python
+ime.keytest()        # press keys; prints the code, the modifier and the scan code
+ime.toggle(<code>)   # use that key as the toggle from now on
+ime.keytest(False)   # stop
 ```
 
 `ime.start()` is cheap -- it only arms the toggle. The dictionary is read the
@@ -438,6 +453,9 @@ ime.start(True)              # read the dictionary now instead (about 2 seconds)
 ime.stop()                   # disarm; the keyboard goes back to normal
 ime.target(my_textarea)      # send committed text to this instead of guessing
 ime.target(None)             # back to guessing: LVGL focus, else editor, else REPL
+ime.toggle()                 # the key code that switches it on and off
+ime.toggle(code)             # use a different key
+ime.keytest()                # print what each key sends, to find that code
 tulip.ime()                  # is the IME holding the keyboard right now?
 ```
 

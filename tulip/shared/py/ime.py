@@ -6,9 +6,11 @@
 #     import ime
 #     ime.start()          # arm it; Ctrl-\ then hands the keyboard back and forth
 #
-# Ctrl-\ is TULIP_IME_TOGGLE in shared/keyscan.h, handled in the key path itself
-# so it works whoever owns the keyboard. A JIS keyboard's own 変換 or 半角/全角
-# key can be pointed at it from boot.py -- see that header.
+# 変換, かな, Ctrl-Space and Ctrl-\ all switch it on and off, handled in the key
+# path itself so they work whoever owns the keyboard. No one default covers every
+# keyboard: the Tab5's own 70-key one reaches backslash through a Sym layer, so
+# Ctrl-\ cannot be pressed there, while a JIS keyboard has 変換 and no Ctrl-Space
+# habit. ime.keytest() and ime.toggle() rebind it for anything else.
 #
 # HOW THE PIECES DIVIDE
 #
@@ -48,7 +50,9 @@ _BS = 8
 _TAB = 9
 _ENTER = 13
 _ESC = 27
-_TOGGLE = 0x1c          # Ctrl-\, TULIP_IME_TOGGLE
+# The toggle key is deliberately not a constant here: tulip.ime_toggle() can
+# rebind it, and a stale copy would leave C switching the IME on for a key
+# Python then did not recognise -- on, but never off again.
 _SPACE = 32
 _DOWN = 258
 _UP = 259
@@ -448,7 +452,7 @@ class IME:
         tulip.key_send(key, False)
 
     def key(self, k):
-        if k == _TOGGLE:
+        if k == tulip.ime_toggle():
             if self.state == _OFF:
                 # Turning it on. C has already armed ime_active so the drain runs;
                 # this press is the IME's cue to take the console and, the first
@@ -607,7 +611,7 @@ def start(load_dictionary=False):
     if load_dictionary:
         _ime._need_japanese_font()
         _ime.load()
-    print("ime: ready -- 変換 (or Ctrl-\\) to switch 日本語 on and off")
+    print("ime: ready -- 変換, かな, Ctrl-Space or Ctrl-\\ to switch 日本語 on and off")
 
 
 def stop():
@@ -621,6 +625,21 @@ def stop():
 def target(obj=None):
     """Send committed text to `obj` (anything with .add_text) instead of guessing."""
     _ime.target = obj
+
+
+def toggle(code=None):
+    """Read or set the key that switches the IME on and off.
+
+    Defaults cover the keyboards this was built for -- 変換 and かな on a JIS
+    keyboard, Ctrl-Space and Ctrl-\\ elsewhere -- but a keyboard that cannot
+    produce any of them can be pointed at whatever it does produce:
+
+        ime.keytest()            # press the key, note the number it prints
+        ime.toggle(<number>)     # and bind it
+    """
+    if code is None:
+        return tulip.ime_toggle()
+    tulip.ime_toggle(code)
 
 
 def keytest(on=True):
@@ -645,4 +664,5 @@ def keytest(on=True):
               % (k, held[0], [h for h in held[1:] if h]))
 
     tulip.keyboard_callback(_report)
-    print("ime: press keys. 28 is the toggle. ime.keytest(False) to stop.")
+    print("ime: press keys. %d is the toggle. ime.keytest(False) to stop."
+          % tulip.ime_toggle())

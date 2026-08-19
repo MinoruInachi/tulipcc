@@ -33,6 +33,12 @@ key_remap key_remaps[MAX_KEY_REMAPS];
  * keystroke. 64 is far more than the deepest burst a person can type in 16ms.
  */
 uint8_t ime_active = 0;
+// Which key hands the keyboard to the IME. A variable rather than the constant,
+// because no default survives every keyboard: the Tab5's own 70-key one puts
+// backslash on a Sym layer, so Ctrl-\ cannot be pressed there at all. Settable
+// from Python as tulip.ime_toggle(), so any key ime.keytest() can see can be
+// bound to it.
+uint16_t ime_toggle_key = TULIP_IME_TOGGLE;
 #define IME_KEY_RING 64
 static volatile uint16_t ime_ring[IME_KEY_RING];
 static volatile uint8_t ime_ring_w = 0;
@@ -499,7 +505,11 @@ uint16_t scan_ascii(uint8_t code, uint32_t modifier) {
         case KEY_PAGEUP: return 25;
         case KEY_PAGEDOWN: return 22;
 
-        case KEY_SPACE: return ' '; 
+        // Ctrl-Space is the IME toggle every Japanese input method already uses,
+        // and unlike Ctrl-\ it is two dedicated keys on every keyboard -- no Sym
+        // layer, no JIS-only position. Ctrl-Space is NUL in ASCII, which this
+        // decoder uses to mean "nothing", so nothing is given up by aliasing it.
+        case KEY_SPACE: if(ctrl) return TULIP_IME_TOGGLE; return ' '; 
         case KEY_MINUS: if(shift) return '_'; else return '-';
         case KEY_EQUAL: if(shift) return '+'; else return '=';
         // Ctrl on these three produces a real ASCII control code, the same as
@@ -564,7 +574,7 @@ static void deliver_key(uint16_t c, uint8_t allow_ime) {
     // going to fold into a Japanese character must not also reach the REPL as a
     // Latin letter. Ctrl-C still gets through, so a wedged IME is escapable.
     if(allow_ime && c != mp_interrupt_char) {
-        if(c == TULIP_IME_TOGGLE && ime_callback != NULL) {
+        if(c == ime_toggle_key && ime_callback != NULL) {
             // Arm the flag so the frame ISR starts scheduling the drain, then let
             // the IME see the key and decide whether this turned it on or off --
             // it has a preedit line to clean up on the way out. Ignored entirely

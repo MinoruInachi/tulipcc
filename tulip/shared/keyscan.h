@@ -48,6 +48,7 @@ uint32_t keycode_to_ctrl_key(uint16_t key);
 #define TULIP_IME_TOGGLE 0x1c
 
 extern uint8_t ime_active;
+extern uint16_t ime_toggle_key;
 void ime_push_key(uint16_t key);
 int32_t ime_take_key(void);
 void ime_flush_keys(void);

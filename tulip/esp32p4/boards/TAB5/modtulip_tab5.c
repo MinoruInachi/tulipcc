@@ -1366,7 +1366,7 @@ static bool tab5_deliver_key(uint16_t key, bool allow_ime) {
     // caller skips the LVGL indev too. Ctrl-C still gets through, which is what
     // makes a wedged IME escapable.
     if (allow_ime && key != mp_interrupt_char) {
-        if (key == TULIP_IME_TOGGLE && s_tab5_ime_cb != MP_OBJ_NULL &&
+        if (key == ime_toggle_key && s_tab5_ime_cb != MP_OBJ_NULL &&
             s_tab5_ime_cb != mp_const_none) {
             // Arm the flag so the frame ISR starts scheduling the drain, then let
             // the IME see the key and decide whether this turned it on or off --
@@ -1518,6 +1518,19 @@ static mp_obj_t tulip_ime_callback(size_t n_args, const mp_obj_t *args) {
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_ime_callback_obj, 0, 1, tulip_ime_callback);
+
+// tulip.ime_toggle() -> the key code that switches the IME on and off
+// tulip.ime_toggle(code) -> use this key instead
+//
+// No default survives every keyboard -- the Tab5's own puts backslash behind a Sym
+// layer, so Ctrl-\\ cannot be pressed there -- so whatever ime.keytest() shows for a
+// key can be bound here.
+static mp_obj_t tulip_ime_toggle(size_t n_args, const mp_obj_t *args) {
+    if (n_args == 0) return mp_obj_new_int(ime_toggle_key);
+    ime_toggle_key = (uint16_t)mp_obj_get_int(args[0]);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_ime_toggle_obj, 0, 1, tulip_ime_toggle);
 
 // tulip.ime_key() -> the next queued key code, or None when the queue is empty.
 static mp_obj_t tulip_ime_key(void) {
@@ -1888,6 +1901,7 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_key_remaps_clear), MP_ROM_PTR(&tulip_key_remaps_clear_obj) },
     { MP_ROM_QSTR(MP_QSTR_ime), MP_ROM_PTR(&tulip_ime_obj) },
     { MP_ROM_QSTR(MP_QSTR_ime_callback), MP_ROM_PTR(&tulip_ime_callback_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ime_toggle), MP_ROM_PTR(&tulip_ime_toggle_obj) },
     { MP_ROM_QSTR(MP_QSTR_ime_key), MP_ROM_PTR(&tulip_ime_key_obj) },
     { MP_ROM_QSTR(MP_QSTR_editor_insert), MP_ROM_PTR(&tulip_editor_insert_obj) },
     { MP_ROM_QSTR(MP_QSTR_key_send_str), MP_ROM_PTR(&tulip_key_send_str_obj) },

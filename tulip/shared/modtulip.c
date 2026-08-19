@@ -1664,6 +1664,19 @@ STATIC mp_obj_t tulip_ime_callback(size_t n_args, const mp_obj_t *args) {
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_ime_callback_obj, 0, 1, tulip_ime_callback);
 
+// tulip.ime_toggle() -> the key code that switches the IME on and off
+// tulip.ime_toggle(code) -> use this key instead
+//
+// No default survives every keyboard -- the Tab5's own puts backslash behind a Sym
+// layer, so Ctrl-\\ cannot be pressed there -- so whatever ime.keytest() shows for a
+// key can be bound here.
+STATIC mp_obj_t tulip_ime_toggle(size_t n_args, const mp_obj_t *args) {
+    if(n_args == 0) return mp_obj_new_int(ime_toggle_key);
+    ime_toggle_key = (uint16_t)mp_obj_get_int(args[0]);
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_ime_toggle_obj, 0, 1, tulip_ime_toggle);
+
 // tulip.ime_key() -> the next queued key code, or None when the queue is empty.
 STATIC mp_obj_t tulip_ime_key(size_t n_args, const mp_obj_t *args) {
     int32_t key = ime_take_key();
@@ -1995,6 +2008,7 @@ STATIC const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_key_send), MP_ROM_PTR(&tulip_key_send_obj) },
     { MP_ROM_QSTR(MP_QSTR_ime), MP_ROM_PTR(&tulip_ime_obj) },
     { MP_ROM_QSTR(MP_QSTR_ime_callback), MP_ROM_PTR(&tulip_ime_callback_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ime_toggle), MP_ROM_PTR(&tulip_ime_toggle_obj) },
     { MP_ROM_QSTR(MP_QSTR_ime_key), MP_ROM_PTR(&tulip_ime_key_obj) },
     { MP_ROM_QSTR(MP_QSTR_editor_insert), MP_ROM_PTR(&tulip_editor_insert_obj) },
     { MP_ROM_QSTR(MP_QSTR_key_send_str), MP_ROM_PTR(&tulip_key_send_str_obj) },
