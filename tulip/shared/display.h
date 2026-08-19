@@ -209,7 +209,10 @@ extern uint8_t tfb_font_user_set;
 extern uint8_t tfb_active;
 extern uint8_t tfb_y_row; 
 extern uint8_t tfb_x_col;
-void display_tfb_refresh_cursor(void); 
+void display_tfb_refresh_cursor(void);
+// The cursor colour while the IME holds the keyboard. Shared by the console and
+// the editor so the indicator is the same wherever the typing is going.
+#define IME_CURSOR_COLOR color_332(255,160,0) 
 extern int32_t vsync_count;
 extern uint8_t brightness;
 extern float reported_fps;

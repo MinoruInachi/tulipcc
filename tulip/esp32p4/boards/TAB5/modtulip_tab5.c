@@ -1496,6 +1496,9 @@ static MP_DEFINE_CONST_FUN_OBJ_0(tulip_key_remaps_clear_obj, tulip_key_remaps_cl
  * to reach whatever has focus.
  */
 
+extern uint8_t editor_on_screen;
+extern void editor_refresh_cursor(void);
+
 // tulip.ime(True/False) -> take over the keyboard / hand it back
 // tulip.ime() -> is the IME holding the keyboard?
 static mp_obj_t tulip_ime(size_t n_args, const mp_obj_t *args) {
@@ -1508,8 +1511,13 @@ static mp_obj_t tulip_ime(size_t n_args, const mp_obj_t *args) {
     }
     ime_active = want;
     // The cursor says which language the keyboard is in, so it has to change at
-    // the moment the IME does, not at the next thing that prints.
-    display_tfb_refresh_cursor();
+    // the moment the IME does, not at the next thing that prints. Whichever of
+    // the two owns the console's cells right now is the one to repaint.
+    if (editor_on_screen) {
+        editor_refresh_cursor();
+    } else {
+        display_tfb_refresh_cursor();
+    }
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_ime_obj, 0, 1, tulip_ime);

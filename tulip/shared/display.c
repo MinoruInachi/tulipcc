@@ -1019,7 +1019,7 @@ void display_tfb_cursor(uint16_t x, uint16_t y) {
     // column 0 is not even drawn, because a row stops rendering at its first
     // empty cell. The cursor costs no space at all and is where the eye already
     // is. Inverse video paints the block from the foreground colour.
-    TFBfg[y*TFB_COLS + x] = ime_active ? color_332(255,160,0) : tfb_fg_pal_color;
+    TFBfg[y*TFB_COLS + x] = ime_active ? IME_CURSOR_COLOR : tfb_fg_pal_color;
     TFBbg[y*TFB_COLS + x] = tfb_bg_pal_color;
 }
 

@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include "tulip_helpers.h"
 #include "display.h"
+#include "keyscan.h"
 #include "polyfills.h"
 
 #define EDITOR_COLOR_FG 255
@@ -44,6 +45,14 @@ uint16_t cursor_x = 0;
 // fullwidth character, at which point the byte offset and the column diverge.
 uint16_t cursor_col = 0;
 uint16_t cursor_y = 0;
+// Set while the editor owns the console's cells. tulip.ime() asks this to work
+// out whose cursor to recolour -- the console's own is somewhere else entirely
+// while the editor is up, and painting it there would leave a stray block.
+uint8_t editor_on_screen = 0;
+// The colour of the cell the cursor is standing on. The cursor takes the cell's
+// foreground colour over while the IME is on, and this is how the syntax
+// highlighting gets it back when the cursor moves off.
+static uint8_t cursor_fg_under = EDITOR_COLOR_FG;
 #define EDITOR_NORMAL 0
 #define EDITOR_PROMPT_CHAR 1
 #define EDITOR_PROMPT_SEARCH 2
@@ -295,6 +304,7 @@ void move_cursor(int16_t x, int16_t y) {
 	// Undo old cursor. Indexed by column, not by cursor_x: the cursor is on the
 	// screen and cursor_x counts bytes into the line.
 	TFBf[cursor_y*TFB_COLS+cursor_col] = 0; 
+	TFBfg[cursor_y*TFB_COLS+cursor_col] = cursor_fg_under;
     display_tfb_update(cursor_y);
 
 	// Move viewport up/down half a screen of visible rows
@@ -341,6 +351,12 @@ void move_cursor(int16_t x, int16_t y) {
 	}
 	// Put in new cursor 
     TFBf[cursor_y*TFB_COLS+cursor_col] = FORMAT_INVERSE|FORMAT_FLASH;
+    // Inverse video paints the block from the foreground colour, so this is what
+    // makes the editor's cursor orange while the IME has the keyboard -- the same
+    // indicator the console shows, because the editor is just as likely to be
+    // where you are typing Japanese.
+    cursor_fg_under = TFBfg[cursor_y*TFB_COLS+cursor_col];
+    if(ime_active) TFBfg[cursor_y*TFB_COLS+cursor_col] = IME_CURSOR_COLOR;
 
     if(TFB[cursor_y*TFB_COLS+cursor_col]==0) TFB[cursor_y*TFB_COLS+cursor_col] = 32;
 
@@ -363,6 +379,16 @@ void move_cursor(int16_t x, int16_t y) {
     display_tfb_update(status_row);
 
 
+}
+
+// Recolour the cursor in place, for when the IME is switched on or off while the
+// editor is up. Same reason as display_tfb_refresh_cursor(): the colour is
+// decided when the cursor is painted, and the editor only paints it when the
+// cursor moves.
+void editor_refresh_cursor(void) {
+    if(!editor_on_screen) return;
+    TFBfg[cursor_y*TFB_COLS+cursor_col] = ime_active ? IME_CURSOR_COLOR : cursor_fg_under;
+    display_tfb_update(cursor_y);
 }
 
 void editor_page_up() {
@@ -403,6 +429,8 @@ void save_tfb() {
 		TFBfg[y] = EDITOR_COLOR_FG;
 		TFBbg[y] = EDITOR_COLOR_BG;
 	}
+	editor_on_screen = 1;
+	cursor_fg_under = EDITOR_COLOR_FG;
 	saved_tfb_y = tfb_y_row;
 	saved_tfb_x = tfb_x_col;
 	tfb_y_row = 0;
@@ -415,6 +443,7 @@ void save_tfb() {
 }
 
 void restore_tfb() {
+	editor_on_screen = 0;
 	for(uint16_t y=0;y<TFB_ROWS*TFB_COLS;y++) {
 		TFB[y] = saved_tfb[y];
 		TFBf[y] = saved_tfbf[y];

@@ -27,9 +27,11 @@
 # THE STRIP IS ONLY HALF THE INDICATOR
 #
 # The strip exists while you are composing, so between one word and the next
-# there was nothing saying the keyboard was still Japanese. The console cursor
-# turns orange instead, for as long as the IME holds the keyboard -- see
-# display_tfb_cursor() in tulip/shared/display.c.
+# there was nothing saying the keyboard was still Japanese. The cursor turns
+# orange instead, for as long as the IME holds the keyboard, wherever the typing
+# is going: the console's (display_tfb_cursor()), the editor's (move_cursor() in
+# editor.c), and the focused LVGL text area's, which is the only one of the three
+# that is not a TFB cell and so is done from here.
 #
 # Nothing on screen could be given up for a badge. The bottom row is where the
 # console itself types once it has scrolled full, so a permanent bar there hides
@@ -148,6 +150,11 @@ _PUNCT = {",": "、", ".": "。", "-": "ー", "[": "「", "]": "」", "/": "・"
 
 # The vowels a syllable can end on, for deciding whether a lone 'n' is ん yet.
 _VOWELS = "aiueo"
+
+# The palette entry the console and the editor paint their cursor with while the
+# IME is on (IME_CURSOR_COLOR in display.h). Same number here so an LVGL text
+# area's cursor is the same colour as the other two.
+_CURSOR_PAL = 244
 
 _HIRA_MIN = 0x3041
 _HIRA_MAX = 0x3096
@@ -311,6 +318,9 @@ class IME:
         self.target = None      # None = auto; or anything with .add_text(str)
         self._saved_row = None
         self._row = None
+        self._lv_obj = None     # the text area whose cursor we recoloured
+        self._lv_was = None     # and the colour it had before
+        self._lv_tick = 0
 
     # -- dictionary ------------------------------------------------------
     def load(self, path=DICT_PATH):
@@ -338,6 +348,50 @@ class IME:
             # A board built without the Japanese font. Kana will not show on the
             # strip, but committing still works, so this is not fatal.
             pass
+
+    # -- the LVGL cursor --------------------------------------------------
+    def _lv_focused(self):
+        try:
+            import lvgl as lv
+            obj = lv.group_get_default().get_focused()
+        except Exception:
+            return None
+        # add_text is what makes it something the IME can commit into, and so
+        # also what makes its cursor worth colouring.
+        return obj if obj is not None and hasattr(obj, "add_text") else None
+
+    def _lv_cursor(self, on):
+        """Match the console's cursor colour on the focused LVGL text area.
+
+        A text area draws its cursor as a two-pixel border on PART.CURSOR, so
+        that is the property to set -- and it has to be set for STATE.FOCUSED,
+        because the theme styles that state and a local style on the default
+        state loses to it. The theme's own colour is read before the first set,
+        or it would read back as ours.
+
+        Every call is guarded: an app can delete the text area while the IME
+        still holds the keyboard, and the binding raises LvReferenceError rather
+        than following a dangling pointer.
+        """
+        try:
+            import lvgl as lv
+            sel = lv.PART.CURSOR | lv.STATE.FOCUSED
+            obj = self._lv_focused() if on else None
+            if self._lv_obj is not None and self._lv_obj is not obj:
+                try:
+                    self._lv_obj.set_style_border_color(self._lv_was, sel)
+                except Exception:
+                    pass        # deleted out from under us; nothing to put back
+                self._lv_obj = None
+                self._lv_was = None
+            if obj is None or self._lv_obj is obj:
+                return
+            self._lv_was = obj.get_style_border_color(lv.PART.CURSOR)
+            self._lv_obj = obj
+            obj.set_style_border_color(tulip.pal_to_lv(_CURSOR_PAL), sel)
+        except Exception:
+            self._lv_obj = None
+            self._lv_was = None
 
     def _strip_row(self):
         cols, rows = tulip.tfb_size()
@@ -553,6 +607,7 @@ class IME:
                 # from here is what repaints the cursor: the key path runs on the
                 # keyboard task and must not touch the console.
                 tulip.ime(True)
+                self._lv_cursor(True)
             else:
                 # Handing the keyboard back. Anything half-composed is committed
                 # rather than thrown away, which is what every IME does on the way
@@ -560,6 +615,7 @@ class IME:
                 self._commit_all()
                 self.state = _OFF
                 self._refresh()
+                self._lv_cursor(False)
                 tulip.ime(False)
             return
 
@@ -596,6 +652,15 @@ class IME:
                 # Anything else ends the conversion and is then handled fresh.
                 self._commit_all()
                 self.key(k)
+        # Follow the LVGL focus. An app can move it without the IME ever seeing a
+        # key, and the coloured cursor has to go with it. Every fifteenth frame is
+        # often enough for something a person does with a finger, and keeps this
+        # off the per-key path.
+        if self.state != _OFF:
+            self._lv_tick += 1
+            if self._lv_tick >= 15:
+                self._lv_tick = 0
+                self._lv_cursor(True)
                 return
             self._refresh()
             return
@@ -719,6 +784,7 @@ def stop():
     if _ime.state != _OFF:
         _ime.state = _OFF
         _ime._refresh()
+    _ime._lv_cursor(False)
     tulip.ime(False)
     tulip.ime_callback()
 
