@@ -432,6 +432,8 @@ what reaches the editor, an LVGL text area, or the REPL. Typing:
 | return | commit the kana as typed | commit the candidate |
 | backspace | delete one kana | back to the unconverted reading |
 | escape | throw the whole thing away | back to the unconverted reading |
+| `Ctrl-I` (= tab) | the whole reading as カタカナ | this segment as カタカナ |
+| `Ctrl-U` | the whole reading as ひらがな | this segment as ひらがな |
 | `,` `.` `-` `[` `]` `/` | become 、 。 ー 「 」 ・ | |
 | `A`-`Z`, digits | commit, then pass through | commit, then pass through |
 
@@ -444,8 +446,18 @@ analyser here, so space converts the longest reading the dictionary has from whe
 you are and → moves on to the rest. `にほんごにゅうりょく` + space + → + return gives
 日本語入力.
 
-Katakana and hiragana are always offered as the last two candidates, so anything
-the dictionary does not have can still be set -- press space and cycle to them.
+`Ctrl-I` and `Ctrl-U` are F7 and F6 from MS-IME, ATOK and mozc, which is also
+where the `Ctrl-` spelling of them comes from -- the Tab5's own keyboard has no
+function row. They cover the whole reading and ignore the dictionary, which is the
+point: space converts the longest reading the dictionary *has*, so `aisukuri-mu` +
+space is 愛すくりーむ, while `aisukuri-mu` + `Ctrl-I` is アイスクリーム. Tab only
+means this while something is being composed; with nothing composed it is still
+tab. There is no 半角カナ, because the console font has no halfwidth katakana, and
+no 英数 key, because a capital letter and switching the IME off already do that.
+
+Katakana and hiragana are also the last two candidates space cycles through, but
+only over the segment the dictionary matched -- for a whole word, use the keys
+above.
 
 ```python
 ime.start()                  # arm the toggle; the dictionary waits until first use

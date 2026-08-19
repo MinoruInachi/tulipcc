@@ -40,6 +40,20 @@
 # space converts the longest reading the dictionary knows from the start of what
 # you typed, and ← / → resize that segment. That needs nothing but a sorted
 # dictionary and is what a 1980s FEP did -- learnable, predictable, and it fits.
+#
+# KATAKANA HAS ITS OWN KEY, AND WHY IT HAS TO
+#
+# Ctrl-I is カタカナ and Ctrl-U is ひらがな, over the whole reading and without
+# consulting the dictionary -- F7 and F6 in MS-IME, ATOK and mozc, which is where
+# the Ctrl- spelling comes from too. They are not a shortcut for cycling to the
+# katakana candidate: that candidate only covers the prefix the dictionary
+# matched, and a loanword has no entry at all, so cycling can never reach
+# アイスクリーム however long you hold space.
+#
+# There is no 半角カナ (F8). The console font has no halfwidth katakana --
+# U+FF61-FF9F is absent from efont Biwidth -- so it would commit text the screen
+# cannot draw. 英数 (F9/F10) is what a capital letter and switching the IME off
+# already do.
 
 import tulip
 
@@ -47,7 +61,12 @@ DICT_PATH = "/sys/ime/jdic.z"
 
 # Key codes, as scan_ascii() produces them.
 _BS = 8
+# Tab and Ctrl-I are the same byte, and Ctrl-I is F7 -- convert to katakana -- in
+# MS-IME, ATOK and Google/mozc alike. While something is being composed that is
+# what it means here too; with nothing composed it is still Tab and passes
+# through, so the editor keeps its indent key.
 _TAB = 9
+_CTRL_U = 21            # F6: back to hiragana
 _ENTER = 13
 _ESC = 27
 # The toggle key is deliberately not a constant here: tulip.ime_toggle() can
@@ -420,6 +439,47 @@ class IME:
         self.cand = 0
         self.state = _CONV
 
+    def _kana_convert(self, katakana):
+        """F7 / F6: the whole reading as katakana or as hiragana, no dictionary.
+
+        Not the same thing as cycling to the katakana candidate that _convert()
+        appends. That one only covers the segment the dictionary matched, and the
+        match is a prefix: type aisukuri-mu and the longest reading in there is
+        あい, so space offers 愛/相 and the katakana on the end of that list is
+        アイ -- never アイスクリーム. A loanword has no dictionary entry by
+        definition, which is exactly why every IME gives katakana its own key.
+        """
+        if self.pending:
+            self.reading += _romaji_flush(self.pending)
+            self.pending = ""
+        if not self.reading:
+            return False
+        seg = self.reading
+        kata = to_katakana(seg)
+        self.seg_len = len(seg)
+        self.cands = [kata, seg] if katakana else [seg, kata]
+        if self.cands[0] == self.cands[1]:
+            del self.cands[1]      # no kana in it; one candidate, not two
+        self.cand = 0
+        self.state = _CONV
+        return True
+
+    def _pick_kana(self, katakana):
+        """F7 / F6 during conversion: switch this segment to kana in place.
+
+        The segment keeps its length, so this composes with the ← / → resizing
+        rather than fighting it.
+        """
+        seg = self.reading[:self.seg_len]
+        want = to_katakana(seg) if katakana else seg
+        if not want:
+            return
+        if want in self.cands:
+            self.cand = self.cands.index(want)
+        else:
+            self.cands.append(want)
+            self.cand = len(self.cands) - 1
+
     def _resize_segment(self, delta):
         n = self.seg_len + delta
         if n < 1 or n > len(self.reading):
@@ -486,6 +546,8 @@ class IME:
                 self._accept_segment()
             elif k == _LEFT:
                 self._resize_segment(-1)
+            elif k == _TAB or k == _CTRL_U:
+                self._pick_kana(k == _TAB)
             elif k == _ENTER:
                 self._commit_all()
                 return
@@ -546,7 +608,14 @@ class IME:
                 self._forward(k)
             return
 
-        if k in (_LEFT, _RIGHT, _UP, _DOWN, _TAB):
+        if k == _TAB or k == _CTRL_U:
+            if self._kana_convert(k == _TAB):
+                self._draw_strip()
+            else:
+                self._forward(k)
+            return
+
+        if k in (_LEFT, _RIGHT, _UP, _DOWN):
             if self.reading or self.pending or self.committed:
                 self._commit_all()
             self._forward(k)
