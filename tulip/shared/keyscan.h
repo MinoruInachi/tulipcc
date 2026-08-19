@@ -29,6 +29,9 @@ uint16_t scan_ascii(uint8_t code, uint32_t modifier);
 void send_key_to_micropython(uint16_t c);
 void send_touch_to_micropython(int16_t touch_x, int16_t touch_y, uint8_t up);
 uint8_t convert_utf8_to_cp437(uint8_t c, uint32_t *esc);
+uint8_t convert_utf8_to_ucs(uint8_t c, uint32_t *esc, uint16_t *ucs);
+uint8_t convert_ucs_to_utf8(uint16_t ucs, char *out);
+uint8_t convert_uc16_to_cp437(uint16_t code);
 uint32_t keycode_to_ctrl_key(uint16_t key);
 
 #define MAX_KEY_REMAPS 64

@@ -41,6 +41,8 @@ EXTMOD_SRC_C += $(addprefix $(TULIP_EXTMOD_DIR)/, \
 	display.c \
 	u8g2_fonts.c \
 	u8fontdata.c \
+	u8fontdata_jp.c \
+	jpfont.c \
 	bresenham.c \
 	ui.c \
 	help.c \

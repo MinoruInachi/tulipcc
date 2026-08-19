@@ -280,15 +280,26 @@ uint8_t convert_uc16_to_cp437(uint16_t code)
    return utf8_convert_2xxx(code);
 }
 
-uint8_t convert_utf8_to_cp437(uint8_t c, uint32_t *esc)
+// The UTF-8 state machine, stopping at the codepoint. This used to be inlined in
+// convert_utf8_to_cp437() below and there was no way to get at the codepoint on
+// the way past -- which is all a Japanese console wants, since folding to CP437
+// is exactly the step that throws Japanese away.
+//
+// *esc carries the partial sequence between calls: byte count remaining in bits
+// 31..24, accumulated codepoint in the low 24. Returns 1 and stores the
+// codepoint in *ucs on the byte that completes a sequence, 0 otherwise. Only the
+// low 16 bits of a 4-byte sequence survive, so this is a BMP decoder; nothing in
+// Tulip draws astral-plane glyphs.
+uint8_t convert_utf8_to_ucs(uint8_t c, uint32_t *esc, uint16_t *ucs)
 {
    int shift;
-   uint16_t ucs;
+   uint16_t acc;
 
-   if (c < 127)            // ASCII
-       return c;
-   if (c == 127)
-       return 8;       // DEL (?)
+   if (c < 0x80) {         // ASCII, and it ends any sequence in progress
+       *esc = 0;
+       *ucs = c;
+       return 1;
+   }
 
    switch (c & 0xf0) {
    case 0xc0: case 0xd0:       // two bytes sequence
@@ -302,16 +313,60 @@ uint8_t convert_utf8_to_cp437(uint8_t c, uint32_t *esc)
        return 0;
    case 0x80: case 0x90: case 0xa0: case 0xb0: // continuation
        shift = (*esc >> 24) - 1;
-       ucs = *esc & 0xffffff;
+       // A continuation byte with no lead byte in front of it. There is nothing
+       // to add it to, so drop it rather than shifting a negative count and
+       // emitting a codepoint assembled out of nothing.
+       if (shift < 0) {
+           *esc = 0;
+           return 0;
+       }
+       acc = *esc & 0xffffff;
        if (shift) {
-           *esc = (shift << 24) | ucs | (c & 0x3f) << (shift * 6);
+           *esc = (shift << 24) | acc | (c & 0x3f) << (shift * 6);
            return 0;
        }
        *esc = 0;
-       return convert_uc16_to_cp437(ucs | (c & 0x3f));
+       *ucs = acc | (c & 0x3f);
+       return 1;
    }
 
    return 0;
+}
+
+// Encode one BMP codepoint as UTF-8. out must have room for 3 bytes plus the
+// terminator. Returns the byte count written.
+uint8_t convert_ucs_to_utf8(uint16_t ucs, char *out)
+{
+   if (ucs < 0x80) {
+       out[0] = (char)ucs;
+       out[1] = 0;
+       return 1;
+   }
+   if (ucs < 0x800) {
+       out[0] = (char)(0xc0 | (ucs >> 6));
+       out[1] = (char)(0x80 | (ucs & 0x3f));
+       out[2] = 0;
+       return 2;
+   }
+   out[0] = (char)(0xe0 | (ucs >> 12));
+   out[1] = (char)(0x80 | ((ucs >> 6) & 0x3f));
+   out[2] = (char)(0x80 | (ucs & 0x3f));
+   out[3] = 0;
+   return 3;
+}
+
+uint8_t convert_utf8_to_cp437(uint8_t c, uint32_t *esc)
+{
+   uint16_t ucs;
+
+   if (c < 127)            // ASCII
+       return c;
+   if (c == 127)
+       return 8;       // DEL (?)
+
+   if (!convert_utf8_to_ucs(c, esc, &ucs))
+       return 0;
+   return convert_uc16_to_cp437(ucs);
 }
 
 

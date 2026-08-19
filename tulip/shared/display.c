@@ -1,4 +1,6 @@
 #include "display.h"
+#include "jpfont.h"
+#include "keyscan.h"
 
 uint8_t bg_pal_color;
 uint8_t tfb_fg_pal_color;
@@ -136,7 +138,7 @@ static uint16_t lv_overlay_x1[V_RES + OFFSCREEN_Y_PX];  // exclusive; == x0 is e
 #define LV_OVERLAY_STRIDE (H_RES + OFFSCREEN_X_PX)
 #endif
 
-uint8_t *TFB;//[TFB_ROWS][TFB_COLS];
+uint16_t *TFB;//[TFB_ROWS][TFB_COLS];
 uint8_t *TFBfg;//[TFB_ROWS][TFB_COLS];
 uint8_t *TFBbg;//[TFB_ROWS][TFB_COLS];
 uint8_t *TFBf;//[TFB_ROWS][TFB_COLS];
@@ -163,16 +165,32 @@ uint8_t tfb_font = TFB_FONT_8X12;
 
 int16_t lvgl_is_repl = 0;
 
+// Set once tulip.tfb_font() has been called. The console promotes itself to the
+// Japanese font the first time a codepoint arrives that CP437 cannot hold, since
+// printing Japanese into a font with no Japanese in it just puts blanks on the
+// screen -- but a font the user chose out loud is never second-guessed.
+uint8_t tfb_font_user_set = 0;
+
+// The Japanese fonts are the only ones where a cell is not the whole character:
+// a fullwidth glyph is two cells wide, so these are the halfwidth widths.
 static inline uint8_t tfb_font_width_current(void) {
     if(tfb_font == TFB_FONT_PORTFOLIO) return 6;
     if(tfb_font == TFB_FONT_12X16) return 12;
+    if(tfb_font == TFB_FONT_JP32) return 16;
     return 8;
 }
 
 static inline uint8_t tfb_font_height_current(void) {
     if(tfb_font == TFB_FONT_PORTFOLIO) return 8;
     if(tfb_font == TFB_FONT_12X16) return 16;
+    if(tfb_font == TFB_FONT_JP16) return 16;
+    if(tfb_font == TFB_FONT_JP32) return 32;
     return 12;
+}
+
+// True where a TFB cell holds a Unicode codepoint rather than a CP437 byte.
+static inline uint8_t tfb_font_is_unicode(void) {
+    return tfb_font == TFB_FONT_JP16 || tfb_font == TFB_FONT_JP32;
 }
 
 uint8_t display_tfb_visible_cols(void) {
@@ -539,29 +557,55 @@ void display_tfb_update(int8_t tfb_row_hint) {
             uint8_t format = TFBf[tfb_row*TFB_COLS+tfb_col];
             uint8_t fg_color = TFBfg[tfb_row*TFB_COLS+tfb_col];
             uint8_t bg_color = TFBbg[tfb_row*TFB_COLS+tfb_col];
-            uint8_t glyph = TFB[tfb_row*TFB_COLS+tfb_col];
-            uint16_t data = 0;
+            uint16_t glyph = TFB[tfb_row*TFB_COLS+tfb_col];
+            // 32 bits, left aligned: the widest thing drawn from one cell used to
+            // be the 12px font, and is now a doubled fullwidth Japanese glyph at
+            // 32. Every font shifts its row up to bit 31 so the emit loop below
+            // stays one loop over one mask.
+            uint32_t data = 0;
+            // How many pixels this cell paints. Only Japanese ever exceeds one
+            // cell, and only for a fullwidth glyph, whose second cell is a
+            // TFB_WIDE_CONT that paints nothing.
+            uint8_t cell_px = font_width;
 
             // If you're looking at this code just know the unrolled versions were 1.5x faster than loops on esp32s3
             // I'm sure there's more to do but this is the best we could get it for now
             if(tfb_font == TFB_FONT_PORTFOLIO) {
-                if(glyph >= 32 && tfb_row_offset_px < 8) {
-                    data = ((uint16_t)portfolio_glyph_bitmap[(glyph - 32) * 8 + tfb_row_offset_px]) << 8;
+                if(glyph >= 32 && glyph <= 255 && tfb_row_offset_px < 8) {
+                    data = ((uint32_t)portfolio_glyph_bitmap[(glyph - 32) * 8 + tfb_row_offset_px]) << 24;
                 }
             } else if(tfb_font == TFB_FONT_12X16) {
-                if(tfb_row_offset_px < 16) {
-                    data = font_12x16_r[glyph][tfb_row_offset_px];
+                if(glyph <= 255 && tfb_row_offset_px < 16) {
+                    // Already packed into bits 15..4 of a uint16_t.
+                    data = ((uint32_t)font_12x16_r[glyph][tfb_row_offset_px]) << 16;
+                }
+            } else if(tfb_font == TFB_FONT_JP16 || tfb_font == TFB_FONT_JP32) {
+                if(glyph == TFB_WIDE_CONT) {
+                    // The right half of a fullwidth glyph, already painted by the
+                    // cell to its left. It has to paint nothing at all, not even
+                    // its background: doing so would erase that right half.
+                    cell_px = 0;
+                } else {
+                    uint16_t row = (tfb_font == TFB_FONT_JP16)
+                        ? jpfont_cell_row(glyph, tfb_row_offset_px)
+                        : jpfont_cell_row(glyph, tfb_row_offset_px / 2);
+                    data = (tfb_font == TFB_FONT_JP16)
+                        ? ((uint32_t)row) << 16
+                        : jpfont_row_2x(row);
+                    // 16 is the face's fullwidth advance, in the face's own 16px
+                    // units -- not in cells, which are 8px in JP16 and 16 in JP32.
+                    if(jpfont_cell_width(glyph) > 8) cell_px = font_width * 2;
                 }
             } else {
-                if(tfb_row_offset_px < 12) {
-                    data = ((uint16_t)font_8x12_r[glyph][tfb_row_offset_px]) << 8;
+                if(glyph <= 255 && tfb_row_offset_px < 12) {
+                    data = ((uint32_t)font_8x12_r[glyph][tfb_row_offset_px]) << 24;
                 }
             }
 
             uint16_t start_px = tfb_col * font_width;
             uint8_t * bptr = tfb_scratch_row + start_px;
-            uint16_t mask = 0x8000;
-            for(uint8_t bit=0; bit<font_width && (start_px + bit) < H_RES; bit++) {
+            uint32_t mask = 0x80000000;
+            for(uint8_t bit=0; bit<cell_px && (start_px + bit) < H_RES; bit++) {
                 uint8_t on = (data & mask) != 0;
                 if(format & FORMAT_INVERSE) {
                     on = !on;
@@ -957,6 +1001,9 @@ uint8_t display_get_bg_pixel_pal(uint16_t x, uint16_t y) {
 
 void display_tfb_cursor(uint16_t x, uint16_t y) {
     if(x >= TFB_COLS || y >= TFB_ROWS) return;
+    // The right half of a fullwidth character paints nothing of its own, so
+    // inverting it would show no cursor at all. Invert the character instead.
+    if(x > 0 && TFB[y*TFB_COLS+x] == TFB_WIDE_CONT) x--;
     // Only this character cell's pixel rows change when the row is next rebuilt.
     display_mark_dirty_rows(y * tfb_font_height_current(), (y + 1) * tfb_font_height_current());
     // Put a space char in the TFB if there's nothing here; makes the system draw it
@@ -970,6 +1017,7 @@ void display_tfb_cursor(uint16_t x, uint16_t y) {
 }
 
 void display_tfb_uncursor(uint16_t x, uint16_t y) {
+    if(x > 0 && x < TFB_COLS && y < TFB_ROWS && TFB[y*TFB_COLS+x] == TFB_WIDE_CONT) x--;
     if(x < TFB_COLS && y < TFB_ROWS) {
         uint8_t f = TFBf[y*TFB_COLS + x];
         if(f & FORMAT_FLASH) f = f - FORMAT_FLASH;
@@ -994,7 +1042,7 @@ void display_tfb_new_row() {
         tfb_y_row = visible_rows-1;
         // We were in the last row, let's scroll the buffer up by moving the TFB up
         for(uint8_t i=0;i<visible_rows-1;i++) {
-            memcpy(&TFB[i*TFB_COLS], &TFB[(i+1)*TFB_COLS], TFB_COLS);
+            memcpy(&TFB[i*TFB_COLS], &TFB[(i+1)*TFB_COLS], TFB_COLS*sizeof(uint16_t));
             memcpy(&TFBf[i*TFB_COLS], &TFBf[(i+1)*TFB_COLS], TFB_COLS);
             memcpy(&TFBfg[i*TFB_COLS], &TFBfg[(i+1)*TFB_COLS], TFB_COLS);
             memcpy(&TFBbg[i*TFB_COLS], &TFBbg[(i+1)*TFB_COLS], TFB_COLS);
@@ -1079,18 +1127,45 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg
     //fprintf(stderr, "###\n");
     // For each character incoming from micropython
     for(uint16_t i=0;i<len;i++) {
-        unsigned char ch = str[i];
+        // Wider than a byte now: in the Japanese fonts this carries a
+        // codepoint, not a CP437 character.
+        uint16_t ch = str[i];
         if(ch == 8)  { // backspace , go backwards (don't delete)
             display_tfb_uncursor(tfb_x_col, tfb_y_row);
             if(tfb_x_col > 0) tfb_x_col--;
+            // A fullwidth character is two cells, and its right half is not a
+            // place the cursor can sit. Step over it.
+            if(tfb_x_col > 0 && TFB[tfb_y_row*TFB_COLS+tfb_x_col] == TFB_WIDE_CONT) tfb_x_col--;
         }
         if(ch > 127) { // unicode
-            uint8_t code = convert_utf8_to_cp437(ch, &utf8_esc);
-            while(code == 0 && (i + 1) < len) {
+            // Decode to the codepoint and decide what to do with it, rather than
+            // folding straight to CP437 the way this used to: folding is exactly
+            // the step that throws Japanese away.
+            uint16_t ucs = 0;
+            uint8_t got = convert_utf8_to_ucs((uint8_t)ch, &utf8_esc, &ucs);
+            while(!got && (i + 1) < len) {
                 i++;
-                code = convert_utf8_to_cp437(str[i], &utf8_esc);
+                got = convert_utf8_to_ucs(str[i], &utf8_esc, &ucs);
             }
-            ch = code;
+            if(!got) {
+                // The sequence runs past the end of this write. utf8_esc carries
+                // the partial state into the next one.
+                continue;
+            }
+            uint8_t cp437 = convert_uc16_to_cp437(ucs);
+            if(cp437 == 0 && !tfb_font_is_unicode() && !tfb_font_user_set && jpfont_available()) {
+                // Nothing in the current font can draw this. Switch to the one
+                // that can, and re-lay the console at its geometry.
+                tfb_font = TFB_FONT_JP16;
+                visible_cols = display_tfb_visible_cols();
+                visible_rows = display_tfb_visible_rows();
+                if(visible_cols == 0 || visible_rows == 0) return;
+                if(tfb_x_col >= visible_cols) tfb_x_col = visible_cols - 1;
+                if(tfb_y_row >= visible_rows) tfb_y_row = visible_rows - 1;
+                display_tfb_update(-1);
+            }
+            ch = tfb_font_is_unicode() ? ucs : cp437;
+            if(ch == 0) continue;   // no font here can draw it
         }
         if(ch == 27) { // ANSI
             // we see an esc coming in on stream at i
@@ -1238,21 +1313,29 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg
         } else if(ch < 32) {
             // do nothing with other non-printable chars
         } else { // printable chars
-            if(tfb_x_col >= visible_cols) {
+            // Fullwidth Japanese takes two cells, the second a TFB_WIDE_CONT that
+            // the row builder paints nothing for. Keeping the console a grid of
+            // uniform cells this way is what lets scrolling, the cursor, the ANSI
+            // codes and the editor's column arithmetic all stay as they were.
+            uint8_t cells = (tfb_font_is_unicode() && jpfont_cell_width(ch) > 8) ? 2 : 1;
+            // Wrap before splitting a character across the right edge, not after.
+            if(tfb_x_col + cells > visible_cols) {
                 display_tfb_new_row();
             }
-            TFB[tfb_y_row*TFB_COLS+tfb_x_col] = ch;
-            if(ansi_active_format >= 0 ) {
-                TFBf[tfb_y_row*TFB_COLS+tfb_x_col] =ansi_active_format;        
-                TFBfg[tfb_y_row*TFB_COLS+tfb_x_col] =ansi_active_fg_color ;      
-                TFBbg[tfb_y_row*TFB_COLS+tfb_x_col] =ansi_active_bg_color;        
-
-            } else {
-                TFBf[tfb_y_row*TFB_COLS+tfb_x_col] = format;        
-                TFBfg[tfb_y_row*TFB_COLS+tfb_x_col] = fg_color;        
-                TFBbg[tfb_y_row*TFB_COLS+tfb_x_col] = bg_color;        
+            for(uint8_t cell=0; cell<cells; cell++) {
+                uint32_t off = (uint32_t)tfb_y_row*TFB_COLS + tfb_x_col + cell;
+                TFB[off] = (cell == 0) ? ch : TFB_WIDE_CONT;
+                if(ansi_active_format >= 0 ) {
+                    TFBf[off] = ansi_active_format;
+                    TFBfg[off] = ansi_active_fg_color;
+                    TFBbg[off] = ansi_active_bg_color;
+                } else {
+                    TFBf[off] = format;
+                    TFBfg[off] = fg_color;
+                    TFBbg[off] = bg_color;
+                }
             }
-            tfb_x_col++;
+            tfb_x_col += cells;
             if(tfb_x_col >= visible_cols) {
                 display_tfb_new_row();
             }
@@ -1268,6 +1351,80 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg
     }
 }
 
+
+// tulip.tfb_str()'s two halves, shared so the Tab5's own module table and the
+// stock one cannot drift apart on something as easy to get wrong as how many
+// cells a character takes.
+
+// Measure one character at the head of a UTF-8 string in the current TFB font.
+// *bytes gets its UTF-8 length, always at least 1 so a caller in a loop always
+// advances; *cp gets the value the TFB would store for it. Returns the cells it
+// occupies: 2 for fullwidth Japanese, 1 for everything drawable, 0 for a
+// character the current font has no glyph for at all.
+//
+// Every column count in the console and the editor goes through here, so they
+// cannot disagree about how wide a character is.
+uint8_t display_tfb_char_cells(const char *s, uint8_t *bytes, uint16_t *cp) {
+    uint32_t esc = 0;
+    uint16_t got = 0;
+    uint8_t n = 0;
+    for(const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        n++;
+        if(convert_utf8_to_ucs(*p, &esc, &got)) break;
+        // A lead byte promising more continuation bytes than UTF-8 allows, or a
+        // sequence cut off by the end of the string. Stop rather than run on.
+        if(n >= 4) { got = 0; break; }
+    }
+    *bytes = n;
+    *cp = 0;
+    if(n == 0) return 0;
+    if(!tfb_font_is_unicode()) got = convert_uc16_to_cp437(got);
+    if(got == 0) return 0;
+    *cp = got;
+    return (tfb_font_is_unicode() && jpfont_cell_width(got) > 8) ? 2 : 1;
+}
+
+// Place a UTF-8 string starting at (x,y). Returns the number of cells written,
+// which is not strlen(): a fullwidth Japanese character is one codepoint, several
+// UTF-8 bytes and two cells. Attributes are the caller's business -- it applies
+// them across the range this returns.
+uint16_t display_tfb_place_str(const char *str, uint16_t x, uint16_t y) {
+    if(TFB == NULL || y >= TFB_ROWS || x >= TFB_COLS) return 0;
+    uint16_t col = x;
+    for(const char *p = str; *p; ) {
+        uint8_t bytes = 0;
+        uint16_t cp = 0;
+        uint8_t cells = display_tfb_char_cells(p, &bytes, &cp);
+        p += bytes ? bytes : 1;
+        if(cells == 0) continue;
+        if(col + cells > TFB_COLS) break;
+        TFB[y*TFB_COLS+col] = cp;
+        if(cells == 2) TFB[y*TFB_COLS+col+1] = TFB_WIDE_CONT;
+        col += cells;
+    }
+    return col - x;
+}
+
+// Read the character at (x,y) back out as UTF-8. out needs room for 4 bytes.
+// Returns the raw cell value, and lands on the character when x names the right
+// half of a fullwidth one.
+uint16_t display_tfb_read_char(uint16_t x, uint16_t y, char *out) {
+    out[0] = 0;
+    if(TFB == NULL || x >= TFB_COLS || y >= TFB_ROWS) return 0;
+    if(x > 0 && TFB[y*TFB_COLS+x] == TFB_WIDE_CONT) x--;
+    uint16_t cp = TFB[y*TFB_COLS+x];
+    if(cp == TFB_WIDE_CONT) return 0;
+    if(tfb_font_is_unicode()) {
+        convert_ucs_to_utf8(cp, out);
+    } else {
+        // The other three fonts hold a CP437 byte, and there is no CP437 to
+        // Unicode table in this build to widen it with, so hand back the byte this
+        // call has always handed back rather than inventing a codepoint for it.
+        out[0] = (char)(cp & 0xff);
+        out[1] = 0;
+    }
+    return cp;
+}
 
 extern void unix_display_set_clock(uint8_t mhz);
 void display_set_clock(uint8_t mhz) {  
@@ -1422,6 +1579,7 @@ lv_font_t lv_font_tulip_15;
 lv_font_t lv_font_tulip_16;
 lv_font_t lv_font_tulip_17;
 lv_font_t lv_font_tulip_18;
+lv_font_t lv_font_tulip_19;   // Japanese, where the board has it
 
 
 lv_indev_t * indev;
@@ -1484,6 +1642,10 @@ void setup_lvgl() {
     get_lvgl_font_from_tulip(16, &lv_font_tulip_16);
     get_lvgl_font_from_tulip(17, &lv_font_tulip_17);
     get_lvgl_font_from_tulip(18, &lv_font_tulip_18);
+    // Leaves lv_font_tulip_19 zeroed on a board without the Japanese font,
+    // which is what lv.font_tulip_19 would then hand to LVGL -- so nothing
+    // that uses it silently draws with another face instead.
+    get_lvgl_font_from_tulip(TULIP_FONT_JP, &lv_font_tulip_19);
     
 }
 
@@ -1535,7 +1697,7 @@ void display_init(void) {
     TFB_pxlen = (uint16_t*)malloc_caps(V_RES*sizeof(uint16_t), MALLOC_CAP_INTERNAL);
 
 
-    TFB = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS*sizeof(uint8_t), MALLOC_CAP_INTERNAL);
+    TFB = (uint16_t*)malloc_caps(TFB_ROWS*TFB_COLS*sizeof(uint16_t), MALLOC_CAP_INTERNAL);
     TFBf = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS*sizeof(uint8_t), MALLOC_CAP_INTERNAL);
     TFBfg = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS*sizeof(uint8_t), MALLOC_CAP_INTERNAL);
     TFBbg = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS*sizeof(uint8_t), MALLOC_CAP_INTERNAL);

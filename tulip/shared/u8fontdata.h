@@ -72,6 +72,18 @@
 
 #define U8G2_FONT_SECTION(name) U8X8_FONT_SECTION(name) 
 
+/* The Japanese face in u8fontdata_jp.c is 157KB of flash -- more than every
+   other font in this tree put together -- so boards opt in rather than out.
+   TAB5 has ~250KB of its 0x3f0000 app slot left over after it, and the desktop
+   and web builds have no app slot to overflow at all. The ESP32-S3 boards
+   (Tulip CC, T-Deck) are deliberately left out until someone measures their
+   headroom against their 0x390000 slots: turning it on there is this one line,
+   but a build that overflows ota_0 fails in a way that reads nothing like "the
+   font did not fit". */
+#if defined(TAB5) || !defined(ESP_PLATFORM)
+#define TULIP_JP_FONT 1
+#endif
+
 /* the macro U8G2_USE_LARGE_FONTS enables large fonts (>32K) */
 /* it can be enabled for those uC supporting larger arrays */
 #if defined(unix) || defined(__arm__) || defined(__arc__) || defined(ESP8266) || defined(ESP_PLATFORM)

@@ -184,6 +184,8 @@ list(APPEND MICROPY_SOURCE_EXTMOD
     ${TULIP_SHARED_DIR}/lodepng.c
     ${TULIP_SHARED_DIR}/lvgl_u8g2.c
     ${TULIP_SHARED_DIR}/u8fontdata.c
+    ${TULIP_SHARED_DIR}/u8fontdata_jp.c
+    ${TULIP_SHARED_DIR}/jpfont.c
     ${TULIP_SHARED_DIR}/u8g2_fonts.c
     ${TULIP_SHARED_DIR}/amy_connector.c
     ${AMY_DIR}/src/algorithms.c

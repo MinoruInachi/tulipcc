@@ -80,6 +80,9 @@ void display_load_sprite_rgba(uint32_t mem_pos, uint32_t len, uint8_t* data);
 void display_load_sprite_raw(uint32_t mem_pos, uint32_t len, uint8_t* data);
 void display_screenshot(char * screenshot_fn, int16_t x, int16_t y, int16_t w, int16_t h);
 void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg_color, uint8_t bg_color);
+uint8_t display_tfb_char_cells(const char *s, uint8_t *bytes, uint16_t *cp);
+uint16_t display_tfb_place_str(const char *str, uint16_t x, uint16_t y);
+uint16_t display_tfb_read_char(uint16_t x, uint16_t y, char *out);
 
 void display_tfb_new_row();
 void display_run();
@@ -114,6 +117,16 @@ extern const unsigned char portfolio_glyph_bitmap[1792];
 #define TFB_FONT_8X12 0
 #define TFB_FONT_PORTFOLIO 1
 #define TFB_FONT_12X16 2
+// The two Japanese console fonts, both the efont Biwidth 16 face out of
+// u8fontdata_jp.c. JP16 is the face at its designed size: halfwidth cells 8px
+// wide, a fullwidth glyph spanning two of them, 160x45 on a Tab5. JP32 pixel
+// doubles it to 16px cells and 80x22 -- the same design, twice the size, since a
+// face drawn at 16 and doubled keeps the exact 1:2 half-to-fullwidth ratio that a
+// second face at 32 would not. Unlike the other three these fonts hold Unicode
+// codepoints in the TFB rather than CP437 bytes.
+#define TFB_FONT_JP16 3
+#define TFB_FONT_JP32 4
+#define TFB_FONT_MAX TFB_FONT_JP32
 
 #define MAX_LINE_EMITS 60000
 
@@ -192,6 +205,7 @@ extern uint16_t PIXEL_CLOCK_MHZ;
 
 extern uint8_t gpu_log;
 extern uint8_t tfb_font;
+extern uint8_t tfb_font_user_set;
 extern uint8_t tfb_active;
 extern uint8_t tfb_y_row; 
 extern uint8_t tfb_x_col; 
@@ -226,7 +240,10 @@ extern uint16_t *sprite_w_px;//[SPRITES];
 extern uint16_t *sprite_h_px;//[SPRITES]; 
 extern uint8_t *sprite_vis;//[SPRITES];
 extern uint32_t *sprite_mem;//[SPRITES];
-extern uint8_t *TFB;//[TFB_ROWS][TFB_COLS];
+// A Unicode codepoint per cell, not a byte: the Japanese console fonts need more
+// than 256 of them, and TFB_WIDE_CONT marks the right half of a fullwidth cell.
+// 0 still means "nothing here", which is also how a row's end is found.
+extern uint16_t *TFB;//[TFB_ROWS][TFB_COLS];
 extern uint8_t *TFBfg;//[TFB_ROWS][TFB_COLS];
 extern uint8_t *TFBbg;//[TFB_ROWS][TFB_COLS];
 extern uint8_t *TFBf;//[TFB_ROWS][TFB_COLS];

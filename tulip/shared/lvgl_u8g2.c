@@ -21,18 +21,29 @@ bool my_get_glyph_dsc_cb(const lv_font_t * font, lv_font_glyph_dsc_t * dsc_out, 
     // drawing CB will use the same bit of ram without having to re-draw. 
     // unfortunately this function seems to be called 3 times per glyph, so maybe try to not draw so much
 
-    // BDF fonts only have lower ascii i think
-    if(unicode_letter>127) {
+    // Eighteen of the nineteen ASCII faces really are ASCII only, but the
+    // Japanese one is not, and rejecting everything over 127 outright is what
+    // stopped an lv.label() from ever holding Japanese. Ask the font instead:
+    // codepoints past the BMP are beyond what u8g2's 16-bit encoding can index,
+    // and past that u8g2_IsGlyph() is the authority.
+    if(unicode_letter > 0xffff) {
         return false;
     }
 
     uint32_t font_no = *((uint32_t*)(font->user_data));
+    if(tulip_fonts[font_no] == NULL) {
+        return false;
+    }
     u8g2_font_t ufont;
     ufont.font = NULL; 
     ufont.font_decode.fg_color = 1; 
     ufont.font_decode.is_transparent = 1; 
     ufont.font_decode.dir = 0;
     u8g2_SetFont(&ufont, tulip_fonts[font_no]);
+    // Returning false lets LVGL fall back rather than drawing a blank box.
+    if(!u8g2_IsGlyph(&ufont, (uint16_t)unicode_letter)) {
+        return false;
+    }
     for(uint16_t i=0;i<(MAX_FONT_H*MAX_FONT_W);i++) { databuf[i] = 0; }
     int16_t adv = u8g2_DrawGlyph_target(&ufont, unicode_letter, databuf);
     //u8g2_font_decode_t font_decode = u8g2_GetGlyphInfo(&ufont, unicode_letter);
@@ -56,7 +67,10 @@ const void * my_get_glyph_bitmap_cb(lv_font_glyph_dsc_t * g_dsc, lv_draw_buf_t *
 }
 
 void get_lvgl_font_from_tulip(uint32_t font_no, lv_font_t * outfont) {
-    u8g2_font_t ufont;
+    // A board built without the Japanese font leaves a NULL in tulip_fonts, and
+    // u8g2_SetFont() would read the header straight off it.
+    if(tulip_fonts[font_no] == NULL) return;
+    u8g2_font_t ufont = {0};
     ufont.font = NULL; 
     ufont.font_decode.fg_color = 1; 
     ufont.font_decode.is_transparent = 1; 

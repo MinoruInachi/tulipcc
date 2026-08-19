@@ -39,6 +39,7 @@
 
 //#include <Adafruit_GFX.h>
 #include "u8g2_fonts.h"
+#include "keyscan.h"
 
 // HOW TO ADD NEW FONTS HERE
 // clone this repo https://github.com/olikraus/U8g2_for_Adafruit_GFX
@@ -66,7 +67,15 @@ const uint8_t*tulip_fonts[MAX_TULIP_FONTS] = {
     u8g2_font_luRS18_tr,
     u8g2_font_osb18_tr,
     u8g2_font_logisoso24_tr,
-    u8g2_font_lubB24_tr
+    u8g2_font_lubB24_tr,
+#if defined(TULIP_JP_FONT)
+    u8g2_font_b16_t_japanese3   // TULIP_FONT_JP
+#else
+    // Board built without the Japanese face. u8g2_a_height() and friends
+    // already zero their u8g2_font_t before u8g2_SetFont() precisely so a
+    // NULL entry here reports nothing instead of reading off a null pointer.
+    NULL
+#endif
 };
 
 //========================================================
@@ -850,6 +859,49 @@ int16_t u8g2_DrawGlyph_target(u8g2_font_t *u8g2, uint16_t encoding, uint8_t * ta
 int16_t u8g2_DrawGlyph(u8g2_font_t *u8g2, int16_t x, int16_t y, uint16_t encoding)
 {
   return u8g2_font_draw_glyph(u8g2, x, y, encoding);
+}
+
+/* Same as u8g2_DrawStr but decoding UTF-8 first. u8g2_DrawStr() advances one
+   char at a time, which draws each byte of a multibyte sequence as its own
+   glyph -- fine while every font here was ASCII, wrong now that one is not. */
+int16_t u8g2_DrawUTF8(u8g2_font_t *u8g2, int16_t x, int16_t y, const char *s)
+{
+  int16_t sum = 0;
+  uint32_t esc = 0;
+
+  while( *s != '\0' )
+  {
+    uint16_t cp = 0;
+    if( convert_utf8_to_ucs((uint8_t)*s, &esc, &cp) )
+    {
+      int16_t delta = u8g2_DrawGlyph(u8g2, x, y, cp);
+      switch(u8g2->font_decode.dir)
+      {
+        case 0: x += delta; break;
+        case 1: y += delta; break;
+        case 2: x -= delta; break;
+        case 3: y -= delta; break;
+      }
+      sum += delta;
+    }
+    s++;
+  }
+  return sum;
+}
+
+/* Width in pixels of a UTF-8 string in the current font, for centering. */
+uint16_t u8g2_UTF8Width(uint8_t font_no, const char *s)
+{
+  uint16_t width = 0;
+  uint32_t esc = 0;
+  while( *s != '\0' )
+  {
+    uint16_t cp = 0;
+    if( convert_utf8_to_ucs((uint8_t)*s, &esc, &cp) )
+      width += u8g2_glyph_width(font_no, cp);
+    s++;
+  }
+  return width;
 }
 
 int16_t u8g2_DrawStr(u8g2_font_t *u8g2, int16_t x, int16_t y, const char *s)

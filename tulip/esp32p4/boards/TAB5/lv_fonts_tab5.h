@@ -31,3 +31,4 @@ extern lv_font_t lv_font_tulip_15;  // luRS18              18px
 extern lv_font_t lv_font_tulip_16;  // osb18               18px
 extern lv_font_t lv_font_tulip_17;  // logisoso24          24px
 extern lv_font_t lv_font_tulip_18;  // lubB24              24px bold
+extern lv_font_t lv_font_tulip_19;  // efont Biwidth 16    Japanese, 8x16 / 16x16

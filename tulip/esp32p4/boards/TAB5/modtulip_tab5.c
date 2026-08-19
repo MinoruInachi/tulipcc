@@ -16,6 +16,7 @@
 #include "../../../shared/display.h"
 #include "../../../shared/bresenham.h"
 #include "../../../shared/keyscan.h"
+#include "../../../shared/jpfont.h"
 #include "../../../shared/lodepng.h"
 #include "../../../shared/tulip_helpers.h"
 #include "display_tab5.h"
@@ -972,8 +973,11 @@ static mp_obj_t tulip_tfb_str(size_t n_args, const mp_obj_t *args) {
     }
     size_t offset = (size_t)y * TFB_COLS + x;
     if (n_args == 2) {
+        char utf8[4];
+        uint16_t cp = display_tfb_read_char(x, y, utf8);
+        (void)cp;
         mp_obj_t tuple[] = {
-            mp_obj_new_str((const char *)&TFB[offset], 1),
+            mp_obj_new_str(utf8, strlen(utf8)),
             mp_obj_new_int(TFBf[offset]),
             mp_obj_new_int(TFBfg[offset]),
             mp_obj_new_int(TFBbg[offset]),
@@ -981,13 +985,11 @@ static mp_obj_t tulip_tfb_str(size_t n_args, const mp_obj_t *args) {
         return mp_obj_new_tuple(MP_ARRAY_SIZE(tuple), tuple);
     }
 
-    size_t length;
-    const char *text = mp_obj_str_get_data(args[2], &length);
-    if (length > (size_t)(TFB_COLS - x)) {
-        length = TFB_COLS - x;
-    }
-    for (size_t i = 0; i < length; i++) {
-        TFB[offset + i] = text[i];
+    // Cells, not bytes: a fullwidth Japanese character is three UTF-8 bytes and
+    // two cells, so the byte length is the wrong count to spread attributes over.
+    const char *text = mp_obj_str_get_str(args[2]);
+    uint16_t cells = display_tfb_place_str(text, x, y);
+    for (uint16_t i = 0; i < cells; i++) {
         if (n_args > 3 && mp_obj_get_int(args[3]) >= 0) TFBf[offset + i] = mp_obj_get_int(args[3]);
         if (n_args > 4 && mp_obj_get_int(args[4]) >= 0) TFBfg[offset + i] = mp_obj_get_int(args[4]);
         if (n_args > 5 && mp_obj_get_int(args[5]) >= 0) TFBbg[offset + i] = mp_obj_get_int(args[5]);
@@ -997,13 +999,26 @@ static mp_obj_t tulip_tfb_str(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_tfb_str_obj, 2, 6, tulip_tfb_str);
 
+// 0=8x12, 1=portfolio 6x8, 2=12x16, 3=Japanese 16 dot, 4=Japanese 16 dot at 2x
 static mp_obj_t tulip_tfb_font(size_t n_args, const mp_obj_t *args) {
     if (n_args == 0) return mp_obj_new_int(tfb_font);
     int font = mp_obj_get_int(args[0]);
-    if (font < TFB_FONT_8X12 || font > TFB_FONT_12X16) {
-        mp_raise_ValueError(MP_ERROR_TEXT("tfb_font must be 0, 1, or 2"));
+    if (font < TFB_FONT_8X12 || font > TFB_FONT_MAX) {
+        mp_raise_ValueError(MP_ERROR_TEXT("tfb_font must be 0 to 4"));
+    }
+    if ((font == TFB_FONT_JP16 || font == TFB_FONT_JP32) && !jpfont_available()) {
+        mp_raise_ValueError(MP_ERROR_TEXT("this build has no Japanese font"));
     }
     tfb_font = font;
+    // Picking a font by hand turns off the console's automatic switch to the
+    // Japanese font on the first character CP437 cannot hold.
+    tfb_font_user_set = 1;
+    // The cursor can be outside a smaller font's geometry now that the fonts
+    // differ in both axes.
+    uint8_t visible_cols = display_tfb_visible_cols();
+    uint8_t visible_rows = display_tfb_visible_rows();
+    if (visible_cols && tfb_x_col >= visible_cols) tfb_x_col = visible_cols - 1;
+    if (visible_rows && tfb_y_row >= visible_rows) tfb_y_row = visible_rows - 1;
     display_tfb_update(-1);
     return mp_const_none;
 }

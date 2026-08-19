@@ -31,7 +31,7 @@ char ** text_lines;
 char * yank;
 uint16_t lines = 0; 
 uint8_t dirty = 0;
-uint8_t *saved_tfb;
+uint16_t *saved_tfb;
 uint8_t *saved_tfbf;
 uint8_t *saved_tfbfg;
 uint8_t *saved_tfbbg;
@@ -40,6 +40,9 @@ uint16_t saved_tfb_x;
 uint8_t quit_flag = 0;
 uint16_t y_offset = 0;
 uint16_t cursor_x = 0;
+// The screen column cursor_x lands on. The same number until a line holds a
+// fullwidth character, at which point the byte offset and the column diverge.
+uint16_t cursor_col = 0;
 uint16_t cursor_y = 0;
 #define EDITOR_NORMAL 0
 #define EDITOR_PROMPT_CHAR 1
@@ -94,6 +97,75 @@ void editor_free(void* ptr) {
 }
 
 
+// cursor_x is a byte offset into the line, because that is what every insert,
+// delete and line split in this file works in. Once a line can hold Japanese
+// that is no longer the same number as the screen column: a fullwidth character
+// is up to three bytes and two cells. These four convert between the two, all of
+// them going through display_tfb_char_cells() so the editor and the console can
+// never disagree about how wide a character is.
+
+// Screen column of the byte at index `bytes` on line s.
+static uint16_t ed_col_of_byte(const char *s, uint16_t bytes) {
+    uint16_t col = 0, at = 0;
+    while(s[at] && at < bytes) {
+        uint8_t n = 0;
+        uint16_t cp = 0;
+        col += display_tfb_char_cells(s + at, &n, &cp);
+        at += n ? n : 1;
+    }
+    return col;
+}
+
+// Byte index of the character start at or after byte index `bytes`. Snapping to a
+// boundary matters after a vertical move, which carries a byte offset from a line
+// that may have split its characters up differently.
+static uint16_t ed_snap_byte(const char *s, uint16_t bytes) {
+    uint16_t at = 0;
+    uint16_t len = strlen(s);
+    if(bytes >= len) return len;
+    while(at < len) {
+        uint8_t n = 0;
+        uint16_t cp = 0;
+        display_tfb_char_cells(s + at, &n, &cp);
+        if(n == 0) n = 1;
+        if(at + n > bytes) return at;
+        at += n;
+    }
+    return len;
+}
+
+// Byte index one character forward / back from `bytes`.
+static uint16_t ed_next_byte(const char *s, uint16_t bytes) {
+    uint16_t len = strlen(s);
+    if(bytes >= len) return len;
+    uint8_t n = 0;
+    uint16_t cp = 0;
+    display_tfb_char_cells(s + bytes, &n, &cp);
+    if(n == 0) n = 1;
+    return (bytes + n > len) ? len : bytes + n;
+}
+
+static uint16_t ed_prev_byte(const char *s, uint16_t bytes) {
+    if(bytes == 0) return 0;
+    uint16_t at = 0, prev = 0;
+    while(at < bytes) {
+        prev = at;
+        uint8_t n = 0;
+        uint16_t cp = 0;
+        display_tfb_char_cells(s + at, &n, &cp);
+        at += n ? n : 1;
+    }
+    return prev;
+}
+
+// Colour a character's cells. A fullwidth one is two, and colouring only the
+// left half leaves the right half in whatever colour the previous line left it.
+static void ed_paint_fg(uint16_t y, uint16_t col, uint8_t cells, uint8_t color) {
+    for(uint8_t c=0;c<cells;c++) {
+        if(col + c < TFB_COLS) TFBfg[y*TFB_COLS+col+c] = color;
+    }
+}
+
 void editor_highlight_at_row(uint16_t y) {
     // {"False", "None", "True", "and", "as", "assert", "break", "class", "continue", "def", 
     //  "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", 
@@ -101,10 +173,21 @@ void editor_highlight_at_row(uint16_t y) {
     const char operators[]= ":;-/=+-()[]{}\'\".,\\|!@#$%^&*<>?"; // this + space is delims
 
     uint8_t state = 0;
+    // Walk bytes but colour cells: `i` indexes the line, `col` the screen, and a
+    // fullwidth character advances them by different amounts.
+    const char *line = text_lines[y+y_offset];
+    uint16_t col = 0;
     // TODO: keywords, function calls a = dog(), etc, kwargs?
-    for(uint16_t i=0;i<strlen(text_lines[y+y_offset]);i++) {
+    for(uint16_t i=0;i<strlen(line);) {
         uint8_t operator_hit = 0;
-        char c = text_lines[y+y_offset][i];
+        char c = line[i];
+        uint8_t char_bytes = 0;
+        uint16_t char_cp = 0;
+        uint8_t char_cells = display_tfb_char_cells(line + i, &char_bytes, &char_cp);
+        if(char_bytes == 0) char_bytes = 1;
+        if(col + char_cells > TFB_COLS) break;
+        // Everything below writes TFBfg at `i`; point that at the cell instead.
+        const uint16_t cell = col;
         //dbg("char %c state %d row %d i %d\n", c, state, y, i);
         if(!state) { 
             for(uint8_t j=0;j<strlen(operators);j++) {
@@ -114,32 +197,34 @@ void editor_highlight_at_row(uint16_t y) {
             }
             if(c==34 || c==39) {
                 state = 1;
-                TFBfg[y*TFB_COLS+i] = EDITOR_COLOR_STRING;
+                ed_paint_fg(y, cell, char_cells, EDITOR_COLOR_STRING);
             } else if (c==39) {
                 state = 2;
-                TFBfg[y*TFB_COLS+i] = EDITOR_COLOR_STRING;
+                ed_paint_fg(y, cell, char_cells, EDITOR_COLOR_STRING);
             } else if(c==35) {
                 state = 3;
-                TFBfg[y*TFB_COLS+i] = EDITOR_COLOR_COMMENT;
+                ed_paint_fg(y, cell, char_cells, EDITOR_COLOR_COMMENT);
             } else if(c>='0' && c<='9') {
-                TFBfg[y*TFB_COLS+i] = EDITOR_COLOR_NUMBER;
+                ed_paint_fg(y, cell, char_cells, EDITOR_COLOR_NUMBER);
             } else if(operator_hit) {
-                TFBfg[y*TFB_COLS+i] = EDITOR_COLOR_OPERATOR;
+                ed_paint_fg(y, cell, char_cells, EDITOR_COLOR_OPERATOR);
             } else {
-                TFBfg[y*TFB_COLS+i] = EDITOR_COLOR_FG; 
+                ed_paint_fg(y, cell, char_cells, EDITOR_COLOR_FG);
             }
         } else {
             // We are in a state
             if(state == 1) {
                 if(c==34) state = 0;
-                TFBfg[y*TFB_COLS+i] = EDITOR_COLOR_STRING;
+                ed_paint_fg(y, cell, char_cells, EDITOR_COLOR_STRING);
             } else if(state ==2) {
                 if(c==39) state = 0;
-                TFBfg[y*TFB_COLS+i] = EDITOR_COLOR_STRING;
+                ed_paint_fg(y, cell, char_cells, EDITOR_COLOR_STRING);
             } else if(state == 3) {
-                TFBfg[y*TFB_COLS+i] = EDITOR_COLOR_COMMENT;
+                ed_paint_fg(y, cell, char_cells, EDITOR_COLOR_COMMENT);
             } 
         }
+        i += char_bytes;
+        col += char_cells;
     }
 }
 
@@ -167,13 +252,21 @@ void string_at_row(char * s, int16_t len, uint16_t y) {
     if(s!=NULL) {
     	if(len < 0) len=strlen(s);
     	if(y<TFB_ROWS) {
-    		for(uint16_t i=0;i<len;i++) {
-    			TFB[y*TFB_COLS+i] = s[i];
+            // len is a byte count from every caller (strlen, or a status line's
+            // own length), and the cells it fills is a different number once the
+            // line holds Japanese. Place characters, then clear from wherever the
+            // last one actually ended.
+            char saved = 0;
+            uint8_t truncated = (len < (int16_t)strlen(s));
+            if(truncated) { saved = s[len]; s[len] = 0; }
+            uint16_t cells = display_tfb_place_str(s, 0, y);
+            if(truncated) s[len] = saved;
+    		for(uint16_t i=0;i<cells;i++) {
     			TFBf[y*TFB_COLS+i] = 0; ;
     			TFBfg[y*TFB_COLS+i] = EDITOR_COLOR_FG;
     			TFBbg[y*TFB_COLS+i] = EDITOR_COLOR_BG;
     		}
-    		for(uint16_t i=len;i<TFB_COLS;i++) {
+    		for(uint16_t i=cells;i<TFB_COLS;i++) {
     			TFB[y*TFB_COLS+i] = 0;
     		}
             if(y!=EDITOR_STATUS_ROW)editor_highlight_at_row(y);
@@ -199,8 +292,9 @@ void paint_tfb(uint16_t start_at_y) {
 
 // Move the cursor to pos x,y and scroll the viewport if needed
 void move_cursor(int16_t x, int16_t y) {
-	// Undo old cursor
-	TFBf[cursor_y*TFB_COLS+cursor_x] = 0; 
+	// Undo old cursor. Indexed by column, not by cursor_x: the cursor is on the
+	// screen and cursor_x counts bytes into the line.
+	TFBf[cursor_y*TFB_COLS+cursor_col] = 0; 
     display_tfb_update(cursor_y);
 
 	// Move viewport up/down half a screen of visible rows
@@ -229,18 +323,26 @@ void move_cursor(int16_t x, int16_t y) {
 	// X scrolling TODO or NI, not sure yet
 	if(x < 0) {
 		dbg("NYI scroll left\n");
-	} else if(x >= (int16_t)EDITOR_COLS) {
-		// Still no horizontal scrolling, but stopping at the last visible
-		// column beats parking the cursor where it cannot be seen -- and a
-		// tab jump past TFB_COLS used to write into the next row's buffer.
-		dbg("NYI scroll right %d %d\n", x, y);
 	} else {
-		cursor_x = x;
+		// x is a byte offset into the line the cursor is now on -- which, after a
+		// vertical move, is not the line it was on when the caller worked x out.
+		// cursor_y is already updated above, so this reads the right one.
+		const char *line = (cursor_y + y_offset < lines) ? text_lines[cursor_y + y_offset] : "";
+		uint16_t col = ed_col_of_byte(line, (uint16_t)x);
+		if(col >= EDITOR_COLS) {
+			// Still no horizontal scrolling, but stopping at the last visible
+			// column beats parking the cursor where it cannot be seen -- and a
+			// tab jump past TFB_COLS used to write into the next row's buffer.
+			dbg("NYI scroll right %d %d\n", x, y);
+		} else {
+			cursor_x = x;
+			cursor_col = col;
+		}
 	}
 	// Put in new cursor 
-    TFBf[cursor_y*TFB_COLS+cursor_x] = FORMAT_INVERSE|FORMAT_FLASH;
+    TFBf[cursor_y*TFB_COLS+cursor_col] = FORMAT_INVERSE|FORMAT_FLASH;
 
-    if(TFB[cursor_y*TFB_COLS+cursor_x]==0) TFB[cursor_y*TFB_COLS+cursor_x] = 32;
+    if(TFB[cursor_y*TFB_COLS+cursor_col]==0) TFB[cursor_y*TFB_COLS+cursor_col] = 32;
 
     display_tfb_update(y);
 
@@ -252,9 +354,9 @@ void move_cursor(int16_t x, int16_t y) {
     if(dirty) dirty_char = '*';
     #ifdef TDECK
     // Smaller screen, less space for text
-	sprintf(status, "%04d / %04d [%02.2f%%] %3d %.10s %c", cursor_y+y_offset+1, lines,  percent, cursor_x, fn, dirty_char);
+	sprintf(status, "%04d / %04d [%02.2f%%] %3d %.10s %c", cursor_y+y_offset+1, lines,  percent, cursor_col, fn, dirty_char);
     #else
-    sprintf(status, "%04d / %04d [%02.2f%%] %3d %.35s %c", cursor_y+y_offset+1, lines,  percent, cursor_x, fn, dirty_char);
+    sprintf(status, "%04d / %04d [%02.2f%%] %3d %.35s %c", cursor_y+y_offset+1, lines,  percent, cursor_col, fn, dirty_char);
     #endif    
 	string_at_row(status, strlen(status), status_row);
 	format_at_row(FORMAT_INVERSE, -1, status_row);
@@ -285,7 +387,9 @@ void editor_page_down() {
 }
 
 void save_tfb() {
-	saved_tfb = (uint8_t*)editor_malloc(TFB_ROWS*TFB_COLS);
+	// A codepoint per cell, not a byte: saving it into a uint8_t buffer would
+	// truncate every Japanese character on screen to its low byte.
+	saved_tfb = (uint16_t*)editor_malloc(TFB_ROWS*TFB_COLS*sizeof(uint16_t));
 	saved_tfbf= (uint8_t*)editor_malloc(TFB_ROWS*TFB_COLS);
 	saved_tfbfg= (uint8_t*)editor_malloc(TFB_ROWS*TFB_COLS);
 	saved_tfbbg= (uint8_t*)editor_malloc(TFB_ROWS*TFB_COLS);
@@ -521,11 +625,17 @@ void editor_backspace() {
             string_at_row(cur_line, -1, cursor_y);
             move_cursor(cursor_x-EDITOR_TAB_SPACES, cursor_y);
         } else {
-    		for(uint16_t i=cursor_x-1;i<strlen(cur_line);i++) {
-	       		cur_line[i] = cur_line[i + 1];
+            // A whole character, which is up to three bytes of UTF-8. Removing
+            // one byte of a Japanese character would leave the rest of it behind
+            // as an invalid sequence.
+            uint16_t prev = ed_prev_byte(cur_line, cursor_x);
+            uint16_t gone = cursor_x - prev;
+            uint16_t line_len = strlen(cur_line);
+    		for(uint16_t i=prev;i+gone<=line_len;i++) {
+	       		cur_line[i] = cur_line[i + gone];
     		}
             string_at_row(cur_line, -1, cursor_y);
-            move_cursor(cursor_x-1, cursor_y);
+            move_cursor(prev, cursor_y);
         }
 	} else {
 		// hard mode, move up
@@ -633,20 +743,16 @@ void editor_crlf() {
 
 void editor_up() {
     if(cursor_y+y_offset > 0) {
-        if(cursor_x < strlen(text_lines[cursor_y-1 + y_offset])) {
-            move_cursor(cursor_x, cursor_y-1);
-        } else {
-            move_cursor(strlen(text_lines[cursor_y-1 + y_offset]), cursor_y-1);
-        }
+        // ed_snap_byte() also clamps to the end of the destination line, which is
+        // what the two-branch version here was for.
+        const char *dest = text_lines[cursor_y-1 + y_offset];
+        move_cursor(ed_snap_byte(dest, cursor_x), cursor_y-1);
     }
 }
 void editor_down() {
     if(cursor_y + y_offset < lines-1) {
-        if(cursor_x < strlen(text_lines[cursor_y+1+y_offset])) {
-            move_cursor(cursor_x, cursor_y+1);
-        } else {
-            move_cursor(strlen(text_lines[cursor_y+1+y_offset]), cursor_y+1);
-        }
+        const char *dest = text_lines[cursor_y+1+y_offset];
+        move_cursor(ed_snap_byte(dest, cursor_x), cursor_y+1);
     } 
 }
 
@@ -664,7 +770,7 @@ void editor_right() {
         if(tab) {
             move_cursor(cursor_x + EDITOR_TAB_SPACES, cursor_y);
         } else {
-            move_cursor(cursor_x + 1, cursor_y);
+            move_cursor(ed_next_byte(text_lines[cursor_y + y_offset], cursor_x), cursor_y);
         }
     } else {
         editor_down();
@@ -685,7 +791,7 @@ void editor_left() {
         if(tab) {
             move_cursor(cursor_x - EDITOR_TAB_SPACES, cursor_y);
         } else {
-            move_cursor(cursor_x - 1, cursor_y);
+            move_cursor(ed_prev_byte(text_lines[cursor_y + y_offset], cursor_x), cursor_y);
         }
     } else {
         // If x is at the left, go up a line

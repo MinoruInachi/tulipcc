@@ -73,6 +73,7 @@ uint16_t draw_new_char(const char c, uint16_t x, uint16_t y, uint8_t fg, uint8_t
   ufont.font_decode.dir = 0;
   
   //fprintf(stderr, "setting up new char font %d char %c x %d y %d\n", font_no, c, x, y);
+  if(tulip_fonts[font_no] == NULL) return x;
   u8g2_SetFont(&ufont, tulip_fonts[font_no]);
   u8g2_SetForegroundColor(&ufont, fg);
   //fprintf(stderr, "drawing new char font %d char %c x %d y %d\n", font_no, c, x, y);
@@ -86,14 +87,13 @@ uint16_t draw_new_str(const char * str, uint16_t x, uint16_t y, uint8_t fg, uint
   ufont.font_decode.is_transparent = 1; 
   ufont.font_decode.dir = 0;
 
+  if(tulip_fonts[font_no] == NULL) return x;
   u8g2_SetFont(&ufont, tulip_fonts[font_no]);
   u8g2_SetForegroundColor(&ufont, fg);
   if(centered) {
-    uint16_t width = 0;
-    // Compute width of text for centering
-    for(uint16_t i=0;i<strlen(str);i++) {
-        width += u8g2_glyph_width(font_no, str[i]);
-    }
+    // Codepoints, not bytes. Measuring per byte counted a fullwidth Japanese
+    // character three times and centred the line off the left edge.
+    uint16_t width = u8g2_UTF8Width(font_no, str);
 
     uint16_t height = u8g2_a_height(font_no);
     y = y + ((h+height)/2);
@@ -102,7 +102,7 @@ uint16_t draw_new_str(const char * str, uint16_t x, uint16_t y, uint8_t fg, uint
     }
 
   }
-  return u8g2_DrawStr(&ufont, x,y,str);
+  return u8g2_DrawUTF8(&ufont, x,y,str);
 }
 
 

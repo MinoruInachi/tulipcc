@@ -22,6 +22,7 @@
 #include "keyscan.h"
 #include "display.h"
 #include "bresenham.h"
+#include "jpfont.h"
 #endif
 #include "genhdr/mpversion.h"
 
@@ -844,16 +845,23 @@ STATIC mp_obj_t tulip_tfb_update(size_t n_args, const mp_obj_t *args) {
 STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_tfb_update_obj, 0, 0, tulip_tfb_update);
 
 // tulip.tfb_font() -> current font number
-// tulip.tfb_font(x) -> set font number (0=8x12, 1=portfolio, 2=12x16)
+// tulip.tfb_font(x) -> set font number
+//   0=8x12, 1=portfolio 6x8, 2=12x16, 3=Japanese 16 dot, 4=Japanese 16 dot at 2x
 STATIC mp_obj_t tulip_tfb_font(size_t n_args, const mp_obj_t *args) {
     if(n_args == 0) {
         return mp_obj_new_int(tfb_font);
     }
     int font_no = mp_obj_get_int(args[0]);
-    if(font_no < TFB_FONT_8X12 || font_no > TFB_FONT_12X16) {
-        mp_raise_ValueError(MP_ERROR_TEXT("tfb_font must be 0, 1, or 2"));
+    if(font_no < TFB_FONT_8X12 || font_no > TFB_FONT_MAX) {
+        mp_raise_ValueError(MP_ERROR_TEXT("tfb_font must be 0 to 4"));
+    }
+    if((font_no == TFB_FONT_JP16 || font_no == TFB_FONT_JP32) && !jpfont_available()) {
+        mp_raise_ValueError(MP_ERROR_TEXT("this build has no Japanese font"));
     }
     tfb_font = (uint8_t)font_no;
+    // Picking a font by hand turns off the console's automatic switch to the
+    // Japanese font on the first character CP437 cannot hold.
+    tfb_font_user_set = 1;
     uint8_t visible_cols = display_tfb_visible_cols();
     uint8_t visible_rows = display_tfb_visible_rows();
     if(visible_cols == 0) visible_cols = 1;
@@ -1085,39 +1093,29 @@ STATIC mp_obj_t tulip_tfb_str(size_t n_args, const mp_obj_t *args) {
                 if(TFB[y*TFB_COLS+i]==0) TFB[y*TFB_COLS+i] = 32;
             }
         }
-        for(uint16_t i=0;i<strlen(str);i++) {
-            TFB[y*TFB_COLS+x+i] = str[i];
-        }
-        if(n_args > 3) {
-            if(mp_obj_get_int(args[3])>=0) {
-                for(uint16_t i=0;i<strlen(str);i++) {
-                    TFBf[y*TFB_COLS+x+i] = mp_obj_get_int(args[3]);
-                }
-            }
-        }
-        if(n_args > 4 ) {
-            if(mp_obj_get_int(args[4])>=0) {
-                for(uint16_t i=0;i<strlen(str);i++) {
-                    TFBfg[y*TFB_COLS+x+i] = mp_obj_get_int(args[4]);
-                }
-            }
-        }
-        if(n_args > 5 ) {
-            if(mp_obj_get_int(args[5])>=0) {
-                for(uint16_t i=0;i<strlen(str);i++) {
-                    TFBbg[y*TFB_COLS+x+i] = mp_obj_get_int(args[5]);
-                }
+        // Cells, not bytes: a fullwidth Japanese character is three UTF-8 bytes
+        // and two cells, so strlen() is the wrong count to spread attributes over.
+        uint16_t cells = display_tfb_place_str(str, x, y);
+        for(uint8_t arg=3; arg<6 && arg<n_args; arg++) {
+            int v = mp_obj_get_int(args[arg]);
+            if(v < 0) continue;
+            for(uint16_t i=0;i<cells;i++) {
+                if(arg == 3) TFBf[y*TFB_COLS+x+i] = v;
+                else if(arg == 4) TFBfg[y*TFB_COLS+x+i] = v;
+                else TFBbg[y*TFB_COLS+x+i] = v;
             }
         }
         display_tfb_update(y);
         return mp_const_none; 
     } else {
         mp_obj_t tuple[5];
-        tuple[0] = mp_obj_new_str((const char*)(TFB + (y*TFB_COLS+x)), 1);
+        char utf8[4];
+        uint16_t cp = display_tfb_read_char(x, y, utf8);
+        tuple[0] = mp_obj_new_str(utf8, strlen(utf8));
         tuple[1] = mp_obj_new_int(TFBf[y*TFB_COLS+x]);
         tuple[2] = mp_obj_new_int(TFBfg[y*TFB_COLS+x]);
         tuple[3] = mp_obj_new_int(TFBbg[y*TFB_COLS+x]);
-        tuple[4] = mp_obj_new_int(TFB[y*TFB_COLS+x]);
+        tuple[4] = mp_obj_new_int(cp);
         return mp_obj_new_tuple(5,tuple);
     }
 }

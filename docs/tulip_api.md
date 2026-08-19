@@ -887,20 +887,44 @@ tulip.bg_swap()
 
 There are three types of fonts built into Tulip. 
 
- - TFB fonts: we ship 3 fixed-size fonts for the TFB (see below). You can switch them at runtime with `tulip.tfb_font()`.
+ - TFB fonts: we ship 5 fixed-size fonts for the TFB (see below). You can switch them at runtime with `tulip.tfb_font()`.
  - LVGL fonts: [LVGL ships a few fonts like `lv.font_montserrat_12`](https://docs.lvgl.io/master/details/main-modules/font.html). These fonts have more glyphs, can handle some unicode characters, and also ship with symbols (like the ones we show in the Tulip launcher). 
- - Tulip fonts: we ship 19 fonts to use with `bg_str` etc, and they can also be used in LVGL widgets by referencing them like `lv.tulip_font_13`.
+ - Tulip fonts: we ship 20 fonts to use with `bg_str` etc, and they can also be used in LVGL widgets by referencing them like `lv.tulip_font_13`.
+
+Font 19 is the Japanese one, and the only Tulip font that is not ASCII-only. It is
+efont Biwidth 16, a public domain bitmap face descended from the Japanese 東雲
+(Shinonome) fonts, in which halfwidth Latin at 8x16 and fullwidth Japanese at 16x16
+are one design -- so a line mixing the two shares a box, a baseline and a stroke
+weight rather than looking like two fonts glued together. It carries all of ASCII,
+hiragana, katakana, and 3449 kanji: the 常用漢字 and 人名用漢字 and then some, but
+not all of JIS X 0208. A character it does not have is drawn as 〓, the Japanese
+convention for a character that could not be set, so the column count stays right.
+Board support is compiled in: Tab5, Tulip Desktop and Tulip Web have it; the
+ESP32-S3 boards do not, and `tulip.tfb_font(3)` raises there.
 
 ![IMG_3339](https://user-images.githubusercontent.com/76612/229381546-46ec4c50-4c4a-4f3a-9aec-c77d439081b2.jpeg)
 
 
 ## Text frame buffer (TFB)
 
-The TFB supports 3 built-in fixed-width fonts, switchable at runtime with `tulip.tfb_font(x)`:
+The TFB supports 5 built-in fixed-width fonts, switchable at runtime with `tulip.tfb_font(x)`:
 
  - `0`: default 8x12 font
  - `1`: small 6x8 font
  - `2`: big 12x16 font
+ - `3`: Japanese 16 dot -- 8x16 halfwidth cells, fullwidth characters spanning two of them
+ - `4`: the same face pixel doubled -- 16x32 halfwidth cells, 32x32 fullwidth
+
+Fonts `3` and `4` are the ones that can show Japanese. A fullwidth character takes
+two TFB cells, so `tulip.tfb_str(x,y)` reads the same character back from either of
+them, and everything else -- scrolling, ANSI codes, the editor -- keeps working on
+a grid of uniform cells. Font `4` is font `3` doubled rather than a second face at
+32 dot, which is what keeps the exact 1:2 half-to-fullwidth ratio.
+
+You do not have to switch fonts by hand to see Japanese. The first time the console
+is asked to print a character none of the CP437 fonts can draw, it switches itself
+to font `3`. Calling `tulip.tfb_font()` yourself turns that off for the rest of the
+session -- a font you chose out loud is never second-guessed.
 
 The TFB is a character plane for fast text drawing. The visible row/column count depends on the selected font size. It supports 256 ANSI 
 colors for foreground and background, and supports formatting. TFB is used by the text 
@@ -931,9 +955,15 @@ tulip.tfb_start()
 tulip.tfb_save()
 tulip.tfb_restore()
 
-# Set/get TFB font number (0=8x12, 1=6x8, 2=12x16)
+# Set/get TFB font number
+# 0=8x12, 1=6x8, 2=12x16, 3=Japanese 16 dot, 4=Japanese 16 dot at 2x
+# 3 and 4 raise ValueError on a board built without the Japanese font.
 tulip.tfb_font(x)
 font_num = tulip.tfb_font()
+
+# Japanese needs no setup -- printing it switches the console to font 3 on its own.
+print("日本語と English が混在する行。ABCdefg 0123")
+tulip.tfb_font(4)   # same face, twice the size: 80x22 on a Tab5
 
 ```
 

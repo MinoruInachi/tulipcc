@@ -43,7 +43,12 @@
 #include "u8fontdata.h"
 #include <stdint.h>
 
-#define MAX_TULIP_FONTS 19
+// 19 ASCII faces plus the one Japanese face. The Japanese one is last so the
+// existing tulip.tfb_font()/lv.font_tulip_N numbering does not move.
+#define MAX_TULIP_FONTS 20
+// tulip_fonts[] index of the efont Biwidth 16 face -- halfwidth Latin at 8x16
+// and fullwidth Japanese at 16x16 out of one design. See u8fontdata_jp.c.
+#define TULIP_FONT_JP 19
 
 //========================================================
 
@@ -132,6 +137,8 @@ void u8g2_SetFontMode(u8g2_font_t *u8g2, uint8_t is_transparent);
 void u8g2_SetFontDirection(u8g2_font_t *u8g2, uint8_t dir);
 int16_t u8g2_DrawGlyph(u8g2_font_t *u8g2, int16_t x, int16_t y, uint16_t encoding);
 int16_t u8g2_DrawStr(u8g2_font_t *u8g2, int16_t x, int16_t y, const char *s);
+int16_t u8g2_DrawUTF8(u8g2_font_t *u8g2, int16_t x, int16_t y, const char *s);
+uint16_t u8g2_UTF8Width(uint8_t font_no, const char *s);
 void u8g2_SetFont(u8g2_font_t *u8g2, const uint8_t  *font);
 void u8g2_SetForegroundColor(u8g2_font_t *u8g2, uint16_t fg);
 void u8g2_SetBackgroundColor(u8g2_font_t *u8g2, uint16_t bg);
@@ -164,6 +171,9 @@ extern const uint8_t u8g2_font_luRS18_tr[] U8G2_FONT_SECTION("u8g2_font_luRS18_t
 extern const uint8_t u8g2_font_osb18_tr[] U8G2_FONT_SECTION("u8g2_font_osb18_tr");
 extern const uint8_t u8g2_font_logisoso24_tr[] U8G2_FONT_SECTION("u8g2_font_logisoso24_tr");
 extern const uint8_t u8g2_font_lubB24_tr[] U8G2_FONT_SECTION("u8g2_font_lubB24_tr");
+#if defined(TULIP_JP_FONT)
+extern const uint8_t u8g2_font_b16_t_japanese3[] U8G2_FONT_SECTION("u8g2_font_b16_t_japanese3");
+#endif
 
 
 /* end font list */

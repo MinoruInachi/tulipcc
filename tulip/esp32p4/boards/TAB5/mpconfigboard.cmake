@@ -65,6 +65,8 @@ set(MICROPY_SOURCE_BOARD
     ${MICROPY_BOARD_DIR}/../../../shared/ui.c
     ${MICROPY_BOARD_DIR}/../../../shared/lvgl_u8g2.c
     ${MICROPY_BOARD_DIR}/../../../shared/u8fontdata.c
+    ${MICROPY_BOARD_DIR}/../../../shared/u8fontdata_jp.c
+    ${MICROPY_BOARD_DIR}/../../../shared/jpfont.c
     ${MICROPY_BOARD_DIR}/../../../shared/u8g2_fonts.c
     ${MICROPY_BOARD_DIR}/shared_renderer_tab5_glue.c
     ${MICROPY_BOARD_DIR}/audio_tab5.c
