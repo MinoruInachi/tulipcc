@@ -449,17 +449,27 @@ class IME:
 
     def key(self, k):
         if k == _TOGGLE:
-            # Hand the keyboard back. Anything half-composed is committed rather
-            # than thrown away, which is what every other IME does on the way out.
-            if self.state != _OFF:
+            if self.state == _OFF:
+                # Turning it on. C has already armed ime_active so the drain runs;
+                # this press is the IME's cue to take the console and, the first
+                # time round, to read the dictionary.
+                self._need_japanese_font()
+                self.state = _KANA
+                self.load()
+                self._draw_strip()
+            else:
+                # Handing the keyboard back. Anything half-composed is committed
+                # rather than thrown away, which is what every IME does on the way
+                # out.
                 self._commit_all()
-            self._restore_strip()
-            self.state = _OFF
-            tulip.ime(False)
+                self._restore_strip()
+                self.state = _OFF
+                tulip.ime(False)
             return
 
         if self.state == _OFF:
-            # The toggle armed us in C; this is the first key of a session.
+            # A key arrived without the toggle having turned us on -- C armed the
+            # flag and something else queued behind it. Treat it as switched on.
             self._need_japanese_font()
             self.state = _KANA
 
@@ -586,13 +596,18 @@ class IME:
 _ime = IME()
 
 
-def start(load_dictionary=True):
-    """Arm the IME. Ctrl-\\ then toggles it on and off."""
+def start(load_dictionary=False):
+    """Arm the IME, so the toggle key starts working.
+
+    Cheap by default: the dictionary is a couple of seconds to read and is left
+    until the IME is first switched on, so that this can sit in boot.py without
+    costing anything at boot. Pass True to pay it now instead.
+    """
     tulip.ime_callback(_ime.poll)
-    _ime._need_japanese_font()
     if load_dictionary:
+        _ime._need_japanese_font()
         _ime.load()
-    print("ime: ready -- Ctrl-\\ to switch 日本語 on and off")
+    print("ime: ready -- 変換 (or Ctrl-\\) to switch 日本語 on and off")
 
 
 def stop():

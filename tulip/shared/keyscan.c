@@ -502,9 +502,13 @@ uint16_t scan_ascii(uint8_t code, uint32_t modifier) {
         case KEY_SPACE: return ' '; 
         case KEY_MINUS: if(shift) return '_'; else return '-';
         case KEY_EQUAL: if(shift) return '+'; else return '=';
-        case KEY_LEFTBRACE: if(shift) return '{'; else return '[';
-        case KEY_RIGHTBRACE: if(shift) return '}'; else return ']';
-        case KEY_BACKSLASH: if(shift) return '|'; else return '\\';
+        // Ctrl on these three produces a real ASCII control code, the same as
+        // every terminal: 27, 28, 29. The block above only applies ctrl to the
+        // letters, which is why Ctrl-\ -- documented as the IME toggle -- could
+        // not be typed at all.
+        case KEY_LEFTBRACE: if(ctrl) return 27; if(shift) return '{'; else return '[';
+        case KEY_RIGHTBRACE: if(ctrl) return 29; if(shift) return '}'; else return ']';
+        case KEY_BACKSLASH: if(ctrl) return 28; if(shift) return '|'; else return '\\';
         case KEY_HASHTILDE: if(shift) return '~'; else return '#';
         case KEY_SEMICOLON: if(shift) return ':'; else return ';';
         case KEY_APOSTROPHE: if(shift) return '\"'; else return '\'';
@@ -512,6 +516,21 @@ uint16_t scan_ascii(uint8_t code, uint32_t modifier) {
         case KEY_COMMA: if(shift) return '<'; else return ',';
         case KEY_DOT: if(shift) return '>'; else return '.';
         case KEY_SLASH: if(shift) return '?'; else return '/';
+
+        // The JIS-only keys, which decoded to nothing at all before -- they are
+        // absent from the US layout this table otherwise describes, so they fell
+        // through to `return 0`.
+        //
+        // 変換 and かな are what a Japanese keyboard has where other layouts have
+        // nothing, and switching input is exactly what they mean, so they are the
+        // IME toggle without any configuration. 無変換 is left returning 0 for
+        // tulip.key_remap() to claim.
+        case KEY_HENKAN: return TULIP_IME_TOGGLE;
+        case KEY_KATAKANAHIRAGANA: return TULIP_IME_TOGGLE;
+        // ろ and ¥ are where a JIS keyboard keeps its backslash and underscore, and
+        // a Python user needs both. This is what Windows and macOS do with them.
+        case KEY_RO: if(shift) return '_'; else return '\\';
+        case KEY_YEN: if(shift) return '|'; else return '\\';
 
         // We return extended codes for these, and get converted to ANSI for the repl down the line
         case KEY_UP: return 259; 

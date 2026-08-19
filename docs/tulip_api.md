@@ -390,13 +390,18 @@ import ime
 ime.start()
 ```
 
-`Ctrl-\` then hands the keyboard to the IME and takes it back. On a JIS keyboard
-you can point its own key at that instead, from `boot.py`:
+The **変換** key then hands the keyboard to the IME and takes it back, as does
+**かな** and, on a keyboard without them, **`Ctrl-\`**. Nothing to configure: those
+two JIS keys used to decode to nothing at all, and switching input is what they
+mean. The 半角/全角 key sits where a US keyboard keeps its backtick, so it is left
+alone by default -- point it at the toggle yourself if you want it:
 
 ```python
-tulip.key_remap(0x8a, 0, 0x1c)   # 変換 key
 tulip.key_remap(0x35, 0, 0x1c)   # 半角/全角 key, JIS position
 ```
+
+`ime.start()` is cheap -- it only arms the toggle. The dictionary is read the
+first time you switch the IME on, which takes about two seconds and happens once.
 
 While the IME holds the keyboard, what you type appears on a 変換 strip along the
 bottom console row rather than going straight into the line -- committed text is
@@ -428,8 +433,8 @@ Katakana and hiragana are always offered as the last two candidates, so anything
 the dictionary does not have can still be set -- press space and cycle to them.
 
 ```python
-ime.start()                  # arm it, and load the dictionary (about 2 seconds)
-ime.start(False)             # arm it without the dictionary: kana only
+ime.start()                  # arm the toggle; the dictionary waits until first use
+ime.start(True)              # read the dictionary now instead (about 2 seconds)
 ime.stop()                   # disarm; the keyboard goes back to normal
 ime.target(my_textarea)      # send committed text to this instead of guessing
 ime.target(None)             # back to guessing: LVGL focus, else editor, else REPL
