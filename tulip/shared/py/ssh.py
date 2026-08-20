@@ -884,20 +884,33 @@ def utf8_split(buf):
                 buf[cut:])
 
 
-def key_bytes(k):
+# Bit 0 of tulip.term_flags(): the terminal has been put into application
+# cursor mode, and the arrows have to change shape. A full-screen program turns
+# it on itself (terminfo's smkx) and then looks for exactly what its terminfo
+# entry says an arrow is, which for xterm is ESC O A -- send it ESC [ A instead
+# and the arrows simply stop working inside vi.
+TERM_APP_CURSOR = 1
+
+# The keys that are a sequence rather than a character. tulip.key_bytes-style
+# codes are keyscan.h's; the C side has the same table for the REPL.
+_KEY_CURSOR = {259: b'A', 258: b'B', 261: b'C', 260: b'D', 264: b'H', 265: b'F'}
+_KEY_TILDE = {262: b'3', 266: b'2'}            # Delete, Insert
+_KEY_FN = (b'\x1bOP', b'\x1bOQ', b'\x1bOR', b'\x1bOS',
+           b'\x1b[15~', b'\x1b[17~', b'\x1b[18~', b'\x1b[19~',
+           b'\x1b[20~', b'\x1b[21~', b'\x1b[23~', b'\x1b[24~')
+
+
+def key_bytes(k, flags=0):
     """One Tulip key code as the bytes a terminal would send."""
-    if k == 259:
-        return b'\x1b[A'
-    if k == 258:
-        return b'\x1b[B'
-    if k == 261:
-        return b'\x1b[C'
-    if k == 260:
-        return b'\x1b[D'
-    if k == 262:
-        return b'\x1b[3~'
+    if k in _KEY_CURSOR:
+        lead = b'\x1bO' if (flags & TERM_APP_CURSOR) else b'\x1b['
+        return lead + _KEY_CURSOR[k]
+    if k in _KEY_TILDE:
+        return b'\x1b[' + _KEY_TILDE[k] + b'~'
+    if 270 <= k <= 281:
+        return _KEY_FN[k - 270]
     if k == 8:
-        return b'\x7f'     # remote stty erase is ^? nearly everywhere
+        return b'\x7f'    # remote stty erase is ^? nearly everywhere
     if k < 128:
         return bytes((k,))
     if k > 0x10FFFF:
@@ -921,6 +934,11 @@ def shell(host, user, password=None, key=None, port=22, accept_new=True,
     try:
         c.request_pty(cols, rows, term)
         c.start_shell()
+        # The console becomes a terminal for the duration: cursor addressing, a
+        # scroll region, an alternate screen. Without this a remote shell still
+        # works, but everything that draws a screen rather than a line -- vi,
+        # htop, tmux -- has nothing to draw on.
+        tulip.term_start()
         # Take the keyboard off the REPL for the duration. With the screen no
         # longer acting as the REPL the keys arrive only through this callback,
         # and kbd_intr(-1) stops Ctrl-C from raising KeyboardInterrupt in here
@@ -938,9 +956,12 @@ def shell(host, user, password=None, key=None, port=22, accept_new=True,
                 text, tail = utf8_split(tail + data)
                 if text:
                     sys.stdout.write(text)
-            out = b''
+            # What the terminal owes the far end: a device attributes answer,
+            # a cursor position report. It has no idea where to send them.
+            out = tulip.term_reply()
+            flags = tulip.term_flags()
             while keys:
-                out += key_bytes(keys.pop(0))
+                out += key_bytes(keys.pop(0), flags)
             if out:
                 c.write(out)
             elif not data:
@@ -949,6 +970,7 @@ def shell(host, user, password=None, key=None, port=22, accept_new=True,
         print('\nssh: %s' % e)
     finally:
         micropython.kbd_intr(3)
+        tulip.term_stop()
         tulip.keyboard_callback()
         tulip.set_screen_as_repl(1)
         c.close()

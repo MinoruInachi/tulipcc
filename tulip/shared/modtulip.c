@@ -817,6 +817,39 @@ STATIC mp_obj_t tulip_tfb_start(size_t n_args, const mp_obj_t *args) {
 STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_tfb_start_obj, 0, 0, tulip_tfb_start);
 
 
+// tulip.term_start() / tulip.term_stop() -- drive the console as a terminal
+// rather than as a printer, which is what the ssh app puts a remote shell into.
+// tulip.term_flags() is what the terminal has been told about how to encode
+// keys (application cursor keys, bracketed paste); tulip.term_reply() is what
+// it has to say back to the far end, which only the session knows where to send.
+// The optional argument is False for a session being handed the console back
+// after something else had it, where the screen and the terminal's state are
+// still the session's own. It defaults to a new session.
+STATIC mp_obj_t tulip_term_start(size_t n_args, const mp_obj_t *args) {
+    display_term_start((n_args > 0) ? mp_obj_is_true(args[0]) : 1);
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_term_start_obj, 0, 1, tulip_term_start);
+
+STATIC mp_obj_t tulip_term_stop(size_t n_args, const mp_obj_t *args) {
+    display_term_stop((n_args > 0) ? mp_obj_is_true(args[0]) : 1);
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_term_stop_obj, 0, 1, tulip_term_stop);
+
+STATIC mp_obj_t tulip_term_flags(size_t n_args, const mp_obj_t *args) {
+    return mp_obj_new_int(display_term_flags());
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_term_flags_obj, 0, 0, tulip_term_flags);
+
+STATIC mp_obj_t tulip_term_reply(size_t n_args, const mp_obj_t *args) {
+    char buf[TERM_REPLY_BUF];
+    uint8_t n = display_term_take_reply(buf, sizeof(buf));
+    return mp_obj_new_bytes((const byte *)buf, n);
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_term_reply_obj, 0, 0, tulip_term_reply);
+
+
 STATIC mp_obj_t tulip_gpu_log(size_t n_args, const mp_obj_t *args) {
     gpu_log = 1;
     return mp_const_none;
@@ -1970,6 +2003,10 @@ STATIC const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_bg_swap), MP_ROM_PTR(&tulip_bg_swap_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_stop), MP_ROM_PTR(&tulip_tfb_stop_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_start), MP_ROM_PTR(&tulip_tfb_start_obj) },
+    { MP_ROM_QSTR(MP_QSTR_term_start), MP_ROM_PTR(&tulip_term_start_obj) },
+    { MP_ROM_QSTR(MP_QSTR_term_stop), MP_ROM_PTR(&tulip_term_stop_obj) },
+    { MP_ROM_QSTR(MP_QSTR_term_flags), MP_ROM_PTR(&tulip_term_flags_obj) },
+    { MP_ROM_QSTR(MP_QSTR_term_reply), MP_ROM_PTR(&tulip_term_reply_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_save), MP_ROM_PTR(&tulip_tfb_save_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_restore), MP_ROM_PTR(&tulip_tfb_restore_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_update), MP_ROM_PTR(&tulip_tfb_update_obj) },

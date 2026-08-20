@@ -208,7 +208,13 @@ class SSHTerm:
         self.form.add_flag(lv.obj.FLAG.HIDDEN)
         self.screen.keep_tfb = True
         tulip.tfb_start()
-        print('\n-- ssh %s@%s --' % (self.value('user'), self.value('host')))
+        # The console becomes a terminal for the duration: cursor addressing, a
+        # scroll region, an alternate screen to put vi on. It starts by clearing
+        # the screen, so the banner goes on after. \r\n rather than \n, because
+        # a terminal's line feed moves down and keeps the column: putting the
+        # \r in front of it is the pty's job, and the pty is not in this line.
+        tulip.term_start()
+        sys.stdout.write('-- ssh %s@%s --\r\n' % (self.value('user'), self.value('host')))
         self.take_keyboard()
 
     def disconnect(self, why=None):
@@ -223,7 +229,9 @@ class SSHTerm:
             except Exception:
                 pass
             self.client = None
-            print('\n-- disconnected%s --' % ('' if why is None else ': ' + why))
+            sys.stdout.write('\r\n-- disconnected%s --\r\n'
+                             % ('' if why is None else ': ' + why))
+        tulip.term_stop()
         self.screen.keep_tfb = False
         tulip.tfb_stop()
         if self.form is not None:
@@ -252,18 +260,18 @@ class SSHTerm:
         tulip.keyboard_callback()
         micropython.kbd_intr(3)
 
-    def to_remote(self, k):
+    def to_remote(self, k, flags=0):
         """One Tulip key code as bytes, minding the ~. escape."""
         if self.tilde:
             self.tilde = False
             if k == ord('.'):
                 self.disconnect('closed by ~.')
                 return b''
-            return b'~' + ssh.key_bytes(k)
+            return b'~' + ssh.key_bytes(k, flags)
         if self.line_start and k == ord('~'):
             self.tilde = True
             return b''
-        out = ssh.key_bytes(k)
+        out = ssh.key_bytes(k, flags)
         self.line_start = out in (b'\r', b'\n')
         return out
 
@@ -289,9 +297,13 @@ class SSHTerm:
                 text, self.tail = ssh.utf8_split(self.tail + data)
                 if text:
                     sys.stdout.write(text)
-            out = b''
+            # Whatever the terminal owes the far end -- a device attributes
+            # answer, a cursor position report. It is the terminal that is
+            # asked and the session that knows where the answer goes.
+            out = tulip.term_reply()
+            flags = tulip.term_flags()
             while self.keys:
-                out += self.to_remote(self.keys.pop(0))
+                out += self.to_remote(self.keys.pop(0), flags)
                 if self.client is None:
                     return          # ~. closed it out from under us
             if out:
@@ -307,13 +319,20 @@ class SSHTerm:
 
     def activate(self, screen):
         if self.client is not None:
+            # Back into terminal mode without resetting it: the scroll region,
+            # the modes and the alternate screen are the session's and it is
+            # still running. Whatever was in front may have drawn over the
+            # screen; the remote redraws it the next time it writes.
+            tulip.term_start(False)
             self.take_keyboard()
 
     def deactivate(self, screen):
         # Switching away leaves the session open but stops reading it -- the
         # remote fills the window and waits, which is what a backgrounded
-        # terminal does anyway.
+        # terminal does anyway. Terminal mode goes with it: whatever has the
+        # console next expects a \n to start a line, not to move down a row.
         if self.client is not None:
+            tulip.term_stop(False)
             self.release_keyboard()
 
     def quit(self, screen):

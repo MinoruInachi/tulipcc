@@ -551,8 +551,48 @@ uint16_t scan_ascii(uint8_t code, uint32_t modifier) {
         case KEY_RIGHT: return 261;
         case KEY_DELETE: return 262; 
 
+        // These used to fall through to the 0 below, which is this decoder's way
+        // of saying "no such key" -- so a keyboard's Home, End, Insert and
+        // function keys reached nothing at all. A remote full-screen program
+        // asks for them by name, so now they have codes.
+        case KEY_HOME: return TULIP_KEY_HOME;
+        case KEY_END: return TULIP_KEY_END;
+        case KEY_INSERT: return TULIP_KEY_INSERT;
     }
+    if(code >= KEY_F1 && code <= KEY_F12) return TULIP_KEY_F1 + (code - KEY_F1);
     return 0;
+}
+
+// What a terminal sends for a key that is not one character. The arrows are
+// given in their ordinary form; a session that has turned application cursor
+// mode on rewrites those two bytes itself (ssh.key_bytes()), since it is the
+// only thing that knows the mode is on.
+const char *keycode_ansi(uint16_t key) {
+    switch(key) {
+        case TULIP_KEY_UP: return "\033[A";
+        case TULIP_KEY_DOWN: return "\033[B";
+        case TULIP_KEY_LEFT: return "\033[D";
+        case TULIP_KEY_RIGHT: return "\033[C";
+        case TULIP_KEY_DEL: return "\033[3~";
+        case TULIP_KEY_HOME: return "\033[H";
+        case TULIP_KEY_END: return "\033[F";
+        case TULIP_KEY_INSERT: return "\033[2~";
+        // The first four are the VT100 keypad's, which is where xterm kept them
+        // and where terminfo still looks; the rest are xterm's own.
+        case TULIP_KEY_F1: return "\033OP";
+        case TULIP_KEY_F1+1: return "\033OQ";
+        case TULIP_KEY_F1+2: return "\033OR";
+        case TULIP_KEY_F1+3: return "\033OS";
+        case TULIP_KEY_F1+4: return "\033[15~";
+        case TULIP_KEY_F1+5: return "\033[17~";
+        case TULIP_KEY_F1+6: return "\033[18~";
+        case TULIP_KEY_F1+7: return "\033[19~";
+        case TULIP_KEY_F1+8: return "\033[20~";
+        case TULIP_KEY_F1+9: return "\033[21~";
+        case TULIP_KEY_F1+10: return "\033[23~";
+        case TULIP_KEY_F1+11: return "\033[24~";
+    }
+    return NULL;
 }
 
 // TAB5 compiles this file for the HID scan-code decoder (scan_ascii,
@@ -609,17 +649,16 @@ static void deliver_key(uint16_t c, uint8_t allow_ime) {
             tx_char(c );
         } else {
             if(lvgl_is_repl) {
-                if(c>257 && c<263) { 
-                    tx_char(27);
-                    tx_char('[');
-                    if(c==258) tx_char('B');
-                    if(c==259) tx_char('A');
-                    if(c==260) tx_char('D');
-                    if(c==261) tx_char('C');
-                    if(c==262) { tx_char('3'); tx_char(126); }
-                } else {
+                const char *seq = keycode_ansi(c);
+                if(seq != NULL) {
+                    while(*seq) tx_char(*seq++);
+                } else if(c < 256) {
                     tx_char(c );
                 }
+                // Anything else is an extended code with no terminal meaning.
+                // It used to be handed to tx_char() anyway, which takes a char:
+                // a function key arrived at the REPL as whatever its low byte
+                // happened to be.
             }
         }
     }

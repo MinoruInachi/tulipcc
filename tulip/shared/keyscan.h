@@ -53,6 +53,26 @@ void ime_push_key(uint16_t key);
 int32_t ime_take_key(void);
 void ime_flush_keys(void);
 
+// Keys that are not one character. 258-262 are the arrows and Delete and have
+// been these numbers forever; scan_ascii() returned a flat 0 for everything
+// below, so nothing in Tulip could see Home, End, Insert or a function key at
+// all. These are additions, not a reshuffle: Page Up and Page Down stay on
+// Ctrl-Y and Ctrl-V (25 and 22), which is what the editor scrolls a page with.
+#define TULIP_KEY_DOWN 258
+#define TULIP_KEY_UP 259
+#define TULIP_KEY_LEFT 260
+#define TULIP_KEY_RIGHT 261
+#define TULIP_KEY_DEL 262
+#define TULIP_KEY_HOME 264
+#define TULIP_KEY_END 265
+#define TULIP_KEY_INSERT 266
+#define TULIP_KEY_F1 270          // through F12 at 281
+
+// The bytes a terminal would send for one of those, or NULL for an ordinary
+// key. One table, so the REPL, the editor and the ssh session cannot disagree
+// about what an arrow is.
+const char *keycode_ansi(uint16_t key);
+
 #define MAX_KEY_REMAPS 64
 
 typedef struct key_remap {

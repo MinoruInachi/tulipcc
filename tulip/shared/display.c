@@ -20,6 +20,11 @@ static uint8_t esc_string = 0;          // 1: inside ESC ] and friends, 2: saw i
 static uint8_t esc_drop = 0;            // a CSI longer than anything real; swallow it
 static uint8_t esc_active = 0;          // a sequence owns the next byte
 
+// Set while the console is being driven as a terminal rather than as a printer
+// -- see "The terminal" further down. Up here because the two places that blank
+// a cell are above that section and have to know which kind of empty to write.
+static uint8_t term_mode = 0;
+
 int16_t last_touch_x[3];
 int16_t last_touch_y[3];
 uint8_t touch_held;
@@ -662,6 +667,10 @@ void display_reset_bg() {
 }
 
 void display_reset_tfb() {
+    // A reset is the end of any terminal session this screen was hosting: the
+    // alternate screen has to come down before the buffer under it is cleared,
+    // or it would be restored over the top of whatever comes next.
+    display_term_stop(1);
     // Clear out the TFB
     tfb_fg_pal_color = color_332(255,255,255);
     tfb_bg_pal_color = tfb_default_bg_pal_color;
@@ -1073,6 +1082,12 @@ void display_tfb_new_row() {
     // Move the pointer to a new row, and scroll the view if necessary
     if(tfb_y_row >= visible_rows-1) {
         tfb_y_row = visible_rows-1;
+        // Rasterise the row being left before the planes move. The ring turn
+        // further down keeps the pixels of every row but the new bottom one, so
+        // they have to already be what the planes say -- and a single write
+        // holding more than one line reaches here with the row it just filled
+        // not drawn yet.
+        display_tfb_update(tfb_y_row);
         // We were in the last row, let's scroll the buffer up by moving the TFB up
         for(uint8_t i=0;i<visible_rows-1;i++) {
             memcpy(&TFB[i*TFB_COLS], &TFB[(i+1)*TFB_COLS], TFB_COLS*sizeof(uint16_t));
@@ -1081,7 +1096,10 @@ void display_tfb_new_row() {
             memcpy(&TFBbg[i*TFB_COLS], &TFBbg[(i+1)*TFB_COLS], TFB_COLS);
         }
         for(uint8_t i=0;i<visible_cols;i++) {
-            TFB[tfb_y_row*TFB_COLS+i] = 0;
+            // A terminal's blank is a space: a row of 0s stops being drawn at
+            // its first cell, and an application addresses a cell in the middle
+            // of a row it has not written the front of.
+            TFB[tfb_y_row*TFB_COLS+i] = term_mode ? 32 : 0;
             TFBf[tfb_y_row*TFB_COLS+i] = 0;
             TFBfg[tfb_y_row*TFB_COLS+i] = tfb_fg_pal_color;
             TFBbg[tfb_y_row*TFB_COLS+i] = tfb_bg_pal_color;
@@ -1115,161 +1133,935 @@ void display_tfb_new_row() {
     tfb_x_col = 0;
 }
 
+uint32_t utf8_esc = 0;
+uint8_t supress_lf = 0;
+
+// ===========================================================================
+// The terminal
+//
+// Everything above treats the console as a printer: text arrives, it lands at
+// the cursor, the screen scrolls when the page runs out. A remote shell over
+// ssh wants the other thing -- a screen it can address a cell at a time, with a
+// scroll region, an alternate screen to put vi on and take away again, and a
+// way to send answers back. tulip.term_start() switches that on. Nothing else
+// in Tulip does, so the REPL keeps the printer it has always had.
+//
+// Only two behaviours genuinely fork on term_mode:
+//
+//   - an empty cell holds a space, not a 0. display_tfb_update() stops drawing
+//     a row at its first 0 cell, which is exactly wrong for a screen painted
+//     out of order, and is why the old ESC [ H had to lay 32s in front of the
+//     cursor by hand.
+//   - LF moves down and keeps the column. The console's own \n means "start a
+//     new line" because nothing ever puts a \r in front of it. A pty does.
+//
+// Everything else -- cursor addressing, insert and delete, the scroll region --
+// is written once and simply never used by the console, because the console
+// never sends those sequences.
+// ===========================================================================
+
+#define TERM_MAX_PARAMS 12
+#define TERM_REPLY_MAX 40
+
+// What the key encoder on the Python side needs to know, as tulip.term_flags().
+#define TERM_FLAG_APP_CURSOR 0x01
+#define TERM_FLAG_APP_KEYPAD 0x02
+#define TERM_FLAG_PASTE      0x04
+#define TERM_FLAG_MOUSE      0x08
+
+static uint8_t term_alt = 0;            // the alternate screen is up
+static uint8_t term_top = 0;            // scroll region, inclusive rows
+static uint8_t term_bot = 0;
+static uint8_t term_autowrap = 1;       // DECAWM
+static uint8_t term_wrap_next = 0;      // sitting on the last column, wrap pending
+static uint8_t term_origin = 0;         // DECOM: addressing is relative to term_top
+static uint8_t term_insert = 0;         // IRM
+static uint8_t term_cursor_hidden = 0;  // DECTCEM
+static uint8_t term_flag_bits = 0;
+static uint8_t term_g[2] = {0, 0};      // is G0 / G1 the DEC line-drawing set
+static uint8_t term_gl = 0;             // which of them SO/SI has shifted in
+static uint16_t term_last_cp = 0;       // for REP
+static uint8_t term_tab[TFB_COLS];
+
+// The saved cursor, shared by DECSC, CSI s and ?1048 exactly as a real terminal
+// shares them.
+static uint8_t term_saved_x = 0, term_saved_y = 0;
+static uint8_t term_saved_g0 = 0, term_saved_g1 = 0, term_saved_gl = 0;
+static int16_t term_saved_format = -1;
+static uint8_t term_saved_fg = 0, term_saved_bg = 0;
+
+// The primary screen, parked here while the alternate one is up.
+static uint16_t *term_alt_tfb = NULL;
+static uint8_t *term_alt_f = NULL, *term_alt_fg = NULL, *term_alt_bg = NULL;
+static uint8_t term_alt_x = 0, term_alt_y = 0;
+
+static char term_reply[TERM_REPLY_MAX];
+static uint8_t term_reply_len = 0;
+
+// Rasterising is deferred to the end of the write. A full-screen app repaints
+// the same row several times in one go -- clear it, then draw it, then put the
+// cursor on it -- and each of those used to cost a rebuild of every pixel in
+// the row.
+static uint8_t term_dirty[TFB_ROWS];
+static uint8_t term_dirty_any = 0;
+
+// Where the cursor block is currently painted, and what the cell under it held.
+// The console's display_tfb_cursor() puts the console's own colours back when it
+// moves off a cell, which is fine for a printer -- the cell it leaves is one it
+// just printed -- and wrong here, where the cursor lands on cells an application
+// coloured.
+static uint8_t term_cursor_shown = 0;
+static uint8_t term_cursor_x = 0, term_cursor_y = 0;
+static uint8_t term_cursor_f = 0, term_cursor_fg = 0, term_cursor_bg = 0;
+
+static inline uint8_t term_rows(void) { return display_tfb_visible_rows(); }
+static inline uint8_t term_cols(void) { return display_tfb_visible_cols(); }
+
+// The scroll region, clamped to a screen whose size may have changed under it
+// (tulip.tfb_font() re-lays the console mid-session).
+static inline uint8_t term_margin_bot(void) {
+    uint8_t rows = term_rows();
+    if(rows == 0) return 0;
+    return (term_bot < rows) ? term_bot : (uint8_t)(rows - 1);
+}
+static inline uint8_t term_margin_top(void) {
+    uint8_t bot = term_margin_bot();
+    return (term_top <= bot) ? term_top : 0;
+}
+
+static inline void term_touch(uint16_t row) {
+    if(row < TFB_ROWS) { term_dirty[row] = 1; term_dirty_any = 1; }
+}
+
+static void term_flush(void) {
+    if(!term_dirty_any) return;
+    uint8_t rows = term_rows();
+    for(uint8_t row=0; row<rows && row<TFB_ROWS; row++) {
+        if(term_dirty[row]) { term_dirty[row] = 0; display_tfb_update(row); }
+    }
+    memset(term_dirty, 0, sizeof(term_dirty));
+    term_dirty_any = 0;
+}
+
+// An erased cell keeps the current background colour: that is how a full-screen
+// application paints a coloured panel, by setting the background and erasing.
+static inline void term_blank_cell(uint16_t row, uint16_t col) {
+    uint32_t off = (uint32_t)row*TFB_COLS + col;
+    TFB[off] = term_mode ? 32 : 0;
+    TFBf[off] = 0;
+    TFBfg[off] = (ansi_active_format >= 0) ? ansi_active_fg_color : tfb_fg_pal_color;
+    TFBbg[off] = (ansi_active_format >= 0) ? ansi_active_bg_color : tfb_bg_pal_color;
+}
+
+static void term_row_clear(uint8_t row, uint8_t from, uint8_t to) {
+    uint8_t cols = term_cols();
+    if(row >= term_rows() || cols == 0 || from > to) return;
+    if(to >= cols) to = cols - 1;
+    for(uint8_t col=from; col<=to; col++) term_blank_cell(row, col);
+    term_touch(row);
+}
+
+// Insert (dir 1) or delete (dir -1) n cells at `at`, within one row.
+static void term_row_shift(uint8_t row, uint8_t at, uint8_t n, int8_t dir) {
+    uint8_t cols = term_cols();
+    if(row >= term_rows() || cols == 0 || at >= cols || n == 0) return;
+    if(n > cols - at) n = cols - at;
+    uint16_t keep = cols - at - n;
+    uint32_t base = (uint32_t)row*TFB_COLS;
+    if(keep) {
+        uint16_t src = (dir > 0) ? (at) : (at + n);
+        uint16_t dst = (dir > 0) ? (at + n) : (at);
+        memmove(&TFB[base+dst], &TFB[base+src], keep*sizeof(uint16_t));
+        memmove(&TFBf[base+dst], &TFBf[base+src], keep);
+        memmove(&TFBfg[base+dst], &TFBfg[base+src], keep);
+        memmove(&TFBbg[base+dst], &TFBbg[base+src], keep);
+    }
+    uint8_t first = (dir > 0) ? at : (cols - n);
+    for(uint8_t col=first; col<first+n && col<cols; col++) term_blank_cell(row, col);
+    term_touch(row);
+}
+
+// Turn the pixel ring by n text rows, which slides everything on screen. The
+// planes are the truth; this only saves re-rasterising the rows whose pixels
+// are already correct one row further along. Returns 0 when the ring does not
+// describe the current geometry, in which case the caller repaints instead.
+static uint8_t term_ring_shift(uint8_t n, int8_t dir) {
+    const uint8_t font_height = tfb_font_height_current();
+    const uint16_t ring_h = (uint16_t)term_rows() * font_height;
+    if(ring_h == 0 || tfb_ring_h != ring_h || n == 0) return 0;
+    for(uint8_t i=0;i<n;i++) {
+        uint16_t top = tfb_ring_top;
+        if(dir > 0) {
+            top += font_height;
+            tfb_ring_top = (top >= ring_h) ? (uint16_t)(top - ring_h) : top;
+        } else {
+            tfb_ring_top = (top < font_height) ? (uint16_t)(top + ring_h - font_height)
+                                               : (uint16_t)(top - font_height);
+        }
+    }
+    return 1;
+}
+
+// Scroll the rows in [top,bot] up (dir 1) or down (dir -1) by n.
+static void term_scroll(uint8_t top, uint8_t bot, uint8_t n, int8_t dir) {
+    uint8_t rows = term_rows(), cols = term_cols();
+    if(rows == 0 || cols == 0 || n == 0) return;
+    if(bot >= rows) bot = rows - 1;
+    if(top > bot) return;
+    // Draw what is still owed before anything moves. Turning the ring below
+    // reuses the pixels already on screen for the rows that only changed
+    // position, so those pixels have to be the truth first -- and a row written
+    // earlier in this same write has not been rasterised yet. Skipping this
+    // showed up as every other line of a scrolling screen coming out blank:
+    // the planes were right and the pixels the ring carried up were whatever
+    // had been on that row before.
+    term_flush();
+    uint8_t span = bot - top + 1;
+    if(n > span) n = span;
+    for(uint8_t i=0;i<span-n;i++) {
+        uint8_t dst = (dir > 0) ? (uint8_t)(top + i) : (uint8_t)(bot - i);
+        uint8_t src = (dir > 0) ? (uint8_t)(dst + n) : (uint8_t)(dst - n);
+        memcpy(&TFB[(uint32_t)dst*TFB_COLS], &TFB[(uint32_t)src*TFB_COLS], TFB_COLS*sizeof(uint16_t));
+        memcpy(&TFBf[(uint32_t)dst*TFB_COLS], &TFBf[(uint32_t)src*TFB_COLS], TFB_COLS);
+        memcpy(&TFBfg[(uint32_t)dst*TFB_COLS], &TFBfg[(uint32_t)src*TFB_COLS], TFB_COLS);
+        memcpy(&TFBbg[(uint32_t)dst*TFB_COLS], &TFBbg[(uint32_t)src*TFB_COLS], TFB_COLS);
+    }
+    for(uint8_t i=0;i<n;i++) {
+        uint8_t row = (dir > 0) ? (uint8_t)(bot - i) : (uint8_t)(top + i);
+        term_row_clear(row, 0, cols - 1);
+    }
+    if(term_ring_shift(n, dir)) {
+        // The ring moved every row on screen, including the ones outside the
+        // region that were meant to stay put. Those are the ones to repaint --
+        // for a full-screen region that is none at all, and for vi, whose region
+        // is everything above the status line, it is one row.
+        for(uint8_t row=0; row<rows; row++) {
+            if(row < top || row > bot) term_touch(row);
+        }
+        display_mark_dirty();
+    } else {
+        for(uint8_t row=top; row<=bot; row++) term_touch(row);
+    }
+}
+
+// LF, and ESC D. Down one, scrolling the region when already at its foot.
+static void term_index(void) {
+    uint8_t bot = term_margin_bot();
+    if(tfb_y_row == bot) {
+        term_scroll(term_margin_top(), bot, 1, 1);
+    } else if(tfb_y_row + 1 < term_rows()) {
+        tfb_y_row++;
+    }
+}
+
+// ESC M. Up one, scrolling the region down when already at its head.
+static void term_rindex(void) {
+    if(tfb_y_row == term_margin_top()) {
+        term_scroll(term_margin_top(), term_margin_bot(), 1, -1);
+    } else if(tfb_y_row > 0) {
+        tfb_y_row--;
+    }
+}
+
+static void term_tab_forward(uint8_t n) {
+    uint8_t cols = term_cols();
+    if(cols == 0) return;
+    while(n--) {
+        uint8_t col = tfb_x_col;
+        while(col + 1 < cols) { col++; if(term_tab[col]) break; }
+        tfb_x_col = col;
+    }
+    term_wrap_next = 0;
+}
+
+static void term_tab_back(uint8_t n) {
+    while(n--) {
+        uint8_t col = tfb_x_col;
+        while(col > 0) { col--; if(term_tab[col]) break; }
+        tfb_x_col = col;
+    }
+    term_wrap_next = 0;
+}
+
+static void term_tabs_default(void) {
+    for(uint16_t col=0; col<TFB_COLS; col++) term_tab[col] = (col % 8) == 0;
+}
+
+// The cursor block, and the cell's own colours underneath it.
+static void term_hide_cursor(void) {
+    if(!term_cursor_shown) return;
+    term_cursor_shown = 0;
+    if(term_cursor_x >= TFB_COLS || term_cursor_y >= TFB_ROWS) return;
+    uint32_t off = (uint32_t)term_cursor_y*TFB_COLS + term_cursor_x;
+    TFBf[off] = term_cursor_f;
+    TFBfg[off] = term_cursor_fg;
+    TFBbg[off] = term_cursor_bg;
+    term_touch(term_cursor_y);
+}
+
+static void term_show_cursor(void) {
+    if(term_cursor_hidden || term_cursor_shown) return;
+    uint8_t x = tfb_x_col, y = tfb_y_row;
+    if(x >= TFB_COLS || y >= TFB_ROWS) return;
+    if(x > 0 && TFB[(uint32_t)y*TFB_COLS+x] == TFB_WIDE_CONT) x--;
+    uint32_t off = (uint32_t)y*TFB_COLS + x;
+    term_cursor_x = x; term_cursor_y = y;
+    term_cursor_f = TFBf[off];
+    term_cursor_fg = TFBfg[off];
+    term_cursor_bg = TFBbg[off];
+    if(TFB[off] == 0) TFB[off] = 32;
+    // Inverse of whatever the cell already is, rather than of the console's
+    // colours: the cursor should not repaint a coloured cell to draw itself.
+    TFBf[off] = term_cursor_f | FORMAT_INVERSE | FORMAT_FLASH;
+    if(ime_active) TFBfg[off] = IME_CURSOR_COLOR;
+    term_cursor_shown = 1;
+    term_touch(y);
+}
+
+static void term_reply_char(char c) {
+    if(term_reply_len < TERM_REPLY_MAX) term_reply[term_reply_len++] = c;
+}
+
+static void term_reply_str(const char *s) {
+    while(*s) term_reply_char(*s++);
+}
+
+static void term_reply_num(uint16_t v) {
+    char buf[6];
+    uint8_t n = 0;
+    if(v == 0) { term_reply_char('0'); return; }
+    while(v && n < sizeof(buf)) { buf[n++] = (char)('0' + (v % 10)); v /= 10; }
+    while(n) term_reply_char(buf[--n]);
+}
+
+static void term_save_cursor(void) {
+    term_saved_x = tfb_x_col;
+    term_saved_y = tfb_y_row;
+    term_saved_format = ansi_active_format;
+    term_saved_fg = ansi_active_fg_color;
+    term_saved_bg = ansi_active_bg_color;
+    term_saved_g0 = term_g[0]; term_saved_g1 = term_g[1]; term_saved_gl = term_gl;
+}
+
+static void term_restore_cursor(void) {
+    uint8_t rows = term_rows(), cols = term_cols();
+    tfb_x_col = (term_saved_x < cols) ? term_saved_x : (cols ? cols-1 : 0);
+    tfb_y_row = (term_saved_y < rows) ? term_saved_y : (rows ? rows-1 : 0);
+    ansi_active_format = term_saved_format;
+    ansi_active_fg_color = term_saved_fg;
+    ansi_active_bg_color = term_saved_bg;
+    term_g[0] = term_saved_g0; term_g[1] = term_saved_g1; term_gl = term_saved_gl;
+    term_wrap_next = 0;
+}
+
+static void term_clear_screen(void) {
+    uint8_t rows = term_rows(), cols = term_cols();
+    for(uint8_t row=0; row<rows; row++) term_row_clear(row, 0, cols ? cols-1 : 0);
+}
+
+// The state a reset returns to, without touching what is on screen. Shared by
+// term_start(), RIS and DECSTR.
+static void term_soft_reset(void) {
+    uint8_t rows = term_rows();
+    term_alt = 0;
+    term_top = 0;
+    term_bot = rows ? (uint8_t)(rows - 1) : 0;
+    term_autowrap = 1;
+    term_wrap_next = 0;
+    term_origin = 0;
+    term_insert = 0;
+    term_cursor_hidden = 0;
+    term_flag_bits = 0;
+    term_g[0] = term_g[1] = 0;
+    term_gl = 0;
+    term_last_cp = 0;
+    term_cursor_shown = 0;
+    term_saved_x = term_saved_y = 0;
+    term_saved_format = -1;
+    term_saved_fg = tfb_fg_pal_color;
+    term_saved_bg = tfb_bg_pal_color;
+    term_saved_g0 = term_saved_g1 = term_saved_gl = 0;
+    term_reply_len = 0;
+    term_tabs_default();
+}
+
+static void term_alt_free(void) {
+    if(term_alt_tfb) { free_caps(term_alt_tfb); term_alt_tfb = NULL; }
+    if(term_alt_f) { free_caps(term_alt_f); term_alt_f = NULL; }
+    if(term_alt_fg) { free_caps(term_alt_fg); term_alt_fg = NULL; }
+    if(term_alt_bg) { free_caps(term_alt_bg); term_alt_bg = NULL; }
+}
+
+// The alternate screen is the primary one put away in a buffer, not a second
+// set of planes: everything that draws reads TFB directly, and one screen at a
+// time is all that is ever on show.
+static void term_alt_enter(uint8_t save_cursor) {
+    if(term_alt) return;
+    // Before anything is copied: the block and the cell's real colours under it
+    // belong to the screen being put away, not to the one coming up.
+    term_hide_cursor();
+    if(term_alt_tfb == NULL) {
+        term_alt_tfb = (uint16_t*)malloc_caps(TFB_ROWS*TFB_COLS*sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        term_alt_f = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        term_alt_fg = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        term_alt_bg = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if(!term_alt_tfb || !term_alt_f || !term_alt_fg || !term_alt_bg) {
+            // No room for the shelf. Stay on the one screen rather than lose the
+            // session: the application draws over what is there and the console
+            // scrollback is what it costs.
+            term_alt_free();
+            return;
+        }
+    }
+    memcpy(term_alt_tfb, TFB, TFB_ROWS*TFB_COLS*sizeof(uint16_t));
+    memcpy(term_alt_f, TFBf, TFB_ROWS*TFB_COLS);
+    memcpy(term_alt_fg, TFBfg, TFB_ROWS*TFB_COLS);
+    memcpy(term_alt_bg, TFBbg, TFB_ROWS*TFB_COLS);
+    term_alt_x = tfb_x_col;
+    term_alt_y = tfb_y_row;
+    if(save_cursor) term_save_cursor();
+    term_alt = 1;
+    term_clear_screen();
+}
+
+static void term_alt_leave(uint8_t restore_cursor) {
+    if(!term_alt) return;
+    term_hide_cursor();
+    term_alt = 0;
+    if(term_alt_tfb) {
+        memcpy(TFB, term_alt_tfb, TFB_ROWS*TFB_COLS*sizeof(uint16_t));
+        memcpy(TFBf, term_alt_f, TFB_ROWS*TFB_COLS);
+        memcpy(TFBfg, term_alt_fg, TFB_ROWS*TFB_COLS);
+        memcpy(TFBbg, term_alt_bg, TFB_ROWS*TFB_COLS);
+    }
+    tfb_x_col = term_alt_x;
+    tfb_y_row = term_alt_y;
+    if(restore_cursor) term_restore_cursor();
+    term_wrap_next = 0;
+    // Every row changed and the ring's rotation no longer describes any of it.
+    display_tfb_update(-1);
+    memset(term_dirty, 0, sizeof(term_dirty));
+    term_dirty_any = 0;
+    display_mark_dirty();
+}
+
+// The colours the session was drawing in, while something else has the console.
+static int16_t term_paused_format = -1;
+static uint8_t term_paused_fg = 0, term_paused_bg = 0;
+
+// reset: a new session, which starts from a cleared screen and a terminal with
+// nothing set on it. Without it this is a session coming back after the task bar
+// took the console away and gave it back -- the emulator's state is still the
+// truth, and the application redraws the screen the next time it writes.
+void display_term_start(uint8_t reset) {
+    if(TFB == NULL) return;
+    uint8_t was = term_mode;
+    term_mode = 1;
+    if(!reset) {
+        // Whatever was in front may have painted over the cursor's cell, so
+        // forget that a block was ever put there rather than restoring what is
+        // no longer underneath it.
+        term_cursor_shown = 0;
+        if(was) return;
+        ansi_active_format = term_paused_format;
+        ansi_active_fg_color = term_paused_fg;
+        ansi_active_bg_color = term_paused_bg;
+        return;
+    }
+    term_soft_reset();
+    ansi_active_format = 0;
+    ansi_active_fg_color = tfb_fg_pal_color;
+    ansi_active_bg_color = tfb_bg_pal_color;
+    tfb_x_col = 0;
+    tfb_y_row = 0;
+    // A screen of spaces rather than of 0s: from here on a row is drawn to its
+    // full width, which is what makes a cell addressable out of order.
+    term_clear_screen();
+    display_tfb_update(-1);
+    memset(term_dirty, 0, sizeof(term_dirty));
+    term_dirty_any = 0;
+    display_mark_dirty();
+}
+
+// reset: the session is over. Without it the console is only being handed to
+// something else for a while -- the alternate screen stays where it is and the
+// scroll region, the modes and the saved cursor are all still there to come
+// back to.
+void display_term_stop(uint8_t reset) {
+    if(!term_mode) return;
+    term_hide_cursor();
+    if(reset) {
+        term_alt_leave(0);
+        term_alt_free();
+    }
+    term_mode = 0;
+    term_paused_format = ansi_active_format;
+    term_paused_fg = ansi_active_fg_color;
+    term_paused_bg = ansi_active_bg_color;
+    if(reset) term_soft_reset();
+    // Whatever the remote was drawing in is not what the REPL should inherit.
+    ansi_active_format = -1;
+    ansi_active_fg_color = tfb_fg_pal_color;
+    ansi_active_bg_color = tfb_bg_pal_color;
+    term_flush();
+}
+
+uint8_t display_term_flags(void) {
+    return term_flag_bits;
+}
+
+// Hand over whatever the terminal has to say back to the host -- a device
+// attributes answer, a cursor position report -- and forget it. Nothing here
+// reaches the socket on its own; the session is the only thing that knows where
+// to send it.
+uint8_t display_term_take_reply(char *out, uint8_t max) {
+    uint8_t n = (term_reply_len < max) ? term_reply_len : max;
+    if(n) memcpy(out, term_reply, n);
+    term_reply_len = 0;
+    return n;
+}
+
+// Move the cursor, clamped to the screen. Nothing here is relative to the
+// scroll region: this is what the cursor-motion codes land through.
+static void term_move(int16_t row, int16_t col) {
+    uint8_t rows = term_rows(), cols = term_cols();
+    if(rows == 0 || cols == 0) return;
+    if(row < 0) row = 0;
+    if(col < 0) col = 0;
+    if(row > rows-1) row = rows-1;
+    if(col > cols-1) col = cols-1;
+    tfb_y_row = (uint8_t)row;
+    tfb_x_col = (uint8_t)col;
+    term_wrap_next = 0;
+}
+
+// The same, for the codes that address a row absolutely. Under DECOM row 1 is
+// the top of the scroll region and nothing outside it can be addressed at all.
+static void term_goto(int16_t row, int16_t col) {
+    if(term_origin) {
+        row += term_margin_top();
+        if(row < term_margin_top()) row = term_margin_top();
+        if(row > term_margin_bot()) row = term_margin_bot();
+    }
+    term_move(row, col);
+}
+
+// One printable cell (or two, for a fullwidth Japanese character) at the cursor.
+// Split out of display_tfb_str() because CSI b -- repeat the last character --
+// has to be able to ask for exactly this again.
+static void tfb_put_cell(uint16_t ch, uint8_t format, uint8_t fg_color, uint8_t bg_color) {
+    uint8_t cols = term_cols();
+    if(cols == 0) return;
+    // Fullwidth Japanese takes two cells, the second a TFB_WIDE_CONT that the
+    // row builder paints nothing for. Keeping the console a grid of uniform
+    // cells this way is what lets scrolling, the cursor, the ANSI codes and the
+    // editor's column arithmetic all stay as they were.
+    uint8_t cells = (tfb_font_is_unicode() && jpfont_cell_width(ch) > 8) ? 2 : 1;
+    if(term_mode) {
+        // The cursor has been sitting on the last column waiting to see whether
+        // anything else was coming. Something is, so the wrap happens now --
+        // that deferral is what stops a character in the last column from
+        // scrolling the screen before the line is even finished.
+        if(term_wrap_next && term_autowrap) {
+            tfb_x_col = 0;
+            term_index();
+        }
+        term_wrap_next = 0;
+        if(tfb_x_col + cells > cols) {
+            if(term_autowrap) { tfb_x_col = 0; term_index(); }
+            else { tfb_x_col = cols - cells; }
+        }
+        if(term_insert) term_row_shift(tfb_y_row, tfb_x_col, cells, 1);
+    } else {
+        // Wrap before splitting a character across the right edge, not after.
+        if(tfb_x_col + cells > cols) display_tfb_new_row();
+    }
+    for(uint8_t cell=0; cell<cells; cell++) {
+        uint32_t off = (uint32_t)tfb_y_row*TFB_COLS + tfb_x_col + cell;
+        TFB[off] = (cell == 0) ? ch : TFB_WIDE_CONT;
+        if(ansi_active_format >= 0) {
+            TFBf[off] = ansi_active_format;
+            TFBfg[off] = ansi_active_fg_color;
+            TFBbg[off] = ansi_active_bg_color;
+        } else {
+            TFBf[off] = format;
+            TFBfg[off] = fg_color;
+            TFBbg[off] = bg_color;
+        }
+    }
+    tfb_x_col += cells;
+    term_last_cp = ch;
+    if(term_mode) {
+        term_touch(tfb_y_row);
+        if(tfb_x_col >= cols) { tfb_x_col = cols - 1; term_wrap_next = 1; }
+    } else {
+        if(tfb_x_col >= cols) display_tfb_new_row();
+    }
+}
+
+// The DEC line-drawing set, which is how a curses application asks for a box on
+// a terminal that predates UTF-8 -- and terminfo still reaches for it first.
+// These are Unicode; the conversion to whatever the current font holds is the
+// same one every other non-ASCII character takes.
+static uint16_t term_dec_graphic(uint16_t c) {
+    static const uint16_t map[] = {
+        0x0020, 0x25C6, 0x2592, 0x2409, 0x240C, 0x240D, 0x240A, 0x00B0,  // _ ` a b c d e f
+        0x00B1, 0x2424, 0x240B, 0x2518, 0x2510, 0x250C, 0x2514, 0x253C,  // g h i j k l m n
+        0x23BA, 0x23BB, 0x2500, 0x23BC, 0x23BD, 0x251C, 0x2524, 0x2534,  // o p q r s t u v
+        0x252C, 0x2502, 0x2264, 0x2265, 0x03C0, 0x2260, 0x00A3, 0x00B7,  // w x y z { | } ~
+    };
+    if(c < 0x5f || c > 0x7e) return 0;
+    return map[c - 0x5f];
+}
+
+// The parameters of a CSI: seq[j] up to but not including seq[k], which is the
+// byte that ended them. An absent parameter is 0, which is what every code here
+// treats as "you were given nothing", and an empty parameter area is no
+// parameters at all rather than one zero -- ESC [ H and ESC [ 1 ; 1 H mean the
+// same thing but ESC [ H and ESC [ 0 J do not.
 uint8_t ansi_parse_digits( unsigned char*str, uint16_t j, uint16_t k, uint16_t * digits) {
     uint8_t d = 0;
-    uint16_t last_pos = j;
-    for(uint16_t i=j; i<k; i++) {
-        if(str[i]==';' || i == k-1) {
-            if(i==k-1) i++; // this is to make a pretend delimeter at the end
-            if(i-last_pos == 3) {
-                digits[d++] = ((str[i-3]-'0') * 100) + ((str[i-2]-'0') * 10) + ((str[i-1]-'0'));
-            } else if(i-last_pos == 2) {
-                digits[d++] = ((str[i-2]-'0') * 10) + ((str[i-1]-'0'));
-            } else if(i-last_pos == 1) {
-                digits[d++] = (str[i-1]-'0');
-            }
-            if(d==5) { fprintf(stderr,"Warning, more than 5 ANSI format commands in a row\n"); d = 4; }
-            last_pos = i+1;
+    uint16_t v = 0;
+    if(j >= k) return 0;
+    for(uint16_t i=j; i<=k; i++) {
+        unsigned char c = (i < k) ? str[i] : ';';
+        if(c >= '0' && c <= '9') {
+            if(v < 6553) v = (uint16_t)(v*10 + (c - '0'));
+        } else if(c == ';' || c == ':') {
+            if(d < TERM_MAX_PARAMS) digits[d++] = v;
+            v = 0;
         }
     }
     return d;
 }
 
-// New things to suppport
-// ESC[?25l -- hide cursor
-// ESC[{line};{column}H -- moves to that position
+// Set or reset one mode. `priv` is the '?' that makes it a DEC private mode
+// rather than an ANSI one.
+static void term_set_mode(uint8_t priv, uint16_t code, uint8_t on) {
+    if(!priv) {
+        if(code == 4) term_insert = on;         // IRM
+        return;
+    }
+    switch(code) {
+        case 1:                                  // DECCKM: arrows send ESC O A
+            if(on) term_flag_bits |= TERM_FLAG_APP_CURSOR;
+            else term_flag_bits &= ~TERM_FLAG_APP_CURSOR;
+            break;
+        case 6:                                  // DECOM
+            term_origin = on;
+            term_goto(0, 0);
+            break;
+        case 7: term_autowrap = on; term_wrap_next = 0; break;
+        case 25:
+            term_cursor_hidden = !on;
+            if(!on) term_hide_cursor();
+            break;
+        case 47: case 1047:
+            if(on) term_alt_enter(0); else term_alt_leave(0);
+            break;
+        case 1048:
+            if(on) term_save_cursor(); else term_restore_cursor();
+            break;
+        case 1049:
+            if(on) term_alt_enter(1); else term_alt_leave(1);
+            break;
+        case 2004:
+            if(on) term_flag_bits |= TERM_FLAG_PASTE;
+            else term_flag_bits &= ~TERM_FLAG_PASTE;
+            break;
+        case 9: case 1000: case 1002: case 1003: case 1005: case 1006: case 1015:
+            // Mouse reporting. Recorded rather than acted on: the touch screen
+            // has no notion of a terminal cell yet, but an application that
+            // asked for it should not be told it got it either.
+            if(on) term_flag_bits |= TERM_FLAG_MOUSE;
+            else term_flag_bits &= ~TERM_FLAG_MOUSE;
+            break;
+        default:
+            // 5 (reverse video), 12 (cursor blink), 1004 (focus events), and the
+            // rest of the drawer a shell or tmux opens at startup. Nothing to do
+            // and nothing worth saying about it.
+            break;
+    }
+}
 
-uint32_t utf8_esc = 0;
-uint8_t supress_lf = 0;
+static void term_sgr(uint16_t *p, uint8_t d) {
+    if(d == 0) { p[0] = 0; d = 1; }
+    for(uint8_t l=0; l<d; l++) {
+        uint16_t code = p[l];
+        if(code == 38 || code == 48) {
+            // 38;5;n is one of the 256 colours; 38;2;r;g;b is a real one, which
+            // this screen keeps the nearest 3-3-2 of.
+            uint8_t fg = (code == 38);
+            if(l+1 < d && p[l+1] == 5 && l+2 < d) {
+                uint8_t c = ansi_pal[p[l+2] & 0xff];
+                if(fg) ansi_active_fg_color = c; else ansi_active_bg_color = c;
+                l += 2;
+            } else if(l+1 < d && p[l+1] == 2 && l+4 < d) {
+                uint8_t c = color_332((uint8_t)p[l+2], (uint8_t)p[l+3], (uint8_t)p[l+4]);
+                if(fg) ansi_active_fg_color = c; else ansi_active_bg_color = c;
+                l += 4;
+            }
+            if(ansi_active_format < 0) ansi_active_format = 0;
+            continue;
+        }
+        if(code == 0) {
+            // Off. In terminal mode there is no "no override" to fall back to --
+            // the terminal owns every cell it writes -- so this is the default
+            // pair rather than a hand-back to the caller's colours.
+            ansi_active_format = term_mode ? 0 : -1;
+            ansi_active_fg_color = tfb_fg_pal_color;
+            ansi_active_bg_color = tfb_bg_pal_color;
+            continue;
+        }
+        if(ansi_active_format < 0) ansi_active_format = 0;
+        switch(code) {
+            case 1: ansi_active_format |= FORMAT_BOLD; break;
+            case 3: ansi_active_format |= FORMAT_UNDERLINE; break;   // italic, near enough
+            case 4: ansi_active_format |= FORMAT_UNDERLINE; break;
+            case 5: case 6: ansi_active_format |= FORMAT_FLASH; break;
+            case 7: ansi_active_format |= FORMAT_INVERSE; break;
+            case 9: ansi_active_format |= FORMAT_STRIKE; break;
+            case 21: case 22: ansi_active_format &= ~FORMAT_BOLD; break;
+            case 23: case 24: ansi_active_format &= ~FORMAT_UNDERLINE; break;
+            case 25: ansi_active_format &= ~FORMAT_FLASH; break;
+            case 27: ansi_active_format &= ~FORMAT_INVERSE; break;
+            case 29: ansi_active_format &= ~FORMAT_STRIKE; break;
+            case 39: ansi_active_fg_color = tfb_fg_pal_color; break;
+            case 49: ansi_active_bg_color = tfb_bg_pal_color; break;
+            default:
+                if(code >= 30 && code <= 37) ansi_active_fg_color = ansi_pal[code - 30];
+                else if(code >= 40 && code <= 47) ansi_active_bg_color = ansi_pal[code - 40];
+                // The bright half of the sixteen. They are the same eight with
+                // the intensity bit, which in this palette is the second row.
+                else if(code >= 90 && code <= 97) ansi_active_fg_color = ansi_pal[8 + (code - 90)];
+                else if(code >= 100 && code <= 107) ansi_active_bg_color = ansi_pal[8 + (code - 100)];
+                break;
+        }
+    }
+}
 
 // Act on one complete CSI. seq[0] is the ESC, seq[1] the '[', and seq[n-1] the
 // final byte that ended it.
 static void ansi_csi(unsigned char *seq, uint8_t n) {
     if(TFB == NULL) return;
-    uint8_t visible_cols = display_tfb_visible_cols();
-    uint8_t visible_rows = display_tfb_visible_rows();
-    if(visible_cols == 0 || visible_rows == 0) return;
-    uint16_t digits[5] = {0};
-    uint16_t j = 2, k = n - 1;
-    unsigned char F = seq[k];
-    if(n > 2 && seq[2] == '?') {
-        // A private mode: bracketed paste, cursor visibility, the alternate
-        // screen. None of them are implemented here and a shell sets several at
-        // every prompt, so drop them without a word to stderr.
+    uint8_t cols = term_cols();
+    uint8_t rows = term_rows();
+    if(cols == 0 || rows == 0) return;
+    uint16_t digits[TERM_MAX_PARAMS] = {0};
+    uint8_t start = 2;
+    uint8_t priv = 0;
+    unsigned char F = seq[n-1];
+    // A private marker ('?', '>', '=') and then, just before the final byte, an
+    // intermediate ('!' in DECSTR, ' ' in the cursor-shape sequence).
+    if(n > 2 && (seq[2] == '?' || seq[2] == '>' || seq[2] == '=')) { priv = seq[2]; start = 3; }
+    uint8_t end = n - 1;
+    unsigned char inter = 0;
+    if(end > start && seq[end-1] >= 0x20 && seq[end-1] <= 0x2f) { inter = seq[end-1]; end--; }
+    uint8_t d = ansi_parse_digits(seq, start, end, digits);
+    // Every one of these takes 1 where it was given nothing or a 0.
+    uint16_t n1 = (d > 0 && digits[0]) ? digits[0] : 1;
+    uint16_t n2 = (d > 1 && digits[1]) ? digits[1] : 1;
+    uint16_t c0 = (d > 0) ? digits[0] : 0;
+
+    if(inter == '!' && F == 'p') {              // DECSTR, a soft reset
+        term_soft_reset();
+        term_goto(0, 0);
         return;
     }
-    if(F == 'K') { // clear to end of line
-        for(uint8_t col=tfb_x_col;col<visible_cols;col++) {
-            TFB[tfb_y_row*TFB_COLS+col] = 0; 
-            TFBf[tfb_y_row*TFB_COLS+col] = 0; 
-            TFBfg[tfb_y_row*TFB_COLS+col] = tfb_fg_pal_color; 
-            TFBbg[tfb_y_row*TFB_COLS+col] = tfb_bg_pal_color ;
-        }    
-    } else if(F=='D') { // move cursor backwards
-        uint8_t d = ansi_parse_digits(seq, j, k, digits);
-        if(d==1) { 
-            tfb_x_col = (digits[0] > tfb_x_col) ? 0 : (tfb_x_col - digits[0]);
-        }
-    } else if(F=='J') { // erase in display
-        uint8_t d = ansi_parse_digits(seq, j, k, digits);
-        uint16_t code = (d == 0) ? 0 : digits[0];
-        if(code == 2) { // erase the whole screen
-            display_reset_tfb();
-        } else {
-            // 0: the cursor to the end of the screen. 1: the start of the
-            // screen to the cursor. A shell redraws its prompt with a bare
-            // ESC [ J, which is 0, so leaving this unimplemented left the tail
-            // of whatever was on screen sitting underneath the new prompt.
-            uint8_t from_row = (code == 0) ? tfb_y_row : 0;
-            uint8_t to_row   = (code == 0) ? (visible_rows - 1) : tfb_y_row;
-            for(uint8_t row=from_row; row<=to_row; row++) {
-                uint8_t first = (code == 0 && row == tfb_y_row) ? tfb_x_col : 0;
-                uint8_t last  = (code == 1 && row == tfb_y_row) ? tfb_x_col : (visible_cols - 1);
-                for(uint8_t col=first; col<=last && col<visible_cols; col++) {
-                    uint32_t off = (uint32_t)row*TFB_COLS + col;
-                    TFB[off] = 0;
-                    TFBf[off] = 0;
-                    TFBfg[off] = tfb_fg_pal_color;
-                    TFBbg[off] = tfb_bg_pal_color;
-                }
-                display_tfb_update(row);
-            }
-        }
-    } else if(F=='H') { 
-        uint8_t d = ansi_parse_digits(seq, j, k, digits); 
-        if(d==2) {
-            // move cursor to line digits[0] and column digits[1]
-            // these are 1 indexed i think ?? 
-            tfb_x_col = digits[1];
-            tfb_y_row = digits[0];
-        } else if(d==0) {
-            // move cursor to 0,0
-            tfb_x_col = 0;
-            tfb_y_row = 0;
-            // Perhaps supress the oncoming LF too? 
-            supress_lf = 1;
-        }
-        if(tfb_x_col >= visible_cols) tfb_x_col = visible_cols - 1;
-        if(tfb_y_row >= visible_rows) tfb_y_row = visible_rows - 1;
-        // I guess because of the drawing optimization, we need to add 32s to the TFB if col is nonzero and there's a 0 col to its left
-        if(tfb_x_col!=0) {
-            if(TFB[tfb_y_row*TFB_COLS+(tfb_x_col-1)]==0) {
-                for(uint16_t c=0;c<tfb_x_col;c++) TFB[tfb_y_row*TFB_COLS+c] = 32;
-            }
-        }
-    } else if(F=='m') { // formatting
-        uint8_t d = ansi_parse_digits(seq, j, k, digits);
-        uint8_t ansi_color_idx = 0;
-        // Check to see if the message is a 256 color setting, as it will confuse the other codes below
-        uint8_t c256 = 0;
-        if(digits[0] == 38 && digits[1] == 5) c256 = 1;
-        if(digits[0] == 48 && digits[1] == 5) c256 = 2;
-        for(uint8_t l=0;l<d;l++) {
-            uint8_t code = digits[l];
-            // 256 color mode was sent, so just get the last number in the digits and set color
-            if(c256==1) { 
-                if(ansi_active_format < 0) ansi_active_format = 0;
-                if(l==2) {
-                    ansi_active_fg_color = ansi_pal[code];
-                }
-            } else if(c256==2) {
-                if(ansi_active_format < 0) ansi_active_format = 0;
-                if(l==2) {
-                    ansi_active_bg_color = ansi_pal[code];                                    
-                }
-            } else if(code==0)  { 
-                // Everything off
-                ansi_active_format = -1; 
-                ansi_active_bg_color = tfb_bg_pal_color;  
-                ansi_active_fg_color = tfb_fg_pal_color; 
-            } else {
-                // Get ready
-                if(ansi_active_format < 0) ansi_active_format = 0;
-                if(code==1)  if (ansi_color_idx < 8) ansi_color_idx += 8; // "bold" color (not font!)
-                if(code==4)  ansi_active_format = ansi_active_format | FORMAT_UNDERLINE;
-                if(code==5)  { if(d==1) { ansi_active_format = ansi_active_format | FORMAT_FLASH; } } // check d=1 because of 256 color guy
-                if(code==6)  ansi_active_format = ansi_active_format | FORMAT_BOLD; // hidden
-                if(code==7)  ansi_active_format = ansi_active_format | FORMAT_INVERSE;
-                if(code==9)  ansi_active_format = ansi_active_format | FORMAT_STRIKE;
-                if(code==22) if (ansi_color_idx >= 8) ansi_color_idx = ansi_color_idx - 8;
-                if(code==24) if(ansi_active_format | FORMAT_UNDERLINE) ansi_active_format =- FORMAT_UNDERLINE;
-                if(code==25) if(ansi_active_format | FORMAT_FLASH) ansi_active_format =- FORMAT_FLASH;
-                if(code==26) if(ansi_active_format | FORMAT_BOLD) ansi_active_format =- FORMAT_BOLD;
-                if(code==27) if(ansi_active_format | FORMAT_INVERSE) ansi_active_format =- FORMAT_INVERSE;
-                if(code==29) if(ansi_active_format | FORMAT_STRIKE) ansi_active_format =- FORMAT_STRIKE;
+    if(inter) return;                            // DECSCUSR and friends: no-ops here
 
-                if(code>=30 && code<=37)  ansi_active_fg_color = ansi_pal[ansi_color_idx + (code-30)]; // color, not including bold color
-                if(code==39) ansi_active_fg_color = tfb_fg_pal_color;
-
-                if(code>=40 && code<=47) ansi_active_bg_color = ansi_pal[ansi_color_idx + (code-40)];
-                if(code==49) ansi_active_bg_color = tfb_bg_pal_color; // reset   
-            }
+    switch(F) {
+        case '@':                                // ICH
+            term_row_shift(tfb_y_row, tfb_x_col, (uint8_t)MIN(n1, (uint16_t)cols), 1);
+            break;
+        case 'A': {                              // CUU
+            int16_t to = (int16_t)tfb_y_row - (int16_t)n1;
+            // A cursor inside the scroll region stays inside it.
+            if(tfb_y_row >= term_margin_top() && to < term_margin_top()) to = term_margin_top();
+            term_move(to, tfb_x_col);
+            break;
         }
-    } else if(F=='h' || F=='l') {
-        // Set or reset a mode. Nothing here keeps any of them, and saying so on
-        // stderr at every prompt would bury the log.
-    } else {
-        fprintf(stderr,"Unsupported ANSI code %c\n", F);
+        case 'B': {                              // CUD
+            int16_t to = (int16_t)tfb_y_row + (int16_t)n1;
+            if(tfb_y_row <= term_margin_bot() && to > term_margin_bot()) to = term_margin_bot();
+            term_move(to, tfb_x_col);
+            break;
+        }
+        case 'C':                                // CUF
+            term_move(tfb_y_row, (int16_t)tfb_x_col + (int16_t)n1);
+            break;
+        case 'D':                                // CUB
+            term_move(tfb_y_row, (int16_t)tfb_x_col - (int16_t)n1);
+            break;
+        case 'E':                                // CNL
+            term_move((int16_t)tfb_y_row + (int16_t)n1, 0);
+            break;
+        case 'F':                                // CPL
+            term_move((int16_t)tfb_y_row - (int16_t)n1, 0);
+            break;
+        case 'G': case '`':                      // CHA / HPA
+            term_move(tfb_y_row, (int16_t)n1 - 1);
+            break;
+        case 'd':                                // VPA
+            term_goto((int16_t)n1 - 1, tfb_x_col);
+            break;
+        case 'H': case 'f':                      // CUP / HVP
+            if(!term_mode && d == 0) {
+                // The console's own clear is ESC [ 2 J ESC [ H followed by the
+                // newline of whatever printed it. Swallowing that newline is
+                // what keeps the screen from starting one row down, and predates
+                // any of this.
+                supress_lf = 1;
+            }
+            term_goto((int16_t)n1 - 1, (int16_t)n2 - 1);
+            if(!term_mode && tfb_x_col > 0 && TFB[(uint32_t)tfb_y_row*TFB_COLS+(tfb_x_col-1)] == 0) {
+                // Outside terminal mode a row still stops being drawn at its
+                // first 0 cell, so a cursor put past an empty stretch would
+                // write something nothing draws. Lay spaces in front of it, as
+                // this has always done.
+                for(uint16_t c=0;c<tfb_x_col;c++) TFB[(uint32_t)tfb_y_row*TFB_COLS+c] = 32;
+            }
+            break;
+        case 'I':                                // CHT
+            term_tab_forward((uint8_t)n1);
+            break;
+        case 'Z':                                // CBT
+            term_tab_back((uint8_t)n1);
+            break;
+        case 'J': {                              // ED
+            uint8_t from_row = (c0 == 0) ? tfb_y_row : 0;
+            uint8_t to_row = (c0 == 0) ? (uint8_t)(rows-1) : ((c0 == 1) ? tfb_y_row : (uint8_t)(rows-1));
+            if(c0 == 2 || c0 == 3) { from_row = 0; to_row = rows-1; }
+            for(uint8_t row=from_row; row<=to_row && row<rows; row++) {
+                uint8_t first = (c0 == 0 && row == tfb_y_row) ? tfb_x_col : 0;
+                uint8_t last = (c0 == 1 && row == tfb_y_row) ? tfb_x_col : (uint8_t)(cols-1);
+                term_row_clear(row, first, last);
+            }
+            term_wrap_next = 0;
+            break;
+        }
+        case 'K': {                              // EL
+            uint8_t first = (c0 == 1) ? 0 : tfb_x_col;
+            uint8_t last = (c0 == 1) ? tfb_x_col : (uint8_t)(cols-1);
+            if(c0 == 2) { first = 0; last = cols-1; }
+            term_row_clear(tfb_y_row, first, last);
+            term_wrap_next = 0;
+            break;
+        }
+        case 'L':                                // IL
+            if(tfb_y_row >= term_margin_top() && tfb_y_row <= term_margin_bot())
+                term_scroll(tfb_y_row, term_margin_bot(), (uint8_t)MIN(n1, (uint16_t)rows), -1);
+            break;
+        case 'M':                                // DL
+            if(tfb_y_row >= term_margin_top() && tfb_y_row <= term_margin_bot())
+                term_scroll(tfb_y_row, term_margin_bot(), (uint8_t)MIN(n1, (uint16_t)rows), 1);
+            break;
+        case 'P':                                // DCH
+            term_row_shift(tfb_y_row, tfb_x_col, (uint8_t)MIN(n1, (uint16_t)cols), -1);
+            break;
+        case 'X': {                              // ECH
+            uint16_t last = tfb_x_col + n1 - 1;
+            term_row_clear(tfb_y_row, tfb_x_col, (uint8_t)MIN(last, (uint16_t)(cols-1)));
+            break;
+        }
+        case 'S':                                // SU
+            term_scroll(term_margin_top(), term_margin_bot(), (uint8_t)MIN(n1, (uint16_t)rows), 1);
+            break;
+        case 'T':                                // SD
+            term_scroll(term_margin_top(), term_margin_bot(), (uint8_t)MIN(n1, (uint16_t)rows), -1);
+            break;
+        case 'b':                                // REP
+            if(term_last_cp) {
+                uint16_t cp = term_last_cp;
+                for(uint16_t i=0; i<n1 && i<(uint16_t)cols; i++)
+                    tfb_put_cell(cp, 0, tfb_fg_pal_color, tfb_bg_pal_color);
+            }
+            break;
+        case 'g':                                // TBC
+            if(c0 == 3) { for(uint16_t col=0; col<TFB_COLS; col++) term_tab[col] = 0; }
+            else if(tfb_x_col < TFB_COLS) term_tab[tfb_x_col] = 0;
+            break;
+        case 'h': case 'l': {
+            uint8_t on = (F == 'h');
+            if(priv == '>' || priv == '=') break;
+            if(d == 0) break;
+            for(uint8_t l=0; l<d; l++) term_set_mode(priv == '?', digits[l], on);
+            break;
+        }
+        case 'm':
+            if(priv) break;                      // ESC [ > ... m is xterm key handling
+            term_sgr(digits, d);
+            break;
+        case 'n':                                // DSR
+            if(priv == '?') break;
+            if(c0 == 5) term_reply_str("\033[0n");
+            else if(c0 == 6) {
+                term_reply_str("\033[");
+                term_reply_num((uint16_t)(tfb_y_row - (term_origin ? term_margin_top() : 0) + 1));
+                term_reply_char(';');
+                term_reply_num((uint16_t)(tfb_x_col + 1));
+                term_reply_char('R');
+            }
+            break;
+        case 'c':                                // DA
+            if(priv == '>') term_reply_str("\033[>0;10;0c");   // a secondary DA, so tmux stops asking
+            else if(!priv) term_reply_str("\033[?1;2c");       // a VT100 with an advanced video option
+            break;
+        case 'r':                                // DECSTBM
+            if(priv) break;
+            {
+                uint8_t top = (d > 0 && digits[0]) ? (uint8_t)(digits[0]-1) : 0;
+                uint8_t bot = (d > 1 && digits[1]) ? (uint8_t)(digits[1]-1) : (uint8_t)(rows-1);
+                if(bot >= rows) bot = rows-1;
+                if(top >= bot) { top = 0; bot = rows-1; }
+                term_top = top;
+                term_bot = bot;
+                term_goto(0, 0);
+            }
+            break;
+        case 's':                                // SCP
+            term_save_cursor();
+            break;
+        case 'u':                                // RCP
+            term_restore_cursor();
+            break;
+        case 't':                                // window manipulation
+            if(c0 == 18) {                       // "how big is your text area"
+                term_reply_str("\033[8;");
+                term_reply_num(rows);
+                term_reply_char(';');
+                term_reply_num(cols);
+                term_reply_char('t');
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+// Act on an escape that never had a '[' in it -- ESC 7, ESC M and the rest of
+// the two-byte set, plus the charset designators.
+static void esc_simple(unsigned char c) {
+    switch(c) {
+        case '7': term_save_cursor(); break;
+        case '8': term_restore_cursor(); break;
+        case 'D': if(term_mode) term_index(); break;
+        case 'E': if(term_mode) { term_index(); tfb_x_col = 0; term_wrap_next = 0; } break;
+        case 'M': if(term_mode) term_rindex(); break;
+        case 'H': if(tfb_x_col < TFB_COLS) term_tab[tfb_x_col] = 1; break;   // HTS
+        case 'c':                                                            // RIS
+            if(term_mode) {
+                term_soft_reset();
+                ansi_active_format = 0;
+                ansi_active_fg_color = tfb_fg_pal_color;
+                ansi_active_bg_color = tfb_bg_pal_color;
+                term_clear_screen();
+                term_goto(0, 0);
+            }
+            break;
+        case '=': term_flag_bits |= TERM_FLAG_APP_KEYPAD; break;
+        case '>': term_flag_bits &= ~TERM_FLAG_APP_KEYPAD; break;
+        default: break;
     }
 }
 
@@ -1306,9 +2098,18 @@ static uint8_t esc_feed(unsigned char c) {
         // Everything else -- ESC =, ESC 7, ESC M -- is two bytes and done.
         if(c=='(' || c==')' || c=='*' || c=='+' || c=='-' || c=='.' || c=='/' || c=='#' || c=='%') return 1;
         esc_pending_len = 0;
+        esc_simple(c);
         return 0;
     }
-    if(esc_pending[1] != '[') { esc_pending_len = 0; return 0; }  // the last byte of a charset
+    if(esc_pending[1] != '[') {                             // the last byte of a charset
+        // ESC ( 0 makes G0 the line-drawing set, ESC ( B puts ASCII back. G1 is
+        // the same thing one shift away, for the applications that drive it with
+        // SO and SI instead.
+        if(esc_pending[1] == '(') term_g[0] = (c == '0');
+        else if(esc_pending[1] == ')') term_g[1] = (c == '0');
+        esc_pending_len = 0;
+        return 0;
+    }
     if(c >= 0x40 && c <= 0x7e) {                            // the final byte of the CSI
         ansi_csi(esc_pending, esc_pending_len);
         esc_pending_len = 0;
@@ -1334,10 +2135,11 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg
     if(visible_cols == 0 || visible_rows == 0) {
         return;
     }
+    // Take the cursor block off the cell it is on first, so everything below
+    // works on the cell's own colours and the block never gets left behind on a
+    // cell the cursor has since moved away from.
+    if(term_mode) term_hide_cursor();
 
-    //fprintf(stderr,"str len %d format %d is ### ", len, format);
-    //for(uint16_t i=0;i<len;i++) fprintf(stderr, "[%c/%d] ", str[i], str[i]);
-    //fprintf(stderr, "###\n");
     // For each character incoming from micropython
     for(uint16_t i=0;i<len;i++) {
         // Wider than a byte now: in the Japanese fonts this carries a
@@ -1346,16 +2148,12 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg
         // A sequence still running -- possibly one that started in an earlier
         // write -- takes this byte before anything else looks at it.
         if(esc_active) { esc_active = esc_feed((unsigned char)ch); continue; }
-        if(ch == 8)  { // backspace , go backwards (don't delete)
-            display_tfb_uncursor(tfb_x_col, tfb_y_row);
-            // Exactly one cell, the same as ESC [ 1 D -- callers count columns and
-            // use whichever is shorter. Stepping over the right half of a
-            // fullwidth character as well was wrong for that reason: readline
-            // sends one \b per column and takes the \b path only up to four of
-            // them, so a Japanese line moved back twice as far as it asked to and
-            // the ESC [ K behind it ate the prompt. The cursor never lands on a
-            // continuation cell anyway -- display_tfb_cursor() snaps off it.
-            if(tfb_x_col > 0) tfb_x_col--;
+        if(ch == 27) { // ANSI
+            // What kind of sequence this is, and where it ends, is decided a
+            // byte at a time in esc_feed(). That is what lets one straddle a
+            // write boundary instead of spilling its tail onto the screen.
+            esc_active = esc_feed(27);
+            continue;
         }
         if(ch > 127) { // unicode
             // Decode to the codepoint and decide what to do with it, rather than
@@ -1382,63 +2180,82 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg
                 if(visible_cols == 0 || visible_rows == 0) return;
                 if(tfb_x_col >= visible_cols) tfb_x_col = visible_cols - 1;
                 if(tfb_y_row >= visible_rows) tfb_y_row = visible_rows - 1;
+                if(term_mode && term_bot > visible_rows-1) term_bot = visible_rows-1;
                 display_tfb_update(-1);
             }
             ch = tfb_font_is_unicode() ? ucs : cp437;
             if(ch == 0) continue;   // no font here can draw it
+            tfb_put_cell(ch, format, fg_color, bg_color);
+            continue;
         }
-        if(ch == 27) { // ANSI
-            // What kind of sequence this is, and where it ends, is decided a
-            // byte at a time in esc_feed(). That is what lets one straddle a
-            // write boundary instead of spilling its tail onto the screen.
-            esc_active = esc_feed(27);
-        } else if(ch == 10) {
-            // If an LF, start a new row
-            if(!supress_lf) {
-                display_tfb_new_row();
-            } else { supress_lf = 0; }
-        } else if(ch == 13) {
-            // Carriage return: back to column 0 on the same row. The REPL never
-            // needed this -- it sends \r\n, and display_tfb_new_row() zeroes the
-            // column anyway -- so a lone \r used to fall into the "ignore other
-            // control characters" branch below and do nothing. A remote shell on
-            // a pty does need it: \r on its own is how a prompt or a progress
-            // line redraws itself over what it already printed.
-            display_tfb_uncursor(tfb_x_col, tfb_y_row);
-            tfb_x_col = 0;
-        } else if(ch < 32) {
-            // do nothing with other non-printable chars
-        } else { // printable chars
-            // Fullwidth Japanese takes two cells, the second a TFB_WIDE_CONT that
-            // the row builder paints nothing for. Keeping the console a grid of
-            // uniform cells this way is what lets scrolling, the cursor, the ANSI
-            // codes and the editor's column arithmetic all stay as they were.
-            uint8_t cells = (tfb_font_is_unicode() && jpfont_cell_width(ch) > 8) ? 2 : 1;
-            // Wrap before splitting a character across the right edge, not after.
-            if(tfb_x_col + cells > visible_cols) {
-                display_tfb_new_row();
-            }
-            for(uint8_t cell=0; cell<cells; cell++) {
-                uint32_t off = (uint32_t)tfb_y_row*TFB_COLS + tfb_x_col + cell;
-                TFB[off] = (cell == 0) ? ch : TFB_WIDE_CONT;
-                if(ansi_active_format >= 0 ) {
-                    TFBf[off] = ansi_active_format;
-                    TFBfg[off] = ansi_active_fg_color;
-                    TFBbg[off] = ansi_active_bg_color;
-                } else {
-                    TFBf[off] = format;
-                    TFBfg[off] = fg_color;
-                    TFBbg[off] = bg_color;
+        if(ch < 32 || ch == 127) {
+            if(term_mode) {
+                if(ch == 8) {
+                    // Back one cell, without deleting it. Never past the left
+                    // edge: a terminal's backspace does not unwrap a line.
+                    if(term_wrap_next) term_wrap_next = 0;
+                    else if(tfb_x_col > 0) tfb_x_col--;
+                } else if(ch == 9) {
+                    term_tab_forward(1);
+                } else if(ch == 10 || ch == 11 || ch == 12) {
+                    // Down a row, same column. The pty puts the \r there itself.
+                    term_wrap_next = 0;
+                    term_index();
+                } else if(ch == 13) {
+                    term_wrap_next = 0;
+                    tfb_x_col = 0;
+                } else if(ch == 14) {
+                    term_gl = 1;                        // SO
+                } else if(ch == 15) {
+                    term_gl = 0;                        // SI
                 }
+                // BEL, and everything else, is nothing this screen can show.
+                continue;
             }
-            tfb_x_col += cells;
-            if(tfb_x_col >= visible_cols) {
-                display_tfb_new_row();
+            if(ch == 8) { // backspace , go backwards (don't delete)
+                display_tfb_uncursor(tfb_x_col, tfb_y_row);
+                // Exactly one cell, the same as ESC [ 1 D -- callers count columns and
+                // use whichever is shorter. Stepping over the right half of a
+                // fullwidth character as well was wrong for that reason: readline
+                // sends one \b per column and takes the \b path only up to four of
+                // them, so a Japanese line moved back twice as far as it asked to and
+                // the ESC [ K behind it ate the prompt. The cursor never lands on a
+                // continuation cell anyway -- display_tfb_cursor() snaps off it.
+                if(tfb_x_col > 0) tfb_x_col--;
+            } else if(ch == 10) {
+                // If an LF, start a new row
+                if(!supress_lf) {
+                    display_tfb_new_row();
+                } else { supress_lf = 0; }
+            } else if(ch == 13) {
+                // Carriage return: back to column 0 on the same row. The REPL never
+                // needed this -- it sends \r\n, and display_tfb_new_row() zeroes the
+                // column anyway -- so a lone \r used to fall into the "ignore other
+                // control characters" branch below and do nothing. A remote shell on
+                // a pty does need it: \r on its own is how a prompt or a progress
+                // line redraws itself over what it already printed.
+                display_tfb_uncursor(tfb_x_col, tfb_y_row);
+                tfb_x_col = 0;
+            }
+            continue;
+        }
+        // printable
+        if(term_mode && term_g[term_gl]) {
+            uint16_t g = term_dec_graphic(ch);
+            if(g) {
+                uint16_t drawn = tfb_font_is_unicode() ? g : convert_uc16_to_cp437(g);
+                if(drawn) ch = drawn;
             }
         }
+        tfb_put_cell(ch, format, fg_color, bg_color);
     }
-    // Update the cursor 
-    display_tfb_cursor(tfb_x_col, tfb_y_row);  
+    if(term_mode) {
+        term_show_cursor();
+        term_flush();
+        return;
+    }
+    // Update the cursor
+    display_tfb_cursor(tfb_x_col, tfb_y_row);
     display_tfb_update(tfb_y_row);
     // display_tfb_update() only rebuilt the row we ended on; if the write began
     // on an earlier row (without wrapping into a scroll) that row changed too.

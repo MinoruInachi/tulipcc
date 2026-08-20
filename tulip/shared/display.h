@@ -80,6 +80,13 @@ void display_load_sprite_rgba(uint32_t mem_pos, uint32_t len, uint8_t* data);
 void display_load_sprite_raw(uint32_t mem_pos, uint32_t len, uint8_t* data);
 void display_screenshot(char * screenshot_fn, int16_t x, int16_t y, int16_t w, int16_t h);
 void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg_color, uint8_t bg_color);
+// The console driven as a terminal: cursor addressing, a scroll region, an
+// alternate screen, and answers to send back. See "The terminal" in display.c.
+void display_term_start(uint8_t reset);
+void display_term_stop(uint8_t reset);
+uint8_t display_term_flags(void);
+uint8_t display_term_take_reply(char *out, uint8_t max);
+#define TERM_REPLY_BUF 40
 uint8_t display_tfb_char_cells(const char *s, uint8_t *bytes, uint16_t *cp);
 uint16_t display_tfb_place_str(const char *str, uint16_t x, uint16_t y);
 uint16_t display_tfb_read_char(uint16_t x, uint16_t y, char *out);

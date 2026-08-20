@@ -1244,6 +1244,38 @@ static mp_obj_t tulip_tfb_stop(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(tulip_tfb_stop_obj, tulip_tfb_stop);
 
+// tulip.term_start() / tulip.term_stop() -- drive the console as a terminal
+// rather than as a printer, which is what the ssh app puts a remote shell into.
+// tulip.term_flags() is what the terminal has been told about how to encode
+// keys (application cursor keys, bracketed paste); tulip.term_reply() is what
+// it has to say back to the far end, which only the session knows where to send.
+// The optional argument is False for a session being handed the console back
+// after something else had it, where the screen and the terminal's state are
+// still the session's own. It defaults to a new session.
+static mp_obj_t tulip_term_start(size_t n_args, const mp_obj_t *args) {
+    display_term_start((n_args > 0) ? mp_obj_is_true(args[0]) : 1);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_term_start_obj, 0, 1, tulip_term_start);
+
+static mp_obj_t tulip_term_stop(size_t n_args, const mp_obj_t *args) {
+    display_term_stop((n_args > 0) ? mp_obj_is_true(args[0]) : 1);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_term_stop_obj, 0, 1, tulip_term_stop);
+
+static mp_obj_t tulip_term_flags(void) {
+    return mp_obj_new_int(display_term_flags());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_term_flags_obj, tulip_term_flags);
+
+static mp_obj_t tulip_term_reply(void) {
+    char buf[TERM_REPLY_BUF];
+    uint8_t n = display_term_take_reply(buf, sizeof(buf));
+    return mp_obj_new_bytes((const byte *)buf, n);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_term_reply_obj, tulip_term_reply);
+
 static mp_obj_t tulip_tfb_update(void) {
     display_tfb_update(-1);
     return mp_const_none;
@@ -1399,18 +1431,15 @@ static bool tab5_deliver_key(uint16_t key, bool allow_ime) {
     } else if (key == 4) {
         tx_char(key);
     } else if (lvgl_is_repl) {
-        if (key >= 258 && key <= 262) {
-            tx_char(27);
-            tx_char('[');
-            if (key == 258) tx_char('B');
-            if (key == 259) tx_char('A');
-            if (key == 260) tx_char('D');
-            if (key == 261) tx_char('C');
-            if (key == 262) {
-                tx_char('3');
-                tx_char('~');
-            }
-        } else {
+        // One table for what a key that is not a character sends, in keyscan.c,
+        // so this and the REPL on every other board cannot drift apart. An
+        // extended code with no terminal meaning goes nowhere rather than to
+        // tx_char(), which takes a char: a function key used to reach the REPL
+        // as whatever its low byte happened to be.
+        const char *seq = keycode_ansi(key);
+        if (seq != NULL) {
+            while (*seq) tx_char(*seq++);
+        } else if (key < 256) {
             tx_char(key);
         }
     }
@@ -1900,6 +1929,10 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_audio_diag), MP_ROM_PTR(&tulip_audio_diag_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_ready), MP_ROM_PTR(&tulip_tfb_ready_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_start), MP_ROM_PTR(&tulip_tfb_start_obj) },
+    { MP_ROM_QSTR(MP_QSTR_term_start), MP_ROM_PTR(&tulip_term_start_obj) },
+    { MP_ROM_QSTR(MP_QSTR_term_stop), MP_ROM_PTR(&tulip_term_stop_obj) },
+    { MP_ROM_QSTR(MP_QSTR_term_flags), MP_ROM_PTR(&tulip_term_flags_obj) },
+    { MP_ROM_QSTR(MP_QSTR_term_reply), MP_ROM_PTR(&tulip_term_reply_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_stop), MP_ROM_PTR(&tulip_tfb_stop_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_update), MP_ROM_PTR(&tulip_tfb_update_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_reset), MP_ROM_PTR(&tulip_tfb_reset_obj) },

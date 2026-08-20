@@ -572,16 +572,29 @@ The slow parts are the ones that only happen once: about 0.7s for the handshake
 (two X25519 scalar multiplications and one RSA signature check) and another
 1.6s if you authenticate with a key rather than a password.
 
-The console is a line-oriented terminal. It understands colours and the other
-SGR attributes, `ESC[K`, `ESC[H`, `ESC[J`, `\r` and `\b`, which covers a shell
-prompt, `ls`, `git`, and anything else that scrolls. It does not implement the
-cursor movement, scroll regions or alternate screen that full-screen programs
-(`vi`, `htop`, `tmux`) drive, so those will not draw correctly yet.
+A session switches the console into a real terminal -- `tulip.term_start()`,
+below -- so full-screen programs work: `vi`, `top`, `less`, `tmux`. It is an
+xterm subset with cursor addressing, a scroll region, insert and delete of both
+lines and characters, an alternate screen, autowrap, tab stops, the DEC
+line-drawing set, and the answers a program expects back when it asks the
+terminal what it is. The pty is opened at the console's own size, so `stty size`
+agrees with what you can see.
 
 What it cannot act on it swallows rather than prints, including the window-title
 sequence a shell sends at every prompt, and it will pick a sequence up again on
 the far side of a write boundary -- ssh hands over whatever the network gave it,
 so a sequence can be cut in half anywhere.
+
+The arrows, Delete, Home, End, Insert and the function keys are sent as the
+terminal's own sequences, in whichever form the program asked for: a program
+that turns on application cursor keys gets `ESC O A` where a shell gets
+`ESC [ A`. Page Up and Page Down reach the remote as Ctrl-Y and Ctrl-V, which
+is what this keyboard has always decoded them to.
+
+Drawing is the limit rather than the link. The screen keeps up with about 30
+KB/s of output against the connection's 77, so a full-screen repaint takes
+roughly a tenth of a second and a `cat` of something large is slower than the
+network could have been.
 
 Ctrl-C is sent to the remote shell rather than interrupting Python, which is
 what you want inside a session; the keyboard goes back to the REPL when the
@@ -1120,6 +1133,28 @@ tulip.tfb_start()
 # If you want to keep the existing TFB around, you can save it to a temporary buffer and recall it
 tulip.tfb_save()
 tulip.tfb_restore()
+
+# The console can also be driven as a terminal rather than as a printer, which
+# is what the ssh app does with a remote shell: cursor addressing, a scroll
+# region, insert and delete, an alternate screen, and the DEC line-drawing set.
+# It clears the screen on the way in and leaves what is on it on the way out.
+tulip.term_start()
+tulip.term_stop()
+
+# What the terminal has been told about how to encode keys, as a bitmask:
+# 1 application cursor keys, 2 application keypad, 4 bracketed paste, 8 mouse
+# reporting. ssh.key_bytes(key, flags) turns a Tulip key code into the bytes to
+# send with that in mind.
+flags = tulip.term_flags()
+
+# What the terminal owes the other end -- an answer to "what are you" or "where
+# is your cursor". It has no idea where to send them, so whatever is running the
+# session collects them and writes them back.
+tulip.term_reply()
+
+# In terminal mode a \n moves down and keeps the column, the way a terminal's
+# line feed does; it is the pty on the other end that puts the \r in front of
+# it. Outside terminal mode the console behaves as it always has.
 
 # Set/get TFB font number
 # 0=8x12, 1=6x8, 2=12x16, 3=Japanese 16 dot, 4=Japanese 16 dot at 2x
