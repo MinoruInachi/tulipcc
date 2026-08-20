@@ -42,6 +42,7 @@ MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_frame_arg);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_touch_cb);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_midi_cb);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_ime_cb);
+MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_keyboard_cb);
 
 #define s_tab5_process_defers_cb MP_STATE_PORT(tab5_process_defers_cb)
 #define s_tab5_frame_cb MP_STATE_PORT(tab5_frame_cb)
@@ -49,6 +50,7 @@ MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_ime_cb);
 #define s_tab5_touch_cb MP_STATE_PORT(tab5_touch_cb)
 #define s_tab5_midi_cb MP_STATE_PORT(tab5_midi_cb)
 #define s_tab5_ime_cb MP_STATE_PORT(tab5_ime_cb)
+#define _tab5_keyboard_cb MP_STATE_PORT(tab5_keyboard_cb)
 
 static void tab5_process_python_defers(void) {
     nlr_buf_t nlr;
@@ -1345,7 +1347,13 @@ static mp_obj_t tulip_deinit_editor(size_t n_args, const mp_obj_t *args) {
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_deinit_editor_obj, 0, 0, tulip_deinit_editor);
 
 // A registered callback owns keyboard input, so Editor keys are not also sent to LVGL.
-static mp_obj_t _tab5_keyboard_cb = mp_const_none;
+//
+// It lives in MP_STATE_PORT with the other callbacks rather than in a plain
+// static, because a plain static is not a GC root: the collector would free a
+// callback nothing else refers to -- a bound method or a lambda, which is what
+// an app naturally passes -- while this still pointed at it, and the next key
+// would schedule freed memory. That shows up as "TypeError: 'bytes' object
+// isn't callable" from nowhere, or a load fault.
 // keyboard_send_keys_to_micropython lives in shared/keyscan.c, which TAB5 now
 // builds for the USB HID scan-code decoder (see usb_host_tab5.c).
 
