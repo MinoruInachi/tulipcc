@@ -1190,10 +1190,25 @@ static uint8_t term_saved_g0 = 0, term_saved_g1 = 0, term_saved_gl = 0;
 static int16_t term_saved_format = -1;
 static uint8_t term_saved_fg = 0, term_saved_bg = 0;
 
-// The primary screen, parked here while the alternate one is up.
-static uint16_t *term_alt_tfb = NULL;
-static uint8_t *term_alt_f = NULL, *term_alt_fg = NULL, *term_alt_bg = NULL;
-static uint8_t term_alt_x = 0, term_alt_y = 0;
+// A screen off the glass: the primary one while the alternate is up, and the
+// console's own while a session has borrowed the screen.
+typedef struct {
+    uint16_t *tfb;
+    uint8_t *f, *fg, *bg;
+    uint8_t x, y;
+} term_screen_t;
+
+static term_screen_t term_alt_screen;
+static term_screen_t term_park_screen;
+// What the park buffer is holding: nothing, the console's screen (a session is
+// on the glass) or the session's (something else has the console for a while).
+#define TERM_PARK_NONE 0
+#define TERM_PARK_CONSOLE 1
+#define TERM_PARK_SESSION 2
+static uint8_t term_park_held = TERM_PARK_NONE;
+// The colours the session was drawing in, while something else has the console.
+static int16_t term_paused_format = -1;
+static uint8_t term_paused_fg = 0, term_paused_bg = 0;
 
 static char term_reply[TERM_REPLY_MAX];
 static uint8_t term_reply_len = 0;
@@ -1485,40 +1500,93 @@ static void term_soft_reset(void) {
     term_tabs_default();
 }
 
-static void term_alt_free(void) {
-    if(term_alt_tfb) { free_caps(term_alt_tfb); term_alt_tfb = NULL; }
-    if(term_alt_f) { free_caps(term_alt_f); term_alt_f = NULL; }
-    if(term_alt_fg) { free_caps(term_alt_fg); term_alt_fg = NULL; }
-    if(term_alt_bg) { free_caps(term_alt_bg); term_alt_bg = NULL; }
+// Room for one screen, out of SPIRAM: this is only ever memcpy'd in and out.
+static uint8_t term_screen_alloc(term_screen_t *sc) {
+    if(sc->tfb != NULL) return 1;
+    sc->tfb = (uint16_t*)malloc_caps(TFB_ROWS*TFB_COLS*sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    sc->f = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    sc->fg = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    sc->bg = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(sc->tfb && sc->f && sc->fg && sc->bg) return 1;
+    // No room for the shelf. Every caller carries on without it rather than
+    // losing the session over it.
+    if(sc->tfb) { free_caps(sc->tfb); sc->tfb = NULL; }
+    if(sc->f) { free_caps(sc->f); sc->f = NULL; }
+    if(sc->fg) { free_caps(sc->fg); sc->fg = NULL; }
+    if(sc->bg) { free_caps(sc->bg); sc->bg = NULL; }
+    return 0;
 }
 
-// The alternate screen is the primary one put away in a buffer, not a second
-// set of planes: everything that draws reads TFB directly, and one screen at a
-// time is all that is ever on show.
+static void term_screen_free(term_screen_t *sc) {
+    if(sc->tfb) { free_caps(sc->tfb); sc->tfb = NULL; }
+    if(sc->f) { free_caps(sc->f); sc->f = NULL; }
+    if(sc->fg) { free_caps(sc->fg); sc->fg = NULL; }
+    if(sc->bg) { free_caps(sc->bg); sc->bg = NULL; }
+}
+
+static void term_screen_store(term_screen_t *sc) {
+    if(sc->tfb == NULL) return;
+    memcpy(sc->tfb, TFB, TFB_ROWS*TFB_COLS*sizeof(uint16_t));
+    memcpy(sc->f, TFBf, TFB_ROWS*TFB_COLS);
+    memcpy(sc->fg, TFBfg, TFB_ROWS*TFB_COLS);
+    memcpy(sc->bg, TFBbg, TFB_ROWS*TFB_COLS);
+    sc->x = tfb_x_col;
+    sc->y = tfb_y_row;
+}
+
+static void term_screen_load(term_screen_t *sc) {
+    if(sc->tfb == NULL) return;
+    memcpy(TFB, sc->tfb, TFB_ROWS*TFB_COLS*sizeof(uint16_t));
+    memcpy(TFBf, sc->f, TFB_ROWS*TFB_COLS);
+    memcpy(TFBfg, sc->fg, TFB_ROWS*TFB_COLS);
+    memcpy(TFBbg, sc->bg, TFB_ROWS*TFB_COLS);
+    tfb_x_col = sc->x;
+    tfb_y_row = sc->y;
+}
+
+static void term_mem_swap(void *a, void *b, uint32_t n) {
+    uint8_t *pa = (uint8_t*)a, *pb = (uint8_t*)b, tmp[64];
+    while(n) {
+        uint32_t k = (n < sizeof(tmp)) ? n : sizeof(tmp);
+        memcpy(tmp, pa, k);
+        memcpy(pa, pb, k);
+        memcpy(pb, tmp, k);
+        pa += k; pb += k; n -= k;
+    }
+}
+
+// Exchange what is on the glass with what is on the shelf, cursor included.
+static void term_screen_swap(term_screen_t *sc) {
+    if(sc->tfb == NULL) return;
+    term_mem_swap(sc->tfb, TFB, TFB_ROWS*TFB_COLS*sizeof(uint16_t));
+    term_mem_swap(sc->f, TFBf, TFB_ROWS*TFB_COLS);
+    term_mem_swap(sc->fg, TFBfg, TFB_ROWS*TFB_COLS);
+    term_mem_swap(sc->bg, TFBbg, TFB_ROWS*TFB_COLS);
+    uint8_t x = sc->x, y = sc->y;
+    sc->x = tfb_x_col;
+    sc->y = tfb_y_row;
+    tfb_x_col = x;
+    tfb_y_row = y;
+}
+
+// Everything on screen changed and the ring's rotation describes none of it.
+static void term_screen_repaint(void) {
+    display_tfb_update(-1);
+    memset(term_dirty, 0, sizeof(term_dirty));
+    term_dirty_any = 0;
+    display_mark_dirty();
+}
+
+// The alternate screen is the primary one put away, not a second set of planes:
+// everything that draws reads TFB directly, and one screen at a time is all that
+// is ever on show.
 static void term_alt_enter(uint8_t save_cursor) {
     if(term_alt) return;
     // Before anything is copied: the block and the cell's real colours under it
     // belong to the screen being put away, not to the one coming up.
     term_hide_cursor();
-    if(term_alt_tfb == NULL) {
-        term_alt_tfb = (uint16_t*)malloc_caps(TFB_ROWS*TFB_COLS*sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        term_alt_f = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        term_alt_fg = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        term_alt_bg = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if(!term_alt_tfb || !term_alt_f || !term_alt_fg || !term_alt_bg) {
-            // No room for the shelf. Stay on the one screen rather than lose the
-            // session: the application draws over what is there and the console
-            // scrollback is what it costs.
-            term_alt_free();
-            return;
-        }
-    }
-    memcpy(term_alt_tfb, TFB, TFB_ROWS*TFB_COLS*sizeof(uint16_t));
-    memcpy(term_alt_f, TFBf, TFB_ROWS*TFB_COLS);
-    memcpy(term_alt_fg, TFBfg, TFB_ROWS*TFB_COLS);
-    memcpy(term_alt_bg, TFBbg, TFB_ROWS*TFB_COLS);
-    term_alt_x = tfb_x_col;
-    term_alt_y = tfb_y_row;
+    if(!term_screen_alloc(&term_alt_screen)) return;
+    term_screen_store(&term_alt_screen);
     if(save_cursor) term_save_cursor();
     term_alt = 1;
     term_clear_screen();
@@ -1528,31 +1596,24 @@ static void term_alt_leave(uint8_t restore_cursor) {
     if(!term_alt) return;
     term_hide_cursor();
     term_alt = 0;
-    if(term_alt_tfb) {
-        memcpy(TFB, term_alt_tfb, TFB_ROWS*TFB_COLS*sizeof(uint16_t));
-        memcpy(TFBf, term_alt_f, TFB_ROWS*TFB_COLS);
-        memcpy(TFBfg, term_alt_fg, TFB_ROWS*TFB_COLS);
-        memcpy(TFBbg, term_alt_bg, TFB_ROWS*TFB_COLS);
-    }
-    tfb_x_col = term_alt_x;
-    tfb_y_row = term_alt_y;
+    term_screen_load(&term_alt_screen);
+    term_screen_free(&term_alt_screen);
     if(restore_cursor) term_restore_cursor();
     term_wrap_next = 0;
-    // Every row changed and the ring's rotation no longer describes any of it.
-    display_tfb_update(-1);
-    memset(term_dirty, 0, sizeof(term_dirty));
-    term_dirty_any = 0;
-    display_mark_dirty();
+    term_screen_repaint();
 }
 
-// The colours the session was drawing in, while something else has the console.
-static int16_t term_paused_format = -1;
-static uint8_t term_paused_fg = 0, term_paused_bg = 0;
-
+// A session borrows the screen; it does not get to keep whatever was on it. The
+// console's screen goes on the shelf at the start of a session and comes back at
+// the end, and while something else has the console -- the task bar switching
+// apps -- the two trade places, so neither the REPL is left looking at a remote
+// shell nor the session at the REPL's scrollback. The editor does the same thing
+// with tulip.tfb_save(), one buffer deep; a session needs both screens kept, so
+// this has its own.
+//
 // reset: a new session, which starts from a cleared screen and a terminal with
-// nothing set on it. Without it this is a session coming back after the task bar
-// took the console away and gave it back -- the emulator's state is still the
-// truth, and the application redraws the screen the next time it writes.
+// nothing set on it. Without it this is a session being handed the console back
+// after something else had it -- the emulator's state is still the truth.
 void display_term_start(uint8_t reset) {
     if(TFB == NULL) return;
     uint8_t was = term_mode;
@@ -1566,39 +1627,69 @@ void display_term_start(uint8_t reset) {
         ansi_active_format = term_paused_format;
         ansi_active_fg_color = term_paused_fg;
         ansi_active_bg_color = term_paused_bg;
+        if(term_park_held == TERM_PARK_SESSION) {
+            term_screen_swap(&term_park_screen);
+            term_park_held = TERM_PARK_CONSOLE;
+            term_screen_repaint();
+        }
         return;
     }
     term_soft_reset();
     ansi_active_format = 0;
     ansi_active_fg_color = tfb_fg_pal_color;
     ansi_active_bg_color = tfb_bg_pal_color;
+    if(term_park_held == TERM_PARK_NONE && term_screen_alloc(&term_park_screen)) {
+        term_screen_store(&term_park_screen);
+        term_park_held = TERM_PARK_CONSOLE;
+    }
     tfb_x_col = 0;
     tfb_y_row = 0;
     // A screen of spaces rather than of 0s: from here on a row is drawn to its
     // full width, which is what makes a cell addressable out of order.
     term_clear_screen();
-    display_tfb_update(-1);
-    memset(term_dirty, 0, sizeof(term_dirty));
-    term_dirty_any = 0;
-    display_mark_dirty();
+    term_screen_repaint();
 }
 
-// reset: the session is over. Without it the console is only being handed to
-// something else for a while -- the alternate screen stays where it is and the
-// scroll region, the modes and the saved cursor are all still there to come
-// back to.
+// reset: the session is over, so the console's screen comes back off the shelf.
+// Without it the console is only being handed to something else for a while --
+// the session's screen goes on the shelf in its place, and the scroll region,
+// the modes, the alternate screen and the saved cursor are all still there to
+// come back to.
 void display_term_stop(uint8_t reset) {
-    if(!term_mode) return;
-    term_hide_cursor();
-    if(reset) {
-        term_alt_leave(0);
-        term_alt_free();
+    if(!term_mode) {
+        // Quitting the app runs the deactivate before the quit, so this is the
+        // ordinary way a session ends: paused first, and then over. The screen
+        // on the shelf is the session's and nobody is going back to it.
+        if(reset && term_park_held == TERM_PARK_SESSION) {
+            term_screen_free(&term_park_screen);
+            term_screen_free(&term_alt_screen);
+            term_park_held = TERM_PARK_NONE;
+            term_alt = 0;
+            term_soft_reset();
+        }
+        return;
     }
+    term_hide_cursor();
+    if(reset) term_alt_leave(0);
     term_mode = 0;
     term_paused_format = ansi_active_format;
     term_paused_fg = ansi_active_fg_color;
     term_paused_bg = ansi_active_bg_color;
-    if(reset) term_soft_reset();
+    if(term_park_held == TERM_PARK_CONSOLE) {
+        if(reset) {
+            term_screen_load(&term_park_screen);
+            term_screen_free(&term_park_screen);
+            term_park_held = TERM_PARK_NONE;
+        } else {
+            term_screen_swap(&term_park_screen);
+            term_park_held = TERM_PARK_SESSION;
+        }
+        term_screen_repaint();
+    }
+    if(reset) {
+        term_screen_free(&term_alt_screen);
+        term_soft_reset();
+    }
     // Whatever the remote was drawing in is not what the REPL should inherit.
     ansi_active_format = -1;
     ansi_active_fg_color = tfb_fg_pal_color;

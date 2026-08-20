@@ -931,6 +931,7 @@ def shell(host, user, password=None, key=None, port=22, accept_new=True,
     keys = []
     poller = select.poll()
     poller.register(c.sock, select.POLLIN)
+    failed = None
     try:
         c.request_pty(cols, rows, term)
         c.start_shell()
@@ -967,12 +968,15 @@ def shell(host, user, password=None, key=None, port=22, accept_new=True,
             elif not data:
                 poller.poll(20)     # idle: wait on the socket rather than spin
     except SSHError as e:
-        print('\nssh: %s' % e)
+        failed = e
     finally:
         micropython.kbd_intr(3)
+        # This puts the console's own screen back, so anything worth reading
+        # afterwards has to be printed after it rather than onto the session's.
         tulip.term_stop()
         tulip.keyboard_callback()
         tulip.set_screen_as_repl(1)
         c.close()
-        print('')
+    if failed is not None:
+        print('ssh: %s' % failed)
     return c.exit_status

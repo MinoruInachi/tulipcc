@@ -600,6 +600,12 @@ Ctrl-C is sent to the remote shell rather than interrupting Python, which is
 what you want inside a session; the keyboard goes back to the REPL when the
 session ends.
 
+A session borrows the screen and gives it back. Whatever the console had on it
+is put away when the session starts and is back when it ends, so quitting does
+not leave a remote shell sitting on the REPL's screen -- and switching to
+another app mid-session swaps the two, so the REPL is not looking at the session
+either. The session's screen is still there when you switch back to it.
+
 There is an app version of all this, `SSH` in the launcher (or `run('sshterm')`).
 It puts up a form for the host, user, password or key file and port, remembers
 everything but the password in `/user/sshterm.conf`, and then hands the console
@@ -1137,9 +1143,17 @@ tulip.tfb_restore()
 # The console can also be driven as a terminal rather than as a printer, which
 # is what the ssh app does with a remote shell: cursor addressing, a scroll
 # region, insert and delete, an alternate screen, and the DEC line-drawing set.
-# It clears the screen on the way in and leaves what is on it on the way out.
+# The session borrows the screen: whatever was on the console is put away at
+# the start and comes back at the end.
 tulip.term_start()
 tulip.term_stop()
+
+# Pass False when the console is only changing hands for a while -- the task bar
+# switching apps -- rather than a session starting or ending. The two screens
+# trade places and the terminal keeps its scroll region, modes and alternate
+# screen to come back to.
+tulip.term_stop(False)      # something else gets the console
+tulip.term_start(False)     # and the session gets it back
 
 # What the terminal has been told about how to encode keys, as a bitmask:
 # 1 application cursor keys, 2 application keypad, 4 bracketed paste, 8 mouse

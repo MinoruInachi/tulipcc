@@ -223,15 +223,21 @@ class SSHTerm:
             return                      # already back at the form
         self.release_keyboard()
         self.poller = None
+        ended = False
         if self.client is not None:
             try:
                 self.client.close()
             except Exception:
                 pass
             self.client = None
+            ended = True
+        # The console gets its own screen back here, so the note about the
+        # session ending goes on after: written before this, it would be on the
+        # session's screen, which is the one being taken away.
+        tulip.term_stop()
+        if ended:
             sys.stdout.write('\r\n-- disconnected%s --\r\n'
                              % ('' if why is None else ': ' + why))
-        tulip.term_stop()
         self.screen.keep_tfb = False
         tulip.tfb_stop()
         if self.form is not None:
