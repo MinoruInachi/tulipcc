@@ -531,6 +531,57 @@ tulip.url_put(url, "filename.ext")
 tulip.set_time() 
 ```
 
+### SSH
+
+`ssh` is an SSH-2 client written in Python. It logs into another machine on the
+network and puts its shell on the Tulip text console.
+
+```python
+import ssh
+
+# Run one command and get its output back
+print(ssh.run("192.168.1.10", "me", "uname -a", password="secret"))
+
+# An interactive shell. It ends when the remote shell does, so type `exit`
+ssh.shell("192.168.1.10", "me", password="secret")
+
+# A key instead of a password. It has to be an unencrypted OpenSSH RSA key --
+# copy one onto Tulip and give its path. `ssh-keygen -p` takes a passphrase off
+ssh.shell("192.168.1.10", "me", key="/user/id_rsa")
+
+# The pieces, if you want to drive a channel yourself
+c = ssh.connect("192.168.1.10", "me", key="/user/id_rsa")
+c.exec_command("ls /tmp")
+while not c.closed: print(c.read())
+c.close()
+```
+
+There is one cipher suite and it is not negotiable: `curve25519-sha256` key
+exchange, an `rsa-sha2-256` host key, `aes128-ctr` and `hmac-sha2-256`. That is
+enough for a stock OpenSSH server, which still ships an RSA host key alongside
+its Ed25519 one -- but a server configured for Ed25519 *only* cannot be checked
+here and will be refused rather than trusted blindly. (mbedTLS has no EdDSA and
+this build's `hashlib` has no SHA-512, so verifying an Ed25519 host key would
+mean writing both from scratch in Python.)
+
+Host keys are remembered the first time you connect, in `/user/known_hosts`,
+and a later mismatch raises `ssh.HostKeyError` instead of connecting. Pass
+`accept_new=False` to refuse unknown hosts too.
+
+The slow parts are the ones that only happen once: about 0.7s for the handshake
+(two X25519 scalar multiplications and one RSA signature check) and another
+1.6s if you authenticate with a key rather than a password.
+
+The console is a line-oriented terminal. It understands colours and the other
+SGR attributes, `ESC[K`, `ESC[H`, `ESC[J`, `\r` and `\b`, which covers a shell
+prompt, `ls`, `git`, and anything else that scrolls. It does not implement the
+cursor movement, scroll regions or alternate screen that full-screen programs
+(`vi`, `htop`, `tmux`) drive, so those will not draw correctly yet.
+
+Ctrl-C is sent to the remote shell rather than interrupting Python, which is
+what you want inside a session; the keyboard goes back to the REPL when the
+session ends.
+
 ## Async
 
 We ship `asyncio` and also provide a simpler `tulip.defer()` callback to schedule code in the future.

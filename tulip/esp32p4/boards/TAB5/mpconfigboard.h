@@ -26,6 +26,13 @@ void tab5_board_startup(void);
 // MICROPY_HW_ESP_USB_SERIAL_JTAG enabled.
 #define MICROPY_HW_ENABLE_USBDEV            (0)
 
+// AES counter mode, which cryptolib leaves out by default (mpconfig.h defaults
+// MICROPY_PY_CRYPTOLIB_CTR to 0 while CBC comes along with MICROPY_PY_SSL for
+// free). shared/py/ssh.py needs it: aes128-ctr is the SSH cipher it negotiates,
+// and doing that stream in Python instead would cost more than the few hundred
+// bytes of C this adds.
+#define MICROPY_PY_CRYPTOLIB_CTR            (1)
+
 // Tab5 wireless connectivity is handled by the companion ESP32-C6.
 #define MICROPY_PY_NETWORK_WLAN             (1)
 #define MICROPY_PY_BLUETOOTH                (0)
