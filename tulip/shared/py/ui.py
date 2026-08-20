@@ -576,6 +576,8 @@ def launcher_cb(e):
             keyboard()
         if(text=="Wordpad"):
             tulip.run("wordpad")
+        if(text=="SSH"):
+            tulip.run('sshterm')
         if(text=="Wi-Fi"):
             try:
                 wifi()
@@ -617,6 +619,8 @@ def launcher(ignore=True):
     b_wordpad.add_event_cb(launcher_cb, lv.EVENT.CLICKED, None)
     b_wifi = lv_launcher.add_button(lv.SYMBOL.WIFI, "Wi-Fi")
     b_wifi.add_event_cb(launcher_cb, lv.EVENT.CLICKED, None)
+    b_ssh = lv_launcher.add_button(lv.SYMBOL.DRIVE, "SSH")
+    b_ssh.add_event_cb(launcher_cb, lv.EVENT.CLICKED, None)
     b_power = lv_launcher.add_button(lv.SYMBOL.POWER,"Reset")
     b_power.add_event_cb(launcher_cb, lv.EVENT.CLICKED, None)
     if tulip.board() == "TAB5":
@@ -625,7 +629,7 @@ def launcher(ignore=True):
         for i in range(lv_launcher.get_child_count()):
             lv_launcher.get_child(i).set_style_pad_ver(10, lv.PART.MAIN)
         lv_launcher.update_layout()
-        last_visible_button = lv_launcher.get_child(min(10, lv_launcher.get_child_count()) - 1)
+        last_visible_button = lv_launcher.get_child(min(11, lv_launcher.get_child_count()) - 1)
         lv_launcher.set_height(last_visible_button.get_y() + last_visible_button.get_height())
     lv_launcher.set_parent(repl_screen.group)
     lv_launcher.set_align(lv.ALIGN.BOTTOM_RIGHT)

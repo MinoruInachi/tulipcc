@@ -582,6 +582,14 @@ Ctrl-C is sent to the remote shell rather than interrupting Python, which is
 what you want inside a session; the keyboard goes back to the REPL when the
 session ends.
 
+There is an app version of all this, `SSH` in the launcher (or `run('sshterm')`).
+It puts up a form for the host, user, password or key file and port, remembers
+everything but the password in `/user/sshterm.conf`, and then hands the console
+over to the session. It is a normal switchable app: the task bar keeps working
+while you are connected, so you can switch to another app and come back to the
+session still running, and quitting from the task bar hangs up. Typing `~.` at
+the start of a line hangs up too, the way OpenSSH's escape does.
+
 ## Async
 
 We ship `asyncio` and also provide a simpler `tulip.defer()` callback to schedule code in the future.

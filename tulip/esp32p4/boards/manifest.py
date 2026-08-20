@@ -46,6 +46,7 @@ freeze("$(MPY_DIR)/../tulip/shared/py", (
 	"sequencer.py",
 	"sh1107.py",
 	"ssh.py",
+	"sshterm.py",
 	"ssd1327.py",
 	"sx1262.py",
 	"sx126x.py",

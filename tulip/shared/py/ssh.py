@@ -319,14 +319,23 @@ def load_key(path):
 
 # --------------------------------------------------------------- known hosts
 
-def _known_hosts_path():
+def user_path(name):
+    """Where to keep `name`: the user filesystem if this board has one.
+
+    Tulip Desktop and Web have no /user, and there the current directory is the
+    only sensible place.
+    """
     for d in ('/user', '/sys'):
         try:
             os.stat(d)
-            return d + '/known_hosts'
+            return d + '/' + name
         except OSError:
             pass
-    return 'known_hosts'
+    return name
+
+
+def _known_hosts_path():
+    return user_path('known_hosts')
 
 
 def _fingerprint(host_key):
@@ -852,7 +861,7 @@ def run(host, user, command, password=None, key=None, port=22,
 
 # ------------------------------------------------------------------- terminal
 
-def _utf8_split(buf):
+def utf8_split(buf):
     """(text that is complete, bytes held back as a partial character)."""
     cut = len(buf)
     for back in range(1, 5):
@@ -875,7 +884,7 @@ def _utf8_split(buf):
                 buf[cut:])
 
 
-def _key_bytes(k):
+def key_bytes(k):
     """One Tulip key code as the bytes a terminal would send."""
     if k == 259:
         return b'\x1b[A'
@@ -926,12 +935,12 @@ def shell(host, user, password=None, key=None, port=22, accept_new=True,
             while len(data) < 4096 and poller.poll(0) and not c.closed:
                 data += c.read()
             if data:
-                text, tail = _utf8_split(tail + data)
+                text, tail = utf8_split(tail + data)
                 if text:
                     sys.stdout.write(text)
             out = b''
             while keys:
-                out += _key_bytes(keys.pop(0))
+                out += key_bytes(keys.pop(0))
             if out:
                 c.write(out)
             elif not data:
