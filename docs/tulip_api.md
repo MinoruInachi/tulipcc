@@ -578,6 +578,11 @@ prompt, `ls`, `git`, and anything else that scrolls. It does not implement the
 cursor movement, scroll regions or alternate screen that full-screen programs
 (`vi`, `htop`, `tmux`) drive, so those will not draw correctly yet.
 
+What it cannot act on it swallows rather than prints, including the window-title
+sequence a shell sends at every prompt, and it will pick a sequence up again on
+the far side of a write boundary -- ssh hands over whatever the network gave it,
+so a sequence can be cut in half anywhere.
+
 Ctrl-C is sent to the remote shell rather than interrupting Python, which is
 what you want inside a session; the keyboard goes back to the REPL when the
 session ends.
