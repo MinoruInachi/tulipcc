@@ -20,6 +20,7 @@
 typedef struct {
     uint16_t cp;        // 0 means the slot has never been filled
     uint8_t width;      // 8 or 16
+    uint8_t cp437;      // the CP437 byte for cp, or 0 if there is none
     uint16_t rows[JPFONT_CELL_ROWS];
 } jp_slot_t;
 
@@ -91,6 +92,12 @@ static void jp_fill(jp_slot_t *slot, uint16_t cp) {
     slot->width = 0;
     memset(slot->rows, 0, sizeof(slot->rows));
 
+    // Worked out here rather than at every ask: convert_uc16_to_cp437() walks a
+    // switch for anything past U+0800, and the TFB row builder asks about the
+    // same cell once per pixel row. Below 32 there is nothing to draw either way.
+    uint8_t code437 = convert_uc16_to_cp437(cp);
+    slot->cp437 = (code437 >= 32) ? code437 : 0;
+
     u8g2_font_t ufont = {0};
     ufont.font = NULL;
     ufont.font_decode.fg_color = 1;
@@ -101,11 +108,8 @@ static void jp_fill(jp_slot_t *slot, uint16_t cp) {
     // What actually gets drawn, which is cp unless we have to substitute for it.
     uint16_t draw = cp;
     if(!u8g2_IsGlyph(&ufont, cp)) {
-        uint8_t code = convert_uc16_to_cp437(cp);
-        // convert_uc16_to_cp437() returns 0 for anything it cannot place, and
-        // CP437 0 is not a printable glyph either way.
-        if(code >= 32) {
-            jp_fill_from_cp437(slot, code);
+        if(slot->cp437) {
+            jp_fill_from_cp437(slot, slot->cp437);
             slot->width = 8;
             return;
         }
@@ -153,11 +157,21 @@ uint16_t jpfont_cell_row(uint16_t cp, uint8_t row) {
     return jp_slot(cp)->rows[row];
 }
 
+uint8_t jpfont_cell_cp437(uint16_t cp) {
+    if(cp == 0 || cp == TFB_WIDE_CONT) return 0;
+    // ASCII is the overwhelming majority of what a console holds and is its own
+    // CP437 byte, so it never reaches the cache at all.
+    if(cp >= 32 && cp < 0x7f) return (uint8_t)cp;
+    if(!jpfont_available()) return 0;
+    return jp_slot(cp)->cp437;
+}
+
 #else  // !TULIP_JP_FONT
 
 uint8_t jpfont_available(void) { return 0; }
 uint8_t jpfont_cell_width(uint16_t cp) { (void)cp; return 0; }
 uint16_t jpfont_cell_row(uint16_t cp, uint8_t row) { (void)cp; (void)row; return 0; }
+uint8_t jpfont_cell_cp437(uint16_t cp) { (void)cp; return 0; }
 
 #endif
 
@@ -177,4 +191,21 @@ uint32_t jpfont_row_2x(uint16_t row) {
          | ((uint32_t)jp_double_bits[(row >>  8) & 0xf] << 16)
          | ((uint32_t)jp_double_bits[(row >>  4) & 0xf] <<  8)
          | ((uint32_t)jp_double_bits[(row >>  0) & 0xf]);
+}
+
+// The face is drawn with a 1px stroke and font_12x16_r with a 2px one, so in
+// TFB_FONT_JP12X16 -- the one font that puts them on the same line -- the
+// Japanese reads as a shade lighter than the English around it. Grow every
+// stroke one pixel to the right, the usual way to bolden a bitmap face, with one
+// restraint: not into a pixel that has another stroke immediately beyond it. At
+// 16px a dense kanji separates its strokes by a single pixel, and a smear that
+// took those gaps would turn 電 and 器 into blocks. So a stroke with room grows
+// and one boxed in stays as it is, which costs a little evenness and keeps every
+// character readable.
+//
+// There is no matching vertical growth: the cell is 16 rows and the face uses
+// all of them, so downward is off the bottom. Thicker verticals than horizontals
+// is what a 明朝 face does anyway.
+uint32_t jpfont_row_embolden(uint32_t row) {
+    return row | ((row >> 1) & ~(row << 1));
 }

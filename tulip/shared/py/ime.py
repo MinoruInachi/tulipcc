@@ -342,8 +342,13 @@ class IME:
         with the IME would reflow the whole console every time.
         """
         try:
-            if tulip.tfb_font() not in (3, 4):
-                tulip.tfb_font(3)
+            font = tulip.tfb_font()
+            if font not in (3, 4, 5):
+                # Font 5 is the Japanese face drawn in font 2's 12x16 cells, so
+                # coming from font 2 nothing on the console moves -- same column
+                # count, same size English. There is no such match for the other
+                # two, which go to the face's own 8x16 geometry.
+                tulip.tfb_font(5 if font == 2 else 3)
         except ValueError:
             # A board built without the Japanese font. Kana will not show on the
             # strip, but committing still works, so this is not fatal.

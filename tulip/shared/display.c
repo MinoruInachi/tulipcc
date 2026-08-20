@@ -190,7 +190,7 @@ uint8_t tfb_font_user_set = 0;
 // a fullwidth glyph is two cells wide, so these are the halfwidth widths.
 static inline uint8_t tfb_font_width_current(void) {
     if(tfb_font == TFB_FONT_PORTFOLIO) return 6;
-    if(tfb_font == TFB_FONT_12X16) return 12;
+    if(tfb_font == TFB_FONT_12X16 || tfb_font == TFB_FONT_JP12X16) return 12;
     if(tfb_font == TFB_FONT_JP32) return 16;
     return 8;
 }
@@ -198,14 +198,22 @@ static inline uint8_t tfb_font_width_current(void) {
 static inline uint8_t tfb_font_height_current(void) {
     if(tfb_font == TFB_FONT_PORTFOLIO) return 8;
     if(tfb_font == TFB_FONT_12X16) return 16;
-    if(tfb_font == TFB_FONT_JP16) return 16;
+    if(tfb_font == TFB_FONT_JP16 || tfb_font == TFB_FONT_JP12X16) return 16;
     if(tfb_font == TFB_FONT_JP32) return 32;
     return 12;
 }
 
 // True where a TFB cell holds a Unicode codepoint rather than a CP437 byte.
 static inline uint8_t tfb_font_is_unicode(void) {
-    return tfb_font == TFB_FONT_JP16 || tfb_font == TFB_FONT_JP32;
+    return tfb_font == TFB_FONT_JP16 || tfb_font == TFB_FONT_JP32
+        || tfb_font == TFB_FONT_JP12X16;
+}
+
+// The Japanese font that draws the same size cell as the one on screen now, so
+// that promoting the console to Unicode does not move anything already on it.
+// Only the 12x16 font has a match; from anywhere else it is the face's own size.
+static inline uint8_t tfb_font_japanese_for_current(void) {
+    return (tfb_font == TFB_FONT_12X16) ? TFB_FONT_JP12X16 : TFB_FONT_JP16;
 }
 
 uint8_t display_tfb_visible_cols(void) {
@@ -593,6 +601,45 @@ void display_tfb_update(int8_t tfb_row_hint) {
                 if(glyph <= 255 && tfb_row_offset_px < 16) {
                     // Already packed into bits 15..4 of a uint16_t.
                     data = ((uint32_t)font_12x16_r[glyph][tfb_row_offset_px]) << 16;
+                }
+            } else if(tfb_font == TFB_FONT_JP12X16) {
+                if(glyph == TFB_WIDE_CONT) {
+                    cell_px = 0;
+                } else if(glyph < 0x7f) {
+                    // ASCII is most of what a console holds and is its own CP437
+                    // byte, so it never goes near the Japanese face.
+                    if(tfb_row_offset_px < 16) {
+                        data = ((uint32_t)font_12x16_r[glyph][tfb_row_offset_px]) << 16;
+                    }
+                } else if(jpfont_cell_width(glyph) > 8) {
+                    // Fullwidth Japanese is square by design -- the face draws it
+                    // 16 wide -- and the cell pair here is 24. Centre it. Half a
+                    // pixel of stretch per column would thicken some strokes of a
+                    // kanji and not others, which at 16px is worse than the
+                    // tracking that centring costs. Emboldened, because the face
+                    // strokes at 1px and the Latin beside it at 2. The extra pixel
+                    // goes into the right margin, which is why 4px of it were
+                    // there.
+                    data = jpfont_row_embolden(
+                        ((uint32_t)jpfont_cell_row(glyph, tfb_row_offset_px)) << 12);
+                    cell_px = font_width * 2;
+                } else {
+                    uint8_t code = jpfont_cell_cp437(glyph);
+                    if(code) {
+                        // Anything CP437 can hold still comes from the 12x16 face,
+                        // which is the whole point of this font: a line of English
+                        // looks the same before and after the console promotes
+                        // itself, and so does the column count.
+                        if(tfb_row_offset_px < 16) {
+                            data = ((uint32_t)font_12x16_r[code][tfb_row_offset_px]) << 16;
+                        }
+                    } else {
+                        // Halfwidth out of the face -- halfwidth kana, mostly -- is
+                        // 8 wide against a 12 wide cell, so centre that too, and
+                        // bolden it for the same reason.
+                        data = jpfont_row_embolden(
+                            ((uint32_t)jpfont_cell_row(glyph, tfb_row_offset_px)) << 14);
+                    }
                 }
             } else if(tfb_font == TFB_FONT_JP16 || tfb_font == TFB_FONT_JP32) {
                 if(glyph == TFB_WIDE_CONT) {
@@ -2264,8 +2311,10 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg
             uint8_t cp437 = convert_uc16_to_cp437(ucs);
             if(cp437 == 0 && !tfb_font_is_unicode() && !tfb_font_user_set && jpfont_available()) {
                 // Nothing in the current font can draw this. Switch to the one
-                // that can, and re-lay the console at its geometry.
-                tfb_font = TFB_FONT_JP16;
+                // that can, and re-lay the console at its geometry -- which,
+                // where there is a Japanese font at the same cell size, is the
+                // geometry it already had.
+                tfb_font = tfb_font_japanese_for_current();
                 visible_cols = display_tfb_visible_cols();
                 visible_rows = display_tfb_visible_rows();
                 if(visible_cols == 0 || visible_rows == 0) return;

@@ -42,6 +42,8 @@ class SSHTerm:
         self.line_start = True
         self.tilde = False
         self.busy = False
+        # The window size the remote was last told about. See check_size().
+        self.size = None
         # The callback objects themselves, made once and kept. See take_keyboard().
         self.key_cb = None
         self.pump_cb = None
@@ -213,7 +215,8 @@ class SSHTerm:
         # The password stays only as long as the form is on screen.
         self.fields['password'].set_text('')
         try:
-            cols, rows = tulip.tfb_size()
+            self.size = tulip.tfb_size()
+            cols, rows = self.size
             client.request_pty(cols, rows)
             client.start_shell()
         except Exception as e:
@@ -325,6 +328,7 @@ class SSHTerm:
                 text, self.tail = ssh.utf8_split(self.tail + data)
                 if text:
                     sys.stdout.write(text)
+                    self.check_size()
             # Whatever the terminal owes the far end -- a device attributes
             # answer, a cursor position report. It is the terminal that is
             # asked and the session that knows where the answer goes.
@@ -342,6 +346,26 @@ class SSHTerm:
             self.disconnect('%s: %s' % (type(e).__name__, e))
         finally:
             self.busy = False
+
+    def check_size(self):
+        """Keep the remote's idea of the window and the console's the same.
+
+        The console picks its own font: the first character the current one
+        cannot draw promotes it to a Japanese one, and a font whose cells are a
+        different size is a different number of columns and rows. Say nothing
+        and the remote goes on wrapping at the width it was given, which puts
+        every line after that in the wrong place.
+        """
+        size = tulip.tfb_size()
+        if size == self.size or self.client is None:
+            return
+        self.size = size
+        try:
+            self.client.resize(size[0], size[1])
+        except Exception:
+            # A window-change the far end will not take is not worth ending a
+            # session over; the display is wrong either way.
+            pass
 
     # ------------------------------------------------------ app lifecycle
 

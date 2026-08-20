@@ -1011,14 +1011,15 @@ static mp_obj_t tulip_tfb_str(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_tfb_str_obj, 2, 6, tulip_tfb_str);
 
-// 0=8x12, 1=portfolio 6x8, 2=12x16, 3=Japanese 16 dot, 4=Japanese 16 dot at 2x
+// 0=8x12, 1=portfolio 6x8, 2=12x16, 3=Japanese 16 dot, 4=Japanese 16 dot at 2x,
+// 5=Japanese in font 2's 12x16 cells
 static mp_obj_t tulip_tfb_font(size_t n_args, const mp_obj_t *args) {
     if (n_args == 0) return mp_obj_new_int(tfb_font);
     int font = mp_obj_get_int(args[0]);
     if (font < TFB_FONT_8X12 || font > TFB_FONT_MAX) {
-        mp_raise_ValueError(MP_ERROR_TEXT("tfb_font must be 0 to 4"));
+        mp_raise_ValueError(MP_ERROR_TEXT("tfb_font must be 0 to 5"));
     }
-    if ((font == TFB_FONT_JP16 || font == TFB_FONT_JP32) && !jpfont_available()) {
+    if (font >= TFB_FONT_JP16 && !jpfont_available()) {
         mp_raise_ValueError(MP_ERROR_TEXT("this build has no Japanese font"));
     }
     tfb_font = font;

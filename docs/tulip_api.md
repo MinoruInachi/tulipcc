@@ -581,7 +581,12 @@ xterm subset with cursor addressing, a scroll region, insert and delete of both
 lines and characters, an alternate screen, autowrap, tab stops, the DEC
 line-drawing set, and the answers a program expects back when it asks the
 terminal what it is. The pty is opened at the console's own size, so `stty size`
-agrees with what you can see.
+agrees with what you can see, and the app sends a window-change if that size ever
+moves under it -- switching TFB fonts mid-session changes the column count, and a
+remote still wrapping at the old width lays out every line after that wrongly.
+Japanese arriving in the middle of a session no longer moves it on a Tab5: the
+console promotes itself to font `5`, which is the 12x16 console with Japanese in
+it rather than a different size (see `tulip.tfb_font()`).
 
 What it cannot act on it swallows rather than prints, including the window-title
 sequence a shell sends at every prompt, and it will pick a sequence up again on
@@ -1080,7 +1085,7 @@ tulip.bg_swap()
 
 There are three types of fonts built into Tulip. 
 
- - TFB fonts: we ship 5 fixed-size fonts for the TFB (see below). You can switch them at runtime with `tulip.tfb_font()`.
+ - TFB fonts: we ship 6 fixed-size fonts for the TFB (see below). You can switch them at runtime with `tulip.tfb_font()`.
  - LVGL fonts: [LVGL ships a few fonts like `lv.font_montserrat_12`](https://docs.lvgl.io/master/details/main-modules/font.html). These fonts have more glyphs, can handle some unicode characters, and also ship with symbols (like the ones we show in the Tulip launcher). 
  - Tulip fonts: we ship 20 fonts to use with `bg_str` etc, and they can also be used in LVGL widgets by referencing them like `lv.tulip_font_13`.
 
@@ -1100,24 +1105,45 @@ ESP32-S3 boards do not, and `tulip.tfb_font(3)` raises there.
 
 ## Text frame buffer (TFB)
 
-The TFB supports 5 built-in fixed-width fonts, switchable at runtime with `tulip.tfb_font(x)`:
+The TFB supports 6 built-in fixed-width fonts, switchable at runtime with `tulip.tfb_font(x)`:
 
  - `0`: default 8x12 font
  - `1`: small 6x8 font
  - `2`: big 12x16 font
  - `3`: Japanese 16 dot -- 8x16 halfwidth cells, fullwidth characters spanning two of them
  - `4`: the same face pixel doubled -- 16x32 halfwidth cells, 32x32 fullwidth
+ - `5`: font `2` with Japanese in it -- 12x16 halfwidth cells, 24x16 fullwidth
 
-Fonts `3` and `4` are the ones that can show Japanese. A fullwidth character takes
-two TFB cells, so `tulip.tfb_str(x,y)` reads the same character back from either of
-them, and everything else -- scrolling, ANSI codes, the editor -- keeps working on
-a grid of uniform cells. Font `4` is font `3` doubled rather than a second face at
-32 dot, which is what keeps the exact 1:2 half-to-fullwidth ratio.
+Fonts `3`, `4` and `5` are the ones that can show Japanese. A fullwidth character
+takes two TFB cells, so `tulip.tfb_str(x,y)` reads the same character back from
+either of them, and everything else -- scrolling, ANSI codes, the editor -- keeps
+working on a grid of uniform cells. Font `4` is font `3` doubled rather than a
+second face at 32 dot, which is what keeps the exact 1:2 half-to-fullwidth ratio.
+
+Font `5` is font `2`'s console with Japanese added: same 12x16 cells, same column
+count, and everything CP437 can hold -- all of English, the box drawing, the
+accents -- still drawn from the 12x16 face, so a line of English looks identical in
+`2` and `5`. Only the Japanese comes from the Japanese face, at its own 16x16 in
+the 24x16 box a cell pair gives it, centred rather than stretched half a pixel per
+column: fullwidth Japanese is square, and widening it by half would thicken some
+strokes of a kanji and not others. It is emboldened on the way through, because the
+Japanese face strokes at 1px and the 12x16 Latin next to it at 2, and side by side
+the Japanese otherwise reads a shade lighter than the English. Every stroke grows
+one pixel to the right except where another stroke is immediately beyond it -- at
+16px a dense kanji separates its strokes by a single pixel, and a smear that took
+those would turn 電 and 器 into blocks. The cost is a little extra tracking between
+Japanese characters; what it buys is a console that can start printing Japanese
+without changing size.
 
 You do not have to switch fonts by hand to see Japanese. The first time the console
 is asked to print a character none of the CP437 fonts can draw, it switches itself
-to font `3`. Calling `tulip.tfb_font()` yourself turns that off for the rest of the
-session -- a font you chose out loud is never second-guessed.
+to whichever Japanese font has the cell size it is already using: font `5` from
+font `2`, font `3` from anywhere else. Nothing on screen moves when there is a
+match, which matters most in an ssh session -- the far end was told a column count
+at the start, and a console that silently changed its own would lay out every line
+after that wrongly. Calling `tulip.tfb_font()` yourself turns the automatic switch
+off for the rest of the session -- a font you chose out loud is never
+second-guessed.
 
 The TFB is a character plane for fast text drawing. The visible row/column count depends on the selected font size. It supports 256 ANSI 
 colors for foreground and background, and supports formatting. TFB is used by the text 
@@ -1179,14 +1205,17 @@ tulip.term_reply()
 # it. Outside terminal mode the console behaves as it always has.
 
 # Set/get TFB font number
-# 0=8x12, 1=6x8, 2=12x16, 3=Japanese 16 dot, 4=Japanese 16 dot at 2x
-# 3 and 4 raise ValueError on a board built without the Japanese font.
+# 0=8x12, 1=6x8, 2=12x16, 3=Japanese 16 dot, 4=Japanese 16 dot at 2x,
+# 5=Japanese in font 2's 12x16 cells
+# 3, 4 and 5 raise ValueError on a board built without the Japanese font.
 tulip.tfb_font(x)
 font_num = tulip.tfb_font()
 
-# Japanese needs no setup -- printing it switches the console to font 3 on its own.
+# Japanese needs no setup -- printing it switches the console to a font that can
+# draw it, keeping the cell size it already had where there is one that matches.
 print("日本語と English が混在する行。ABCdefg 0123")
 tulip.tfb_font(4)   # same face, twice the size: 80x22 on a Tab5
+tulip.tfb_font(5)   # Japanese at font 2's size: 106x45 on a Tab5
 
 ```
 

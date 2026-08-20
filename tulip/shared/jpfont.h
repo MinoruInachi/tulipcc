@@ -34,7 +34,18 @@ uint8_t jpfont_cell_width(uint16_t cp);
 // One pixel row of cp's cell, MSB leftmost. Rows outside 0..15 read as blank.
 uint16_t jpfont_cell_row(uint16_t cp, uint8_t row);
 
+// The CP437 byte a CP437 face -- font_12x16_r, font_8x12_r -- would draw for cp,
+// or 0 where only the Japanese face can. TFB_FONT_JP12X16 keeps its Latin in the
+// 12x16 face this way, so a console that has just promoted itself to Unicode goes
+// on drawing English exactly as it did.
+uint8_t jpfont_cell_cp437(uint16_t cp);
+
 // Double every bit of a 16px row into a 32px one, for the 2x console font.
 uint32_t jpfont_row_2x(uint16_t row);
+
+// Thicken a pixel row that has already been placed in the 32 bit, MSB leftmost
+// field the TFB row builder draws from. For TFB_FONT_JP12X16, where the face's
+// 1px stroke sits next to font_12x16_r's 2px one.
+uint32_t jpfont_row_embolden(uint32_t row);
 
 #endif

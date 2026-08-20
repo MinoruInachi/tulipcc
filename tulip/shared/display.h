@@ -124,16 +124,26 @@ extern const unsigned char portfolio_glyph_bitmap[1792];
 #define TFB_FONT_8X12 0
 #define TFB_FONT_PORTFOLIO 1
 #define TFB_FONT_12X16 2
-// The two Japanese console fonts, both the efont Biwidth 16 face out of
-// u8fontdata_jp.c. JP16 is the face at its designed size: halfwidth cells 8px
-// wide, a fullwidth glyph spanning two of them, 160x45 on a Tab5. JP32 pixel
-// doubles it to 16px cells and 80x22 -- the same design, twice the size, since a
-// face drawn at 16 and doubled keeps the exact 1:2 half-to-fullwidth ratio that a
-// second face at 32 would not. Unlike the other three these fonts hold Unicode
-// codepoints in the TFB rather than CP437 bytes.
+// The three Japanese console fonts, all drawing their Japanese from the efont
+// Biwidth 16 face out of u8fontdata_jp.c. JP16 is the face at its designed size:
+// halfwidth cells 8px wide, a fullwidth glyph spanning two of them, 160x45 on a
+// Tab5. JP32 pixel doubles it to 16px cells and 80x22 -- the same design, twice
+// the size, since a face drawn at 16 and doubled keeps the exact 1:2
+// half-to-fullwidth ratio that a second face at 32 would not.
+//
+// JP12X16 is the odd one: it is font 2's console -- 12px cells, 106x45 on a Tab5,
+// its Latin still drawn from font_12x16_r -- with Japanese added. It exists so
+// that the console can start drawing Japanese without the geometry moving under
+// whatever is already on screen. A fullwidth glyph is square, so at 12px cells it
+// gets a 24px pair and sits centred in it rather than being stretched by half,
+// and emboldened on the way -- the face strokes at 1px and the Latin beside it at
+// 2. See jpfont_row_embolden().
+//
+// Unlike the CP437 fonts these three hold Unicode codepoints in the TFB.
 #define TFB_FONT_JP16 3
 #define TFB_FONT_JP32 4
-#define TFB_FONT_MAX TFB_FONT_JP32
+#define TFB_FONT_JP12X16 5
+#define TFB_FONT_MAX TFB_FONT_JP12X16
 
 #define MAX_LINE_EMITS 60000
 
