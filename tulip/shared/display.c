@@ -1336,6 +1336,15 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg
             if(!supress_lf) {
                 display_tfb_new_row();
             } else { supress_lf = 0; }
+        } else if(ch == 13) {
+            // Carriage return: back to column 0 on the same row. The REPL never
+            // needed this -- it sends \r\n, and display_tfb_new_row() zeroes the
+            // column anyway -- so a lone \r used to fall into the "ignore other
+            // control characters" branch below and do nothing. A remote shell on
+            // a pty does need it: \r on its own is how a prompt or a progress
+            // line redraws itself over what it already printed.
+            display_tfb_uncursor(tfb_x_col, tfb_y_row);
+            tfb_x_col = 0;
         } else if(ch < 32) {
             // do nothing with other non-printable chars
         } else { // printable chars
