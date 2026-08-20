@@ -262,12 +262,15 @@ You can see running multitasking apps with `tulip.running_apps`, which is a dict
 
 You can summon a touch keyboard with `tulip.keyboard()`. Tapping the keyboard icon dismisses it, or you can use `tulip.keyboard()` again to remove it. 
 
+It types into the LVGL text field that has the keyboard focus, and follows the focus as you tap from field to field, so a form on a touch screen can be filled in with no keyboard attached. With no field focused it types into the console instead, as it always has -- that is the REPL. Pass a field to type into it from the start: a button that opens the keyboard has taken the focus itself by the time it is pressed, so an app with a keyboard button of its own should say which field it means.
+
 We boot a launcher for common operations. It's available via the small grey icon on the bottom right.
 
 For LVGL fonts, you can use default [LVGL `montserrat` fonts](https://docs.lvgl.io/master/details/main-modules/font.html), e.g. `font=lv.font_montserrat_12`, or the built in Tulip BG fonts, e.g. `font=lv.tulip_font_13`. 
 
 ```python
 tulip.keyboard() # open or close the soft keyboard
+tulip.keyboard(field) # open it typing into an LVGL text area
 tulip.launcher() # open or close our launcher
 
 # You're free to use any direct LVGL calls. It's a powerful library with a lot of functionality and customization, all accessible through Python.
@@ -613,6 +616,11 @@ over to the session. It is a normal switchable app: the task bar keeps working
 while you are connected, so you can switch to another app and come back to the
 session still running, and quitting from the task bar hangs up. Typing `~.` at
 the start of a line hangs up too, the way OpenSSH's escape does.
+
+The form has a keyboard button, for a Tab5 with nothing plugged into it: the
+on-screen keyboard types into the field you last tapped, and the form is laid
+out in two columns so that the keyboard, which takes the bottom half of the
+screen, does not cover the fields or the Connect button.
 
 ## Async
 

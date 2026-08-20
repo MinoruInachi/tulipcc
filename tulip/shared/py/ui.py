@@ -13,6 +13,10 @@ LV_SIZE_CONTENT = getattr(lv, "SIZE_CONTENT", (1 << 30) - 1)
 LV_ANIM_OFF = lv.ANIM.OFF if hasattr(lv, 'ANIM') else False
 
 lv_soft_kb = None
+# The group the on-screen keyboard is watching for focus changes, so it can be
+# let go of again when the keyboard closes -- by then the screen it belongs to
+# may not be the one in front any more.
+lv_soft_kb_group = None
 lv_launcher = None
 
 # The Tab5 has no mouse -- everything on it is hit with a fingertip. At 12pt the
@@ -507,14 +511,22 @@ def lv_soft_kb_cb(e):
     text = kb.get_button_text(button)
     code = text[0]
 
+    if(code==lv.SYMBOL.KEYBOARD):
+        _close_keyboard()
+        return
+
+    # A text field has the focus, so LVGL's own keyboard handler has already put
+    # the character in it -- see keyboard() below. Sending it to the console as
+    # well would type everything twice.
+    if(kb.get_textarea() is not None):
+        lv_last_mode = kb.get_mode()
+        return
+
     if(code==lv.SYMBOL.NEW_LINE): 
         tulip.key_send(13)
     elif(code==lv.SYMBOL.BACKSPACE): 
         if(lv_last_mode == kb.get_mode()): # there's a bug where the mode swticher sends BS
             tulip.key_send(8)
-    elif(code==lv.SYMBOL.KEYBOARD):
-        _close_keyboard()
-        return
     elif(ord(code)==49): # special -- sends a "1" char even if just hit the mode switcher '1#'
         if(kb.get_mode() == lv_last_mode):  # only update after switching modes
             tulip.key_send(49)
@@ -523,18 +535,62 @@ def lv_soft_kb_cb(e):
 
     lv_last_mode = kb.get_mode()
 
-# Starts or stops the soft keyboard
-def keyboard():
-    global lv_soft_kb, lv_last_mode
+# The object with the keyboard focus, if it is a text field on show --
+# lv_group_get_focused hands back a plain lv.obj whatever it really is, so it has
+# to be asked. Visible matters as much as being a text field: an app that hides
+# its form and goes on running -- ssh does, for the length of a session -- leaves
+# its fields in the group with the focus still on one, and typing into a field
+# nobody can see is worse than not typing at all. is_visible() takes the parents
+# and the screen into account, so a backgrounded app's fields do not count either.
+def _focused_textarea(group):
+    try:
+        obj = group.get_focused()
+        if obj is None or not obj.check_type(lv.textarea_class):
+            return None
+        return obj if obj.is_visible() else None
+    except Exception:
+        return None
+
+
+# Follow the focus while the on-screen keyboard is up. An app's form is a handful
+# of fields and the user moves between them by tapping, so which one a key belongs
+# to is only known at the moment it is pressed -- and by then it is too late to ask,
+# because LVGL's own keyboard handler runs before ours. So the answer is kept up to
+# date here instead, on the group that owns the focus.
+def _kb_follow_focus(group):
+    if(lv_soft_kb is None):
+        return
+    lv_soft_kb.set_textarea(_focused_textarea(group))
+
+# Starts or stops the soft keyboard.
+# With a text field in front of it -- either the one passed in or whatever has the
+# focus -- the keyboard types into that field, which is what LVGL keyboards do and
+# what a form on a touch screen needs. With no field it types into the console, as
+# it always has: that is the REPL case, where there is nothing else to type into.
+def keyboard(textarea=None):
+    global lv_soft_kb, lv_soft_kb_group, lv_last_mode
     if(lv_soft_kb is not None):
         _close_keyboard()
         return
     lv_soft_kb = lv.keyboard(current_lv_group())
     lv_soft_kb.add_event_cb(lv_soft_kb_cb, lv.EVENT.VALUE_CHANGED, None)
     lv_last_mode = lv_soft_kb.get_mode()
+    try:
+        lv_soft_kb_group = current_uiscreen().kb_group
+        lv_soft_kb.set_textarea(textarea if textarea is not None
+                                else _focused_textarea(lv_soft_kb_group))
+        lv_soft_kb_group.set_focus_cb(_kb_follow_focus)
+    except Exception:
+        lv_soft_kb_group = None
 
 def _close_keyboard():
-    global lv_soft_kb
+    global lv_soft_kb, lv_soft_kb_group
+    if(lv_soft_kb_group is not None):
+        try:
+            lv_soft_kb_group.set_focus_cb(None)
+        except Exception:
+            pass
+        lv_soft_kb_group = None
     lv_soft_kb.delete()
     lv_soft_kb = None
     _repaint_repl_background()

@@ -35,6 +35,7 @@ class SSHTerm:
         self.form = None
         self.status = None
         self.connect_button = None
+        self.last_field = None
         # Session state
         self.keys = []
         self.tail = b''
@@ -53,8 +54,13 @@ class SSHTerm:
                        lv.font_montserrat_12)
         row_h = 56 if big else 40
         label_w = 150 if big else 110
-        entry_w = 460 if big else 340
+        entry_w = 380 if big else 300
         pad = 20
+        # Two columns, because the on-screen keyboard takes the bottom half of the
+        # screen. Down one column the fifth field and the Connect button end up
+        # underneath it, and a form you have to put the keyboard away to submit is
+        # a form that does not work on a tablet.
+        col_w = label_w + entry_w + (40 if big else 30)
 
         width, height = tulip.screen_size()
         self.form = lv.obj(self.screen.group)
@@ -70,39 +76,44 @@ class SSHTerm:
         title.set_style_text_color(pal_to_lv(_LABEL_COLOR), 0)
         title.set_pos(0, 0)
 
-        rows = (('host', 'Host', ''), ('user', 'User', ''),
-                ('password', 'Password', ''), ('key', 'Key file', ''),
-                ('port', 'Port', '22'))
-        y = row_h
-        for name, text, default in rows:
+        rows = (('host', 'Host', '', 0, 1), ('user', 'User', '', 0, 2),
+                ('password', 'Password', '', 0, 3), ('key', 'Key file', '', 1, 1),
+                ('port', 'Port', '22', 1, 2))
+        for name, text, default, col, row in rows:
+            x = col * col_w
+            y = row * row_h
             label = lv.label(self.form)
             label.set_text(text)
             label.set_style_text_color(pal_to_lv(_LABEL_COLOR), 0)
-            label.set_pos(0, y + 10)
+            label.set_pos(x, y + 10)
             entry = lv.textarea(self.form)
             entry.set_one_line(True)
             entry.set_size(entry_w if name != 'port' else 120, row_h - 8)
-            entry.set_pos(label_w, y)
+            entry.set_pos(x + label_w, y)
             entry.set_text(default)
             if name == 'password':
                 entry.set_password_mode(True)
+            # Which field the on-screen keyboard types into is whichever one was
+            # last tapped -- and by the time the keyboard button is pressed the
+            # focus has moved to that button, so remember it as it happens.
+            entry.add_event_cb(self.field_focus_cb, lv.EVENT.FOCUSED, None)
             self.fields[name] = entry
-            y += row_h
 
+        y = 3 * row_h
         self.connect_button = lv.button(self.form)
-        self.connect_button.set_pos(label_w, y + 10)
+        self.connect_button.set_pos(col_w + label_w, y + 10)
         connect_label = lv.label(self.connect_button)
         connect_label.set_text('Connect')
         self.connect_button.add_event_cb(self.connect_cb, lv.EVENT.CLICKED, None)
 
         kb_button = lv.button(self.form)
-        kb_button.set_pos(label_w + 160, y + 10)
+        kb_button.set_pos(col_w + label_w + 160, y + 10)
         kb_label = lv.label(kb_button)
         kb_label.set_text(lv.SYMBOL.KEYBOARD)
         kb_button.add_event_cb(self.keyboard_cb, lv.EVENT.CLICKED, None)
 
         self.status = lv.label(self.form)
-        self.status.set_pos(0, y + 80)
+        self.status.set_pos(0, y + row_h + 10)
         self.status.set_width(self.form.get_width() - 20)
         self.status.set_long_mode(0)   # LV_LABEL_LONG_WRAP
         self.set_status('A password or a key file. In a session, ~. hangs up and the task bar quits.')
@@ -110,12 +121,10 @@ class SSHTerm:
         self.load_config()
         # LVGL adds each widget to the default group as it is created, which
         # UIScreen has already pointed at this screen. Start on the first empty
-        # field so a keyboard user can just type.
+        # field so a keyboard user can just type, and so the on-screen keyboard
+        # has somewhere to type before anything has been tapped.
         try:
-            for name in ('host', 'user', 'password'):
-                if not self.value(name):
-                    self.screen.kb_group.focus_obj(self.fields[name])
-                    break
+            lv.group_focus_obj(self.first_empty())
         except Exception:
             pass
 
@@ -127,9 +136,22 @@ class SSHTerm:
     def value(self, name):
         return self.fields[name].get_text().strip()
 
+    def first_empty(self):
+        """The field to start in: the first one there is nothing in yet."""
+        for name in ('host', 'user', 'password', 'key'):
+            if not self.value(name):
+                return self.fields[name]
+        return self.fields['host']
+
+    def field_focus_cb(self, e):
+        self.last_field = e.get_target_obj()
+
     def keyboard_cb(self, e):
         import ui
-        ui.keyboard()
+        # Pressing this button moved the focus onto the button, so the field to
+        # type into is the one that had it before -- or, nothing having been
+        # tapped yet, the one build() started on.
+        ui.keyboard(self.last_field if self.last_field is not None else self.first_empty())
 
     # A config file so a tablet user types the host once. The password is
     # deliberately not in it -- a plain text file on a shared filesystem is no
