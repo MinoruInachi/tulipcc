@@ -99,6 +99,11 @@ class SSHTerm:
             # last tapped -- and by the time the keyboard button is pressed the
             # focus has moved to that button, so remember it as it happens.
             entry.add_event_cb(self.field_focus_cb, lv.EVENT.FOCUSED, None)
+            # Enter submits, the way it does in every other login form. A
+            # one-line text area sends READY when it takes a return, from the
+            # hardware keyboard and from the on-screen keyboard's return key
+            # alike, so hooking it here covers both.
+            entry.add_event_cb(self.connect_cb, lv.EVENT.READY, None)
             self.fields[name] = entry
 
         y = 3 * row_h

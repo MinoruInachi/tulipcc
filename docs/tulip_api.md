@@ -625,7 +625,9 @@ the start of a line hangs up too, the way OpenSSH's escape does.
 The form has a keyboard button, for a Tab5 with nothing plugged into it: the
 on-screen keyboard types into the field you last tapped, and the form is laid
 out in two columns so that the keyboard, which takes the bottom half of the
-screen, does not cover the fields or the Connect button.
+screen, does not cover the fields or the Connect button. Enter in any field
+connects, as well as the Connect button -- the on-screen keyboard's return key
+included, so you never have to reach past it to submit.
 
 ## Async
 
