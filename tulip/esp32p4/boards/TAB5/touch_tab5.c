@@ -51,6 +51,14 @@ static const char *TAG = "TAB5-TOUCH";
  * esp_lcd_touch_read_data() fetches the whole report either way. */
 #define TAB5_TOUCH_POINTS 3
 
+/* This used to be a single attempt, and a controller that was not ready yet
+ * cost the board its touch for the whole session -- a working screen with a
+ * dead digitiser and nothing in tulip.touch() to say why. The revision probe
+ * now waits for the controller before this runs, so the retries below should
+ * never be needed; they are here because the failure they cover is silent. */
+#define TAB5_TOUCH_INIT_ATTEMPTS 5
+#define TAB5_TOUCH_INIT_RETRY_MS 100
+
 extern void send_touch_to_micropython(int16_t touch_x, int16_t touch_y, uint8_t up);
 extern int16_t last_touch_x[3];
 extern int16_t last_touch_y[3];
@@ -65,6 +73,8 @@ static volatile uint32_t s_touch_task_entries = 0;
 static volatile uint32_t s_touch_polls = 0;
 static volatile uint32_t s_touch_downs = 0;
 static volatile uint32_t s_touch_read_errors = 0;
+static esp_err_t s_touch_init_err = ESP_ERR_INVALID_STATE;
+static uint32_t s_touch_init_attempts = 0;
 
 int16_t touch_x_delta = 0;
 int16_t touch_y_delta = 0;
@@ -172,8 +182,6 @@ esp_err_t tab5_touch_init(void)
         .interrupt_callback = tab5_touch_isr,
     };
 
-    esp_lcd_panel_io_handle_t tp_io = NULL;
-
     if (rev == TAB5_REV_V1_GT911) {
         /* v1 wires TP_INT through a pull-up to 3V3 that stops the GT911 from
          * responding, so the pin has to be held low as an output. That costs us
@@ -190,30 +198,54 @@ esp_err_t tab5_touch_init(void)
 
         tp_cfg.int_gpio_num = GPIO_NUM_NC;
         tp_cfg.interrupt_callback = NULL;
+    }
+    s_touch_int_driven = (rev != TAB5_REV_V1_GT911);
 
-        esp_lcd_panel_io_i2c_config_t io_cfg = ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG();
-        io_cfg.dev_addr = ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS_BACKUP;
-        io_cfg.scl_speed_hz = TAB5_TOUCH_I2C_HZ;
-        err = esp_lcd_new_panel_io_i2c(bsp_i2c_get_handle(), &io_cfg, &tp_io);
-        if (err == ESP_OK) {
-            err = esp_lcd_touch_new_i2c_gt911(tp_io, &tp_cfg, &s_touch);
+    for (int attempt = 1; attempt <= TAB5_TOUCH_INIT_ATTEMPTS; attempt++) {
+        esp_lcd_panel_io_handle_t tp_io = NULL;
+        s_touch_init_attempts = (uint32_t)attempt;
+
+        if (rev == TAB5_REV_V1_GT911) {
+            esp_lcd_panel_io_i2c_config_t io_cfg = ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG();
+            io_cfg.dev_addr = ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS_BACKUP;
+            io_cfg.scl_speed_hz = TAB5_TOUCH_I2C_HZ;
+            err = esp_lcd_new_panel_io_i2c(bsp_i2c_get_handle(), &io_cfg, &tp_io);
+            if (err == ESP_OK) {
+                err = esp_lcd_touch_new_i2c_gt911(tp_io, &tp_cfg, &s_touch);
+            }
+        } else {
+            esp_lcd_panel_io_i2c_config_t io_cfg = ESP_LCD_TOUCH_IO_I2C_ST7123_CONFIG();
+            io_cfg.scl_speed_hz = TAB5_TOUCH_I2C_HZ;
+            err = esp_lcd_new_panel_io_i2c(bsp_i2c_get_handle(), &io_cfg, &tp_io);
+            if (err == ESP_OK) {
+                err = esp_lcd_touch_new_i2c_st7123(tp_io, &tp_cfg, &s_touch);
+            }
         }
-        s_touch_int_driven = false;
-    } else {
-        esp_lcd_panel_io_i2c_config_t io_cfg = ESP_LCD_TOUCH_IO_I2C_ST7123_CONFIG();
-        io_cfg.scl_speed_hz = TAB5_TOUCH_I2C_HZ;
-        err = esp_lcd_new_panel_io_i2c(bsp_i2c_get_handle(), &io_cfg, &tp_io);
-        if (err == ESP_OK) {
-            err = esp_lcd_touch_new_i2c_st7123(tp_io, &tp_cfg, &s_touch);
+
+        if (err == ESP_OK && s_touch != NULL) {
+            break;
         }
-        s_touch_int_driven = true;
+
+        /* The driver frees its own handle on a failed create but not the panel
+         * io it was handed, and the next attempt makes a fresh one. */
+        s_touch = NULL;
+        if (tp_io != NULL) {
+            esp_lcd_panel_io_del(tp_io);
+        }
+        ESP_LOGW(TAG, "Touch init attempt %d/%d failed: %s",
+                 attempt, TAB5_TOUCH_INIT_ATTEMPTS, esp_err_to_name(err));
+        if (attempt < TAB5_TOUCH_INIT_ATTEMPTS) {
+            vTaskDelay(pdMS_TO_TICKS(TAB5_TOUCH_INIT_RETRY_MS));
+        }
     }
 
     if (err != ESP_OK || s_touch == NULL) {
-        ESP_LOGE(TAG, "Touch controller init failed: %s", esp_err_to_name(err));
+        s_touch_init_err = (err == ESP_OK) ? ESP_FAIL : err;
+        ESP_LOGE(TAG, "Touch controller init failed: %s", esp_err_to_name(s_touch_init_err));
         s_touch = NULL;
-        return (err == ESP_OK) ? ESP_FAIL : err;
+        return s_touch_init_err;
     }
+    s_touch_init_err = ESP_OK;
 
     ESP_LOGI(TAG, "Tab5 touch ready (%s, I2C %d kHz)",
              s_touch_int_driven ? "interrupt driven" : "polled",
@@ -311,4 +343,14 @@ uint32_t tab5_touch_down_count(void)
 uint32_t tab5_touch_read_errors(void)
 {
     return s_touch_read_errors;
+}
+
+int tab5_touch_init_error(void)
+{
+    return (int)s_touch_init_err;
+}
+
+uint32_t tab5_touch_init_attempts(void)
+{
+    return s_touch_init_attempts;
 }

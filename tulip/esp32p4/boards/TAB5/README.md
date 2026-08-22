@@ -55,12 +55,56 @@ This is documentation for the first scaffolded Tab5 port. The display helper now
 
 ## Touch and revision policy (current)
 
-- `touch_tab5.c` now owns a real polling loop through `bsp_touch_new()` and `esp_lcd_touch_get_coordinates()`.
-- The board layer probes touch controller address at boot and caches the result:
-	- `0x14` (GT911) -> Tab5 revision v1 path
-	- `0x55` (ST7123) -> Tab5 revision v2 path
+- `touch_tab5.c` owns a real polling loop through `esp_lcd_touch_get_coordinates()`.
+- `tab5_board_startup()` settles the board revision once, before the display and
+  touch tasks exist, and both then read the cached answer. Doing it there keeps
+  the wait out of the three seconds `_boot.py` gives the display to come up.
+- The probe reads the touch controller's firmware version register rather than
+  probing its address: a cold ST712x never acks the zero-length write
+  `i2c_master_probe()` sends, and treating that as "nothing there" is what left
+  a v2 board on the wrong panel.
+- It also releases **both** IO-expander reset lines first (P4 `LCD_RST` and P5
+  `TP_RST`, which the BSP names `BSP_LCD_EN` / `BSP_TOUCH_EN`). On an ST712x
+  those land on one die -- touch and display are the same chip -- so releasing
+  only the touch half leaves the controller in reset and silent. This is only
+  visible from a cold start: the expander keeps its outputs across a chip reset,
+  so a warm reboot finds the line already released.
+- Three revisions, all decided by what answers on I2C:
+	- `0x14` (GT911) -> v1: ILI9881C display, GT911 touch, BSP display path
+	- `0x55` + touch firmware version 3 -> v2 ST7123: BSP display path
+	- `0x55` + touch firmware version 1 -> v2 ST7121: local display path
+- The ST7121 arrived in Tab5 units built from 2026-04-28 and the BSP has no path
+  for it (1.2.0~1 knows only the ST7123 it replaced), so `display_tab5.c` brings
+  that panel up itself through `espressif/esp_lcd_st7121`: 965Mbps lanes rather
+  than the ST7123's, and its own vertical blanking. The failure it fixes is
+  silent -- an ST7123 unlock command carries that part number, an ST7121 ignores
+  it, and the panel ends up lit and blank with the DSI refreshing happily.
+- Touch is the same driver for both ST712x panels.
+- The ST7123 path still goes through the BSP, with two corrections taken from
+  M5's own firmware and **not yet tried on hardware** (no ST7123 unit here):
+  965Mbps lanes rather than the BSP's 1000, and a 120ms settle after SLPOUT
+  before the display is turned on -- the BSP's table asks for none where M5's
+  copy of the same table waits 100ms.
 - Touch events are always routed through `send_touch_to_micropython(...)`.
 - On esp32p4 today, a board-local weak fallback bridge logs dropped events until the shared Tulip UI bridge is linked.
+
+## Reading the board from the REPL
+
+Log output from the display and touch tasks does not reliably survive the
+USB-Serial-JTAG console once MicroPython owns it, so the state that matters is
+readable instead:
+
+- `tulip.tab5_diag()` -> display task entries, bridge frames, touch task
+  entries, touch polls, touch downs, touch read errors, frame callbacks, LVGL
+  handlers, touch init error, touch init attempts, revision probe ms, vsync
+  count. A touch controller that never initialized reads exactly like a screen
+  nobody touched without those last four.
+- `tulip.tab5_render_stats()` -> per-frame render phase timings.
+- `tulip.tab5_lcd_errors()` -> what display start-up returned.
+- `tulip.tab5_lcd_cmd(cmd, data)` / `tulip.tab5_lcd_read(cmd, len)` -> raw DCS
+  to the panel. **These disturb the running video stream**: a read is enough to
+  blank a working screen until the next reboot. They are for a panel that is
+  already misbehaving, not for a healthy one.
 
 ## Display provider policy (current)
 

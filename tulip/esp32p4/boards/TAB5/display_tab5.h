@@ -33,6 +33,13 @@ void run_tab5_display(void *arg);
 void tab5_display_start(void);
 void tab5_display_stop(void);
 void tab5_display_brightness(unsigned char amount);
+
+/* Raw DCS access to the panel and the return codes from display start-up,
+ * both reachable from the REPL through tulip.tab5_lcd_*(). */
+int tab5_display_panel_cmd(int cmd, const unsigned char *data, unsigned int len);
+int tab5_display_panel_read(int cmd, unsigned char *out, unsigned int len);
+void tab5_display_init_errors(int *new_err, int *on_err);
+uint32_t tab5_display_vsync_count(void);
 bool tab5_repl_menu_icon_touch_event(int16_t shared_x, int16_t shared_y, bool up);
 uint32_t tab5_display_task_entries(void);
 uint32_t tab5_display_bridge_frames(void);

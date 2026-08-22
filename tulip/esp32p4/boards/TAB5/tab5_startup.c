@@ -9,6 +9,7 @@
 #include "power_tab5.h"
 #include "storage_tab5.h"
 #include "touch_tab5.h"
+#include "tab5_revision.h"
 #include "keyboard_tab5.h"
 #include "usb_host_tab5.h"
 #include "tab5_startup.h"
@@ -48,6 +49,13 @@ void tab5_board_startup(void)
     // After tab5_audio_init(): a USB MIDI device can start sending as soon as
     // the connector is powered, and those bytes go straight into AMY.
     tab5_usb_host_start();
+
+    /* Settle which board this is before either task wants the answer, so the
+     * two of them cannot race to it and whatever the probe costs is spent here
+     * rather than out of the three seconds _boot.py gives the display to come
+     * up. Both tasks then read the cached result. */
+    const tab5_board_revision_t rev = tab5_detect_board_revision();
+    ESP_LOGI(TAG, "Board is %s", tab5_board_revision_name(rev));
 
     BaseType_t display_task_ok = xTaskCreatePinnedToCore(run_tab5_display,
                                                           TAB5_DISPLAY_TASK_NAME,

@@ -12,6 +12,9 @@
 
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_mipi_dsi.h"
+#include "esp_lcd_st7121.h"
+#include "esp_ldo_regulator.h"
+#include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "driver/ppa.h"
 #include "bsp/esp-bsp.h"
@@ -356,6 +359,19 @@ static void tab5_render_bridge_buffers_deinit(void)
 }
 
 static bool tab5_display_started = false;
+/* Kept because the board tasks' log output does not reliably survive the
+ * USB-Serial-JTAG console once MicroPython owns it -- a black screen with a
+ * happily refreshing DSI is otherwise mute about which step failed. */
+static esp_err_t s_display_new_err = ESP_ERR_INVALID_STATE;
+static esp_err_t s_disp_on_err = ESP_ERR_INVALID_STATE;
+/* Panel refreshes, counted so the live refresh rate can be measured from the
+ * REPL -- which is the only way from here to tell which DPI timing the BSP
+ * actually installed (the two board revisions differ by about 10Hz). */
+static volatile uint32_t s_vsync_count = 0;
+/* Set when the ST7121 panel was brought up here rather than by the BSP, so
+ * the teardown path knows whose handles these are. */
+static bool s_display_owned_locally = false;
+static esp_ldo_channel_handle_t s_dsi_phy_pwr_chan = NULL;
 static bsp_lcd_handles_t tab5_lcd_handles;
 
 /* Convert one compositor row (rgb332) into the staging image (rgb565).
@@ -602,9 +618,104 @@ static bool tab5_on_refresh_done(esp_lcd_panel_handle_t panel,
     (void)panel;
     (void)edata;
     (void)user_ctx;
+    s_vsync_count++;
     BaseType_t higher_priority_woken = pdFALSE;
     xSemaphoreGiveFromISR(s_vsync_sem, &higher_priority_woken);
     return higher_priority_woken == pdTRUE;
+}
+
+/* The BSP knows the ILI9881C and the ST7123, but Tab5 units built from
+ * 2026-04-28 carry an ST7121 that it has no path for -- and the ST7123 path
+ * leaves that panel lit and blank, because its unlock command carries the
+ * controller's own part number and an ST7121 quietly ignores an ST7123's. So
+ * this panel gets brought up here, with the numbers M5's own BSP uses for it:
+ * a slower DSI lane rate than the ST7123 wants and a different vertical
+ * blanking. Everything either panel needs afterwards is identical, so only the
+ * creation differs. */
+/* M5's own firmware runs both ST712x panels at this rate; the BSP's 1000 is
+ * the number for the v1 panel it was written against. */
+#define TAB5_ST712X_LANE_BITRATE_MBPS 965
+#define TAB5_ST7121_DPI_CLOCK_MHZ 70
+/* DCS sleep-out, and the settle the datasheet asks for after it. */
+#define TAB5_LCD_CMD_SLPOUT 0x11
+#define TAB5_SLPOUT_SETTLE_MS 120
+
+static esp_err_t tab5_display_new_st7121(bsp_lcd_handles_t *out)
+{
+    ESP_RETURN_ON_ERROR(bsp_feature_enable(BSP_FEATURE_LCD, true), TAG, "LCD power failed");
+    ESP_RETURN_ON_ERROR(bsp_display_brightness_init(), TAG, "Brightness init failed");
+
+    if (s_dsi_phy_pwr_chan == NULL) {
+        const esp_ldo_channel_config_t ldo_cfg = {
+            .chan_id = BSP_MIPI_DSI_PHY_PWR_LDO_CHAN,
+            .voltage_mv = BSP_MIPI_DSI_PHY_PWR_LDO_VOLTAGE_MV,
+        };
+        ESP_RETURN_ON_ERROR(esp_ldo_acquire_channel(&ldo_cfg, &s_dsi_phy_pwr_chan), TAG,
+                            "DSI PHY power failed");
+    }
+
+    const esp_lcd_dsi_bus_config_t bus_config = {
+        .bus_id = 0,
+        .num_data_lanes = BSP_LCD_MIPI_DSI_LANE_NUM,
+        .phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT,
+        .lane_bit_rate_mbps = TAB5_ST712X_LANE_BITRATE_MBPS,
+    };
+    ESP_RETURN_ON_ERROR(esp_lcd_new_dsi_bus(&bus_config, &out->mipi_dsi_bus), TAG,
+                        "New DSI bus failed");
+
+    const esp_lcd_dbi_io_config_t dbi_config = {
+        .virtual_channel = 0,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+    };
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_dbi(out->mipi_dsi_bus, &dbi_config, &out->io), TAG,
+                        "New panel IO failed");
+
+    const esp_lcd_dpi_panel_config_t dpi_config = {
+        .virtual_channel = 0,
+        .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
+        .dpi_clock_freq_mhz = TAB5_ST7121_DPI_CLOCK_MHZ,
+        .in_color_format = LCD_COLOR_FMT_RGB565,
+        .num_fbs = CONFIG_BSP_LCD_DPI_BUFFER_NUMS,
+        .video_timing = {
+            .h_size = BSP_LCD_H_RES,
+            .v_size = BSP_LCD_V_RES,
+            .hsync_pulse_width = 2,
+            .hsync_back_porch = 40,
+            .hsync_front_porch = 40,
+            .vsync_pulse_width = 20,
+            .vsync_back_porch = 24,
+            .vsync_front_porch = 200,
+        },
+#if CONFIG_BSP_LCD_USE_DMA2D && (ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(6, 0, 0))
+        .flags.use_dma2d = true,
+#endif
+    };
+
+    /* NULL init_cmds means the driver's own sequence, which is the one written
+     * for this panel. */
+    const st7121_vendor_config_t vendor_config = {
+        .init_cmds = NULL,
+        .init_cmds_size = 0,
+        .mipi_config = {
+            .dsi_bus = out->mipi_dsi_bus,
+            .dpi_config = &dpi_config,
+        },
+    };
+    const esp_lcd_panel_dev_config_t panel_config = {
+        .reset_gpio_num = BSP_LCD_RST,   /* not wired: the driver software-resets */
+        .rgb_ele_order = BSP_LCD_COLOR_SPACE,
+        .bits_per_pixel = BSP_LCD_BITS_PER_PIXEL,
+        .vendor_config = (void *)&vendor_config,
+    };
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_st7121(out->io, &panel_config, &out->panel), TAG,
+                        "New ST7121 panel failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(out->panel), TAG, "Panel reset failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_init(out->panel), TAG, "Panel init failed");
+
+    ESP_LOGI(TAG, "ST7121 display initialized with resolution %dx%d",
+             BSP_LCD_H_RES, BSP_LCD_V_RES);
+    return ESP_OK;
 }
 
 void tab5_display_start(void)
@@ -613,20 +724,41 @@ void tab5_display_start(void)
         return;
     }
 
+    const tab5_board_revision_t rev = tab5_detect_board_revision();
     const bsp_display_config_t cfg = {
         .dsi_bus = {
             .phy_clk_src = 0,
-            .lane_bit_rate_mbps = BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS,
+            .lane_bit_rate_mbps = (rev == TAB5_REV_V2_ST7123)
+                                      ? TAB5_ST712X_LANE_BITRATE_MBPS
+                                      : BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS,
         }
     };
 
     memset(&tab5_lcd_handles, 0, sizeof(tab5_lcd_handles));
-    if (bsp_display_new_with_handles(&cfg, &tab5_lcd_handles) != ESP_OK) {
-        ESP_LOGE(TAG, "Tab5 display start failed");
+    s_display_owned_locally = (rev == TAB5_REV_V2_ST7121);
+    s_display_new_err = s_display_owned_locally
+                            ? tab5_display_new_st7121(&tab5_lcd_handles)
+                            : bsp_display_new_with_handles(&cfg, &tab5_lcd_handles);
+    if (s_display_new_err != ESP_OK) {
+        ESP_LOGE(TAG, "Tab5 display start failed: %s", esp_err_to_name(s_display_new_err));
         return;
     }
 
-    esp_lcd_panel_disp_on_off(tab5_lcd_handles.panel, true);
+    if (rev == TAB5_REV_V2_ST7123 && tab5_lcd_handles.io != NULL) {
+        /* The BSP's ST7123 table sends SLPOUT with no settle time and DISPON
+         * straight after it, where M5's copy of the same table waits 100ms and
+         * the panel driver's own default waits 120. A panel told to turn its
+         * display on while it is still waking is exactly the failure this port
+         * spent a day on, so give it that time. SLPOUT on an already-awake
+         * panel is a no-op, and the cost is 120ms of boot on a v2 board.
+         *
+         * Untested: there is no ST7123 unit here, only the ST7121 that
+         * replaced it in Tab5 units built from 2026-04-28. */
+        esp_lcd_panel_io_tx_param(tab5_lcd_handles.io, TAB5_LCD_CMD_SLPOUT, NULL, 0);
+        vTaskDelay(pdMS_TO_TICKS(TAB5_SLPOUT_SETTLE_MS));
+    }
+
+    s_disp_on_err = esp_lcd_panel_disp_on_off(tab5_lcd_handles.panel, true);
 
     if (s_vsync_sem == NULL) {
         s_vsync_sem = xSemaphoreCreateBinary();
@@ -686,7 +818,20 @@ void tab5_display_stop(void)
         ppa_unregister_client(s_ppa_srm);
         s_ppa_srm = NULL;
     }
-    bsp_display_delete();
+    if (s_display_owned_locally) {
+        if (tab5_lcd_handles.panel != NULL) {
+            esp_lcd_panel_del(tab5_lcd_handles.panel);
+        }
+        if (tab5_lcd_handles.io != NULL) {
+            esp_lcd_panel_io_del(tab5_lcd_handles.io);
+        }
+        if (tab5_lcd_handles.mipi_dsi_bus != NULL) {
+            esp_lcd_del_dsi_bus(tab5_lcd_handles.mipi_dsi_bus);
+        }
+        s_display_owned_locally = false;
+    } else {
+        bsp_display_delete();
+    }
     tab5_render_bridge_buffers_deinit();
     s_dsi_fb[0] = NULL;
     s_dsi_fb[1] = NULL;
@@ -694,6 +839,41 @@ void tab5_display_stop(void)
     s_dsi_fb_next = 0;
     memset(&tab5_lcd_handles, 0, sizeof(tab5_lcd_handles));
     tab5_display_started = false;
+}
+
+/* Raw DCS access to the panel, for working out on a live board what a panel
+ * that refuses to light is actually doing -- 0x0A (RDDPM) says whether it is
+ * awake and whether its display is on, which no counter here can. */
+int tab5_display_panel_cmd(int cmd, const unsigned char *data, unsigned int len)
+{
+    if (tab5_lcd_handles.io == NULL) {
+        return (int)ESP_ERR_INVALID_STATE;
+    }
+    return (int)esp_lcd_panel_io_tx_param(tab5_lcd_handles.io, cmd,
+                                          (len > 0) ? data : NULL, len);
+}
+
+int tab5_display_panel_read(int cmd, unsigned char *out, unsigned int len)
+{
+    if (tab5_lcd_handles.io == NULL) {
+        return (int)ESP_ERR_INVALID_STATE;
+    }
+    return (int)esp_lcd_panel_io_rx_param(tab5_lcd_handles.io, cmd, out, len);
+}
+
+uint32_t tab5_display_vsync_count(void)
+{
+    return s_vsync_count;
+}
+
+void tab5_display_init_errors(int *new_err, int *on_err)
+{
+    if (new_err != NULL) {
+        *new_err = (int)s_display_new_err;
+    }
+    if (on_err != NULL) {
+        *on_err = (int)s_disp_on_err;
+    }
 }
 
 void tab5_display_brightness(unsigned char amount)

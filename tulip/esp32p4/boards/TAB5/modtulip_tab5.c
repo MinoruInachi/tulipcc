@@ -24,6 +24,7 @@
 
 #include "keyboard_tab5.h"
 #include "touch_tab5.h"
+#include "tab5_revision.h"
 #include "modtulip_tab5.h"
 #include "tsequencer_tab5.h"
 #include "power_tab5.h"
@@ -1178,10 +1179,61 @@ static mp_obj_t tulip_tab5_diag(void) {
         mp_obj_new_int_from_uint(tab5_touch_read_errors()),
         mp_obj_new_int_from_uint(s_tab5_frame_callbacks),
         mp_obj_new_int_from_uint(s_tab5_lvgl_handlers),
+        // Why the touch counters are what they are: a controller that never
+        // came up reads the same as a screen nobody touched.
+        mp_obj_new_int(tab5_touch_init_error()),
+        mp_obj_new_int_from_uint(tab5_touch_init_attempts()),
+        mp_obj_new_int_from_uint(tab5_board_revision_probe_ms()),
+        mp_obj_new_int_from_uint(tab5_display_vsync_count()),
     };
     return mp_obj_new_tuple(MP_ARRAY_SIZE(values), values);
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(tulip_tab5_diag_obj, tulip_tab5_diag);
+
+// Panel-level instruments, same spirit as tab5_diag: a screen that stays dark
+// while the DSI refreshes happily needs the panel asked directly -- reading
+// RDDPM is what established that an ST7121 was awake and displaying, and that
+// the problem was upstream of it. They are not free: a DCS transfer interrupts
+// the video stream, and one read is enough to blank a working panel until the
+// next reboot. Reach for them on a screen that is already wrong.
+static mp_obj_t tulip_tab5_lcd_cmd(size_t n_args, const mp_obj_t *args) {
+    const int cmd = mp_obj_get_int(args[0]);
+    mp_buffer_info_t buf = {0};
+    if (n_args > 1 && args[1] != mp_const_none) {
+        mp_get_buffer_raise(args[1], &buf, MP_BUFFER_READ);
+    }
+    return mp_obj_new_int(tab5_display_panel_cmd(cmd, (const unsigned char *)buf.buf,
+                                                 (unsigned int)buf.len));
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_tab5_lcd_cmd_obj, 1, 2, tulip_tab5_lcd_cmd);
+
+static mp_obj_t tulip_tab5_lcd_read(mp_obj_t cmd_in, mp_obj_t len_in) {
+    const int cmd = mp_obj_get_int(cmd_in);
+    const int len = mp_obj_get_int(len_in);
+    if (len < 1 || len > 16) {
+        mp_raise_ValueError(MP_ERROR_TEXT("read length out of range"));
+    }
+    unsigned char buf[16] = {0};
+    const int err = tab5_display_panel_read(cmd, buf, (unsigned int)len);
+    mp_obj_t values[] = {
+        mp_obj_new_int(err),
+        mp_obj_new_bytes(buf, len),
+    };
+    return mp_obj_new_tuple(2, values);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(tulip_tab5_lcd_read_obj, tulip_tab5_lcd_read);
+
+static mp_obj_t tulip_tab5_lcd_errors(void) {
+    int new_err = 0;
+    int on_err = 0;
+    tab5_display_init_errors(&new_err, &on_err);
+    mp_obj_t values[] = {
+        mp_obj_new_int(new_err),
+        mp_obj_new_int(on_err),
+    };
+    return mp_obj_new_tuple(2, values);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_tab5_lcd_errors_obj, tulip_tab5_lcd_errors);
 
 // Per-frame render phase timings, in microseconds, for the last frame drawn.
 static mp_obj_t tulip_tab5_render_stats(void) {
@@ -1927,6 +1979,9 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_ui_start), MP_ROM_PTR(&tulip_ui_start_obj) },
     { MP_ROM_QSTR(MP_QSTR_tab5_diag), MP_ROM_PTR(&tulip_tab5_diag_obj) },
     { MP_ROM_QSTR(MP_QSTR_tab5_render_stats), MP_ROM_PTR(&tulip_tab5_render_stats_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tab5_lcd_cmd), MP_ROM_PTR(&tulip_tab5_lcd_cmd_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tab5_lcd_read), MP_ROM_PTR(&tulip_tab5_lcd_read_obj) },
+    { MP_ROM_QSTR(MP_QSTR_tab5_lcd_errors), MP_ROM_PTR(&tulip_tab5_lcd_errors_obj) },
     { MP_ROM_QSTR(MP_QSTR_audio_diag), MP_ROM_PTR(&tulip_audio_diag_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_ready), MP_ROM_PTR(&tulip_tfb_ready_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_start), MP_ROM_PTR(&tulip_tfb_start_obj) },
