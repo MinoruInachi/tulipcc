@@ -1010,6 +1010,26 @@ Tulip uses RGB332, with 256 colors. Here's the palette:
 
 ![tulip_pal](https://github.com/shorepine/tulipcc/blob/main/docs/pics/rgb332.png?raw=true)
 
+**On the Tab5 the BG plane is RGB565 (65,536 colors).** Everything below still
+takes the 0-255 palette index, and a palette index draws the same color it does
+elsewhere, so programs written for the palette run unchanged. In addition, any
+color argument -- `pal_idx` in the calls below, and the `fg` / `bg` of
+`tfb_str` -- can be an `(r, g, b)` tuple of 0-255 values, which picks the color
+directly. Ints outside 0-255 are refused. `bg_png` keeps a PNG's full color, so
+there is no need to reduce it to 255 colors first; `bg_pixel(x, y)` still
+returns the nearest palette index, and `bg_pixel_rgb(x, y)` reads the pixel
+exactly; the raw bytes of `bg_bitmap` and `sprite_bitmap` are two bytes a pixel
+(RGB565, little-endian) instead of one; and `screenshot()` writes an RGB PNG.
+The transparent color is still palette entry `0x55`.
+
+```python
+# Tab5 only: true color, alongside the palette
+tulip.bg_rect(10, 10, 100, 100, (255, 128, 0), 1)
+tulip.bg_pixel(x, y, (30, 144, 255))
+(r, g, b) = tulip.bg_pixel_rgb(x, y)
+tulip.tfb_str(0, 0, "hello", 0, (255, 255, 0), (0, 0, 80))
+```
+
 
 ```python
 # Set or get a pixel on the BG

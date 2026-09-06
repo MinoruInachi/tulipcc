@@ -3,11 +3,11 @@
 #include "keyscan.h"
 
 uint8_t bg_pal_color;
-uint8_t tfb_fg_pal_color;
-uint8_t tfb_bg_pal_color;
+tulip_px_t tfb_fg_pal_color;
+tulip_px_t tfb_bg_pal_color;
 static uint8_t tfb_default_bg_pal_color = TULIP_TEAL;
-uint8_t ansi_active_bg_color; 
-uint8_t ansi_active_fg_color; 
+tulip_px_t ansi_active_bg_color; 
+tulip_px_t ansi_active_fg_color; 
 int16_t ansi_active_format;
 
 // Escape sequences arrive in whatever chunks the writer hands over -- over ssh
@@ -110,9 +110,9 @@ bool display_take_dirty_rows(int *y0, int *y1) {
 
 uint8_t *collision_bitfield;
 // RAM for sprites and background FB
-uint8_t *sprite_ram; // in IRAM
-uint8_t * bg; // in SPIRAM
-uint8_t * bg_tfb;
+tulip_px_t *sprite_ram; // in IRAM
+tulip_px_t * bg; // in SPIRAM
+tulip_px_t * bg_tfb;
 
 uint8_t * sprite_ids;
 uint16_t *sprite_x_px;//[SPRITES]; 
@@ -143,7 +143,7 @@ uint8_t * lv_buf;
 // ALPHA is a pixel LVGL is not drawing, so the BG plane shows through. The REPL
 // background already worked that way; now any screen can, and one that wants the
 // BG plane visible just leaves its own background ALPHA (see ui.py).
-uint8_t *lv_overlay;
+tulip_px_t *lv_overlay;
 // The span of non-ALPHA pixels in each row, so compositing a mostly empty overlay
 // -- a game with nothing on it but the task bar -- costs the corner rather than
 // the whole width. Recomputed for the rows a flush touches, which happens far
@@ -154,8 +154,8 @@ static uint16_t lv_overlay_x1[V_RES + OFFSCREEN_Y_PX];  // exclusive; == x0 is e
 #endif
 
 uint16_t *TFB;//[TFB_ROWS][TFB_COLS];
-uint8_t *TFBfg;//[TFB_ROWS][TFB_COLS];
-uint8_t *TFBbg;//[TFB_ROWS][TFB_COLS];
+tulip_px_t *TFBfg;//[TFB_ROWS][TFB_COLS];
+tulip_px_t *TFBbg;//[TFB_ROWS][TFB_COLS];
 uint8_t *TFBf;//[TFB_ROWS][TFB_COLS];
 uint16_t *TFB_pxlen;
 int16_t *x_offsets;//[V_RES];
@@ -342,6 +342,72 @@ uint8_t rgb565to332(uint16_t rgb565) {
     return (rgb565 >> 8 & 0xe0) | (rgb565 >> 6 & 0x1c) | (rgb565 >> 3 & 0x3);
 }
 
+#ifdef TULIP_RGB565
+// Palette index -> native RGB565: the 3-3-2 replicated down into the low bits
+// (unpack_rgb_332_repeat, what Tulip Desktop draws the palette with), then
+// packed. Monotonic in each channel, unlike carrying just the low bit down,
+// which puts levels 1 and 2 a single step apart. ui.pal_to_lv() does the same
+// arithmetic on the Tab5, so entry 0x55 lands on ALPHA from both sides. Built
+// once.
+static uint16_t pal_px[256];
+static uint8_t pal_px_ready = 0;
+
+static void build_pal_px(void) {
+    for(uint16_t i=0;i<256;i++) {
+        uint8_t r, g, b;
+        unpack_rgb_332_repeat((uint8_t)i, &r, &g, &b);
+        pal_px[i] = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+    }
+    pal_px_ready = 1;
+}
+
+tulip_px_t pal_to_px(uint8_t pal_idx) {
+    if(!pal_px_ready) build_pal_px();
+    return pal_px[pal_idx];
+}
+
+uint8_t px_to_pal(tulip_px_t px) {
+    return rgb565to332(px);
+}
+
+tulip_px_t px_from_rgb(uint8_t r, uint8_t g, uint8_t b) {
+    return (tulip_px_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
+
+void px_to_rgb(tulip_px_t px, uint8_t *r, uint8_t *g, uint8_t *b) {
+    uint8_t r5 = (px >> 11) & 0x1f;
+    uint8_t g6 = (px >> 5) & 0x3f;
+    uint8_t b5 = px & 0x1f;
+    *r = (r5 << 3) | (r5 >> 2);
+    *g = (g6 << 2) | (g6 >> 4);
+    *b = (b5 << 3) | (b5 >> 2);
+}
+#else
+tulip_px_t pal_to_px(uint8_t pal_idx) { return pal_idx; }
+uint8_t px_to_pal(tulip_px_t px) { return px; }
+tulip_px_t px_from_rgb(uint8_t r, uint8_t g, uint8_t b) { return color_332(r, g, b); }
+void px_to_rgb(tulip_px_t px, uint8_t *r, uint8_t *g, uint8_t *b) { unpack_rgb_332_repeat(px, r, g, b); }
+#endif
+
+// Fill and scan a run of native pixels. memset/memchr do it for a byte plane;
+// the 16-bit plane needs the loop.
+static inline __attribute__((always_inline)) void px_fill(tulip_px_t *dst, tulip_px_t v, uint32_t n) {
+#if BYTES_PER_PIXEL == 1
+    memset(dst, v, n);
+#else
+    for(uint32_t i=0;i<n;i++) dst[i] = v;
+#endif
+}
+
+static inline __attribute__((always_inline)) uint8_t px_has_alpha(const tulip_px_t *src, uint32_t n) {
+#if BYTES_PER_PIXEL == 1
+    return memchr(src, ALPHA, n) != NULL;
+#else
+    for(uint32_t i=0;i<n;i++) if(src[i] == ALPHA) return 1;
+    return 0;
+#endif
+}
+
 // Python callback
 extern void tulip_frame_isr(); 
 
@@ -359,7 +425,7 @@ bool display_frame_done_generic() {
         y_offsets[i] = y_offsets[i] + y_speeds[i];
         x_offsets[i] = x_offsets[i] % (H_RES+OFFSCREEN_X_PX);
         y_offsets[i] = y_offsets[i] % (V_RES+OFFSCREEN_Y_PX);
-        bg_lines[i] = (uint32_t*)&bg[(H_RES+OFFSCREEN_X_PX)*BYTES_PER_PIXEL*y_offsets[i] + x_offsets[i]*BYTES_PER_PIXEL];
+        bg_lines[i] = (uint32_t*)&bg[(H_RES+OFFSCREEN_X_PX)*y_offsets[i] + x_offsets[i]];
     }
     #ifdef ESP_PLATFORM
     #ifndef TDECK
@@ -426,8 +492,8 @@ bool IRAM_ATTR display_bounce_empty(void *bounce_buf, int pos_px, int len_bytes,
     uint8_t touch_held_local = touch_held;
 
     uint16_t starting_display_row_px = pos_px / H_RES;
-    uint8_t bounce_total_rows_px = len_bytes / H_RES;
-    uint8_t * b = (uint8_t*)bounce_buf;
+    uint8_t bounce_total_rows_px = len_bytes / (H_RES*BYTES_PER_PIXEL);
+    tulip_px_t * b = (tulip_px_t*)bounce_buf;
     if (bg_lines == NULL) {
         memset(b, 0, len_bytes);
         return false;
@@ -438,12 +504,12 @@ bool IRAM_ATTR display_bounce_empty(void *bounce_buf, int pos_px, int len_bytes,
     const uint16_t tfb_h = tfb_ring_h;
     // Copy the bg then the TFB over 
     for(uint8_t rows_relative_px=0;rows_relative_px<bounce_total_rows_px;rows_relative_px++) {
-        uint8_t * b_ptr = b+(H_RES*rows_relative_px);
+        tulip_px_t * b_ptr = b+(H_RES*rows_relative_px);
         uint16_t y = (starting_display_row_px + rows_relative_px) % V_RES;
         if (bg_lines[y] != NULL) {
-            memcpy(b_ptr, bg_lines[y], H_RES);
+            memcpy(b_ptr, bg_lines[y], H_RES*BYTES_PER_PIXEL);
         } else {
-            memset(b_ptr, 0, H_RES);
+            memset(b_ptr, 0, H_RES*BYTES_PER_PIXEL);
         }
 #ifdef TAB5
         // LVGL's plane goes over the BG and under the TFB and the sprites, which
@@ -451,11 +517,11 @@ bool IRAM_ATTR display_bounce_empty(void *bounce_buf, int pos_px, int len_bytes,
         // read straight, with no x_offsets[] -- a widget stays where it was put
         // however the rows underneath it scroll.
         if(lv_overlay != NULL && lv_overlay_x1[y] > lv_overlay_x0[y]) {
-            const uint8_t *lv_line = lv_overlay + (uint32_t)y * LV_OVERLAY_STRIDE;
+            const tulip_px_t *lv_line = lv_overlay + (uint32_t)y * LV_OVERLAY_STRIDE;
             const uint16_t lv_x0 = lv_overlay_x0[y];
             const uint16_t lv_len = lv_overlay_x1[y] - lv_x0;
-            if(memchr(lv_line + lv_x0, ALPHA, lv_len) == NULL) {
-                memcpy(b_ptr + lv_x0, lv_line + lv_x0, lv_len);
+            if(!px_has_alpha(lv_line + lv_x0, lv_len)) {
+                memcpy(b_ptr + lv_x0, lv_line + lv_x0, lv_len*BYTES_PER_PIXEL);
             } else {
                 for(uint16_t x = lv_x0; x < lv_x0 + lv_len; x++) {
                     if(lv_line[x] != ALPHA) b_ptr[x] = lv_line[x];
@@ -465,10 +531,10 @@ bool IRAM_ATTR display_bounce_empty(void *bounce_buf, int pos_px, int len_bytes,
 #endif
         if(tfb_active && bg_tfb != NULL && TFB_pxlen != NULL) {
             uint16_t tfb_y = tfb_ring_row_in(y, tfb_top, tfb_h);
-            uint8_t *tfb_line = bg_tfb + (tfb_y * H_RES);
+            tulip_px_t *tfb_line = bg_tfb + (tfb_y * H_RES);
             uint16_t tfb_pxlen = TFB_pxlen[tfb_y];
-            if(memchr(tfb_line, ALPHA, tfb_pxlen) == NULL) {
-                memcpy(b_ptr, tfb_line, tfb_pxlen);
+            if(!px_has_alpha(tfb_line, tfb_pxlen)) {
+                memcpy(b_ptr, tfb_line, tfb_pxlen*BYTES_PER_PIXEL);
             } else {
                 for(uint16_t x=0;x<tfb_pxlen;x++) {
                     if(tfb_line[x] != ALPHA) b_ptr[x] = tfb_line[x];
@@ -488,12 +554,12 @@ bool IRAM_ATTR display_bounce_empty(void *bounce_buf, int pos_px, int len_bytes,
                     if(y >= sprite_y_px[s] && y < sprite_y_px[s]+sprite_h_px[s]) {
                         // this sprite is on this line 
                         // compute x and y (relative to the sprite!)
-                        uint8_t * sprite_data = &sprite_ram[sprite_mem[s]];
+                        tulip_px_t * sprite_data = &sprite_ram[sprite_mem[s]];
                         uint16_t relative_sprite_y_px = y - sprite_y_px[s];
                         for(uint16_t col_px=sprite_x_px[s]; col_px < sprite_x_px[s] + sprite_w_px[s]; col_px++) {
                             if(col_px < H_RES) {
                                 uint16_t relative_sprite_x_px = col_px - sprite_x_px[s];
-                                uint8_t b0 = sprite_data[relative_sprite_y_px * sprite_w_px[s] + relative_sprite_x_px  ] ;
+                                tulip_px_t b0 = sprite_data[relative_sprite_y_px * sprite_w_px[s] + relative_sprite_x_px  ] ;
                                 if(b0 != ALPHA) {
                                     b[rows_relative_px*H_RES + col_px] = b0;
                                     // Only update collisions on non-alpha pixels
@@ -520,7 +586,7 @@ bool IRAM_ATTR display_bounce_empty(void *bounce_buf, int pos_px, int len_bytes,
 }
 
 // One pixel row of text, built here before being published into bg_tfb.
-static uint8_t tfb_scratch_row[H_RES];
+static tulip_px_t tfb_scratch_row[H_RES];
 
 // set tfb_row_hint to -1 for everything
 void display_tfb_update(int8_t tfb_row_hint) {
@@ -563,7 +629,7 @@ void display_tfb_update(int8_t tfb_row_hint) {
         // compositor runs on another core and reads these rows continuously; if
         // it catches a row between the memset and the glyph loop it renders the
         // line as fully transparent, which shows up as text flicker.
-        memset(tfb_scratch_row, ALPHA, H_RES);
+        px_fill(tfb_scratch_row, ALPHA, H_RES);
 
         // Where this screen row is actually stored right now.
         const uint16_t store_row_px = tfb_ring_row(bounce_row_px);
@@ -571,15 +637,15 @@ void display_tfb_update(int8_t tfb_row_hint) {
         uint8_t tfb_row = bounce_row_px / font_height;
         if(tfb_row >= visible_rows) {
             TFB_pxlen[store_row_px] = 0;
-            memset(bg_tfb + (store_row_px*H_RES), ALPHA, H_RES);
+            px_fill(bg_tfb + (store_row_px*H_RES), ALPHA, H_RES);
             continue;
         }
         uint8_t tfb_row_offset_px = bounce_row_px % font_height;
         uint8_t tfb_col = 0;
         while(tfb_col < visible_cols && TFB[tfb_row*TFB_COLS+tfb_col]!=0) {
             uint8_t format = TFBf[tfb_row*TFB_COLS+tfb_col];
-            uint8_t fg_color = TFBfg[tfb_row*TFB_COLS+tfb_col];
-            uint8_t bg_color = TFBbg[tfb_row*TFB_COLS+tfb_col];
+            tulip_px_t fg_color = TFBfg[tfb_row*TFB_COLS+tfb_col];
+            tulip_px_t bg_color = TFBbg[tfb_row*TFB_COLS+tfb_col];
             uint16_t glyph = TFB[tfb_row*TFB_COLS+tfb_col];
             // 32 bits, left aligned: the widest thing drawn from one cell used to
             // be the 12px font, and is now a doubled fullwidth Japanese glyph at
@@ -665,7 +731,7 @@ void display_tfb_update(int8_t tfb_row_hint) {
             }
 
             uint16_t start_px = tfb_col * font_width;
-            uint8_t * bptr = tfb_scratch_row + start_px;
+            tulip_px_t * bptr = tfb_scratch_row + start_px;
             uint32_t mask = 0x80000000;
             for(uint8_t bit=0; bit<cell_px && (start_px + bit) < H_RES; bit++) {
                 uint8_t on = (data & mask) != 0;
@@ -688,7 +754,7 @@ void display_tfb_update(int8_t tfb_row_hint) {
         // Publish. Copy far enough to also clear whatever the previous, longer
         // line left behind, then widen the visible length last.
         uint16_t copy_len = TFB_pxlen[store_row_px] > pxlen ? TFB_pxlen[store_row_px] : pxlen;
-        memcpy(bg_tfb + (store_row_px*H_RES), tfb_scratch_row, copy_len);
+        memcpy(bg_tfb + (store_row_px*H_RES), tfb_scratch_row, copy_len*BYTES_PER_PIXEL);
         TFB_pxlen[store_row_px] = pxlen;
     }
 
@@ -697,9 +763,7 @@ void display_tfb_update(int8_t tfb_row_hint) {
 }
 void display_reset_bg() {
     bg_pal_color = TULIP_TEAL;
-    for(int i=0;i<(H_RES+OFFSCREEN_X_PX)*(V_RES+OFFSCREEN_Y_PX);i++) { 
-        bg[i] = bg_pal_color; 
-    }
+    px_fill(bg, PX(bg_pal_color), (H_RES+OFFSCREEN_X_PX)*(V_RES+OFFSCREEN_Y_PX));
     
     // init the scroll pointer to the top left of the fb 
     for(int i=0;i<V_RES;i++) {
@@ -719,8 +783,8 @@ void display_reset_tfb() {
     // or it would be restored over the top of whatever comes next.
     display_term_stop(1);
     // Clear out the TFB
-    tfb_fg_pal_color = color_332(255,255,255);
-    tfb_bg_pal_color = tfb_default_bg_pal_color;
+    tfb_fg_pal_color = px_from_rgb(255,255,255);
+    tfb_bg_pal_color = PX(tfb_default_bg_pal_color);
     for(uint i=0;i<TFB_ROWS*TFB_COLS;i++) {
         TFB[i]=0;
         TFBfg[i]=tfb_fg_pal_color;
@@ -740,10 +804,10 @@ void display_reset_tfb() {
 
 void display_tfb_set_default_bg_color(uint8_t color) {
     tfb_default_bg_pal_color = color;
-    tfb_bg_pal_color = color;
-    ansi_active_bg_color = color;
+    tfb_bg_pal_color = PX(color);
+    ansi_active_bg_color = PX(color);
     if(TFBbg != NULL) {
-        memset(TFBbg, color, TFB_ROWS*TFB_COLS);
+        px_fill(TFBbg, PX(color), TFB_ROWS*TFB_COLS);
         display_tfb_update(-1);
     }
     display_mark_dirty();
@@ -779,7 +843,7 @@ void display_invert_bg(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
         for (int j = y; j < y+h; j++) {
             for (int i = x; i < x+w; i++) {
                 if(j<V_RES+OFFSCREEN_Y_PX && i < H_RES+OFFSCREEN_X_PX) {
-                    (bg)[(((j*(H_RES+OFFSCREEN_X_PX) + i)*BYTES_PER_PIXEL) + 0)] = 255 - (bg)[(((j*(H_RES+OFFSCREEN_X_PX) + i)*BYTES_PER_PIXEL) + 0)];
+                    bg[(j*(H_RES+OFFSCREEN_X_PX) + i)] = (tulip_px_t)~bg[(j*(H_RES+OFFSCREEN_X_PX) + i)];
                 }
             }
         }
@@ -799,7 +863,7 @@ void display_set_bg_bitmap_rgba(uint16_t x, uint16_t y, uint16_t w, uint16_t h, 
                 uint8_t a = *data++; 
                 if(j<V_RES+OFFSCREEN_Y_PX && i < H_RES+OFFSCREEN_X_PX) {
                     if(a!=0) {
-                        (bg)[(((j*(H_RES+OFFSCREEN_X_PX) + i)*BYTES_PER_PIXEL))] = color_332(r,g,b);
+                        bg[(j*(H_RES+OFFSCREEN_X_PX) + i)] = px_from_rgb(r,g,b);
                     }
                 }
             }
@@ -810,15 +874,18 @@ void display_set_bg_bitmap_rgba(uint16_t x, uint16_t y, uint16_t w, uint16_t h, 
     display_mark_dirty_rows(y, y+h);
 }
 
+// Raw bitmaps are native pixels, w*h*BYTES_PER_PIXEL bytes, little-endian on
+// the 16-bit plane -- the same bytes bg_bitmap() hands back.
 void display_set_bg_bitmap_raw(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint8_t* data) {
     if(check_dim_xywh(x,y,w,h)) {
         uint32_t c = 0;
+        const tulip_px_t *px = (const tulip_px_t*)data;
         for (int j = y; j < y+h; j++) {
             for (int i = x; i < x+w; i++) {
-                uint8_t pixel = data[c++];
+                tulip_px_t pixel = px[c++];
                 if(j<V_RES+OFFSCREEN_Y_PX && i < H_RES+OFFSCREEN_X_PX) {
                     if(pixel != ALPHA) {
-                        (bg)[(((j*(H_RES+OFFSCREEN_X_PX) + i)*BYTES_PER_PIXEL) + 0)] = pixel;
+                        bg[(j*(H_RES+OFFSCREEN_X_PX) + i)] = pixel;
                     }
                 }
             }
@@ -832,9 +899,10 @@ void display_set_bg_bitmap_raw(uint16_t x, uint16_t y, uint16_t w, uint16_t h, u
 void display_get_bg_bitmap_raw(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint8_t * data) {
     if(check_dim_xywh(x,y,w,h)) {
         uint32_t c = 0;
+        tulip_px_t *px = (tulip_px_t*)data;
         for (int j = y; j < y+h; j++) {
             for (int i = x; i < x+w; i++) {
-                data[c++] = (bg)[(((j*(H_RES+OFFSCREEN_X_PX) + i)*BYTES_PER_PIXEL) + 0)];
+                px[c++] = bg[(j*(H_RES+OFFSCREEN_X_PX) + i)];
             }
         }
     } else { 
@@ -849,7 +917,7 @@ void display_bg_bitmap_blit(uint16_t x,uint16_t y,uint16_t w,uint16_t h,uint16_t
                 uint16_t src_y = y+(j-y1);
                 uint16_t src_x = x+(i-x1);
                 if(j<V_RES+OFFSCREEN_Y_PX && i < H_RES+OFFSCREEN_X_PX) {
-                    (bg)[(((j*(H_RES+OFFSCREEN_X_PX) + i)*BYTES_PER_PIXEL) + 0)] = (bg)[(((src_y*(H_RES+OFFSCREEN_X_PX) + src_x)*BYTES_PER_PIXEL) + 0)];
+                    bg[(j*(H_RES+OFFSCREEN_X_PX) + i)] = bg[(src_y*(H_RES+OFFSCREEN_X_PX) + src_x)];
                 }
             }
         }    
@@ -866,9 +934,9 @@ void display_bg_bitmap_blit_alpha(uint16_t x,uint16_t y,uint16_t w,uint16_t h,ui
                 uint16_t src_y = y+(j-y1);
                 uint16_t src_x = x+(i-x1);
                 if(j<V_RES+OFFSCREEN_Y_PX && i < H_RES+OFFSCREEN_X_PX) {
-                    uint8_t c = (bg)[(((src_y*(H_RES+OFFSCREEN_X_PX) + src_x)*BYTES_PER_PIXEL) + 0)];
+                    tulip_px_t c = bg[(src_y*(H_RES+OFFSCREEN_X_PX) + src_x)];
                     if(c != ALPHA) {
-                        (bg)[(((j*(H_RES+OFFSCREEN_X_PX) + i)*BYTES_PER_PIXEL) + 0)] = (bg)[(((src_y*(H_RES+OFFSCREEN_X_PX) + src_x)*BYTES_PER_PIXEL) + 0)];
+                        bg[(j*(H_RES+OFFSCREEN_X_PX) + i)] = bg[(src_y*(H_RES+OFFSCREEN_X_PX) + src_x)];
                     }
                 }
             }
@@ -883,9 +951,11 @@ void display_bg_bitmap_blit_alpha(uint16_t x,uint16_t y,uint16_t w,uint16_t h,ui
 
 //mem_len = sprite_load(bitmap, mem_pos, [x,y,w,h]) # returns mem_len (w*h*2)
 // load a bitmap into fast sprite ram
+// mem_pos is in pixels, len in bytes of sprite RAM (pixels*BYTES_PER_PIXEL).
 void display_load_sprite_rgba(uint32_t mem_pos, uint32_t len, uint8_t* data) {
-    if(mem_pos < SPRITE_RAM_BYTES && mem_pos+len < SPRITE_RAM_BYTES) {
-        for (uint32_t j = mem_pos; j < mem_pos + len; j=j+BYTES_PER_PIXEL) {
+    uint32_t pixels = len / BYTES_PER_PIXEL;
+    if(mem_pos < SPRITE_RAM_BYTES && mem_pos+pixels < SPRITE_RAM_BYTES) {
+        for (uint32_t j = mem_pos; j < mem_pos + pixels; j++) {
             uint8_t r = *data++;
             uint8_t g = *data++;
             uint8_t b = *data++;
@@ -893,7 +963,7 @@ void display_load_sprite_rgba(uint32_t mem_pos, uint32_t len, uint8_t* data) {
             if(a==0) { // only full transparent counts
                 sprite_ram[j] = ALPHA;
             } else {
-                sprite_ram[j] = color_332(r,g,b);
+                sprite_ram[j] = px_from_rgb(r,g,b);
             }
         }
     }
@@ -901,10 +971,9 @@ void display_load_sprite_rgba(uint32_t mem_pos, uint32_t len, uint8_t* data) {
 }
 
 void display_load_sprite_raw(uint32_t mem_pos, uint32_t len, uint8_t* data) {
-    if(mem_pos < SPRITE_RAM_BYTES && mem_pos+len < SPRITE_RAM_BYTES) {
-        for (uint32_t j = mem_pos; j < mem_pos + len; j=j+BYTES_PER_PIXEL) {
-            sprite_ram[j] = *data++;
-        }
+    uint32_t pixels = len / BYTES_PER_PIXEL;
+    if(mem_pos < SPRITE_RAM_BYTES && mem_pos+pixels < SPRITE_RAM_BYTES) {
+        memcpy(sprite_ram + mem_pos, data, pixels*BYTES_PER_PIXEL);
     }    
     display_mark_dirty();
 }
@@ -937,11 +1006,11 @@ void enable_mouse_pointer() {
             if(i<93 && pointer_bitmap_xys[i+3]==y0) {
                 if(x0!=3 && x0!=2 && x0!=1) { // skip the end of the tail
                     for(uint8_t j=x0; j<pointer_bitmap_xys[i+2]; j++) {
-                        sprite_ram[(SPRITE_RAM_BYTES-(w*h)) + (y0*w + j)] = 244;
+                        sprite_ram[(SPRITE_RAM_BYTES-(w*h)) + (y0*w + j)] = PX(244);
                     }
                 }
             }
-            sprite_ram[(SPRITE_RAM_BYTES-(w*h)) + (y0*w + x0)] = 162;
+            sprite_ram[(SPRITE_RAM_BYTES-(w*h)) + (y0*w + x0)] = PX(162);
         }
         uint8_t spriteno = 0;
         spriteno_activated++;
@@ -971,7 +1040,7 @@ void display_screenshot(char * screenshot_fn, int16_t x, int16_t y, int16_t w, i
     // Blank the display
     display_stop();
 
-    uint8_t * screenshot_bb = (uint8_t *) malloc_caps(FONT_HEIGHT*H_RES*BYTES_PER_PIXEL,MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    tulip_px_t * screenshot_bb = (tulip_px_t *) malloc_caps(FONT_HEIGHT*H_RES*BYTES_PER_PIXEL,MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     // The capture used to land straight in bg_tfb to save an allocation, but that
     // aliases the console's own pixels: display_bounce_empty() below is still
     // reading them while the loop overwrites them. It only ever worked because
@@ -979,6 +1048,51 @@ void display_screenshot(char * screenshot_fn, int16_t x, int16_t y, int16_t w, i
     // and the capture came back with the wrapped rows showing stale text. Take a
     // buffer of our own -- and if there is no room for one, flatten the ring back
     // to row order first so the old aliasing is safe again.
+#ifdef TULIP_RGB565
+    // A 16-bit plane has no palette to write, so this is a plain RGB PNG: three
+    // bytes a pixel, expanded from the 5-6-5 the way px_to_rgb() does it.
+    uint8_t * shot = (uint8_t *) malloc_caps((uint32_t)w*(uint32_t)h*3, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(shot == NULL || screenshot_bb == NULL) {
+        free_caps(shot);
+        free_caps(screenshot_bb);
+        display_start();
+        return;
+    }
+    uint8_t r,g,b;
+
+    LodePNGState state;
+    lodepng_state_init(&state);
+    int err;
+    state.info_png.color.colortype = LCT_RGB;
+    state.info_png.color.bitdepth = 8;
+    state.info_raw.colortype = LCT_RGB;
+    state.info_raw.bitdepth = 8;
+    state.encoder.auto_convert = 0;
+
+    uint16_t y_counter = 0;
+    for(uint16_t scan_y=y;scan_y<y+h;scan_y=scan_y+FONT_HEIGHT) {
+        display_bounce_empty(screenshot_bb, scan_y*H_RES, H_RES*FONT_HEIGHT*BYTES_PER_PIXEL, NULL);
+        for(uint8_t ly=0;ly<FONT_HEIGHT;ly++) {
+            uint32_t o = (uint32_t)y_counter*w*3;
+            for(uint16_t scan_x=x;scan_x<x+w;scan_x++) {
+                if(y_counter<h) {
+                    px_to_rgb(screenshot_bb[ly*H_RES + scan_x], &r, &g, &b);
+                    shot[o++] = r; shot[o++] = g; shot[o++] = b;
+                }
+            }
+            y_counter++;
+        }
+    }
+
+    uint32_t outsize = 0;
+    uint8_t *out;
+    err = lodepng_encode(&out, (size_t*)&outsize,shot, w, h, &state);
+    (void)err;
+    write_file(screenshot_fn, out, outsize, 1);
+    free_caps(out);
+    free_caps(screenshot_bb);
+    free_caps(shot);
+#else
     uint8_t * shot = (uint8_t *) malloc_caps((uint32_t)w*(uint32_t)h, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if(shot == NULL) {
         display_tfb_update(-1);
@@ -1027,6 +1141,7 @@ void display_screenshot(char * screenshot_fn, int16_t x, int16_t y, int16_t w, i
     free_caps(out);
     free_caps(screenshot_bb);
     if(shot != bg_tfb) free_caps(shot);
+#endif
 
     // redraw the tfb
     display_tfb_update(-1);
@@ -1034,35 +1149,41 @@ void display_screenshot(char * screenshot_fn, int16_t x, int16_t y, int16_t w, i
     display_start();
 }
 
-void display_set_bg_pixel_pal(uint16_t x, uint16_t y, uint8_t pal_idx) {
+void display_set_bg_pixel_px(uint16_t x, uint16_t y, tulip_px_t px) {
     if(check_dim_xy(x,y)) {
-        bg[y*(H_RES+OFFSCREEN_X_PX)*BYTES_PER_PIXEL + x*BYTES_PER_PIXEL] = pal_idx;    
+        bg[y*(H_RES+OFFSCREEN_X_PX) + x] = px;
     }
     display_mark_dirty_rows(y, y+1);
 }
 
+void display_set_bg_pixel_pal(uint16_t x, uint16_t y, uint8_t pal_idx) {
+    display_set_bg_pixel_px(x, y, PX(pal_idx));
+}
+
 void display_set_bg_pixel(uint16_t x, uint16_t y, uint8_t r, uint8_t g, uint8_t b) {
-    if(check_dim_xy(x,y)) {
-        bg[y*(H_RES+OFFSCREEN_X_PX)*BYTES_PER_PIXEL + x*BYTES_PER_PIXEL] = color_332(r,g,b);
-    }
-    display_mark_dirty_rows(y, y+1);
+    display_set_bg_pixel_px(x, y, px_from_rgb(r,g,b));
 }
 
 
 void display_get_bg_pixel(uint16_t x, uint16_t y, uint8_t *r, uint8_t *g, uint8_t *b) {
     if(check_dim_xy(x,y)) {
-        uint8_t px0 = bg[y*(H_RES+OFFSCREEN_X_PX)*BYTES_PER_PIXEL + x*BYTES_PER_PIXEL + 0];
-        unpack_rgb_332_repeat(px0, r, g, b);
+        px_to_rgb(bg[y*(H_RES+OFFSCREEN_X_PX) + x], r, g, b);
     } else {
         *r = 0; *g =0; *b = 0;
     }
 }
 
-uint8_t display_get_bg_pixel_pal(uint16_t x, uint16_t y) {
+tulip_px_t display_get_bg_pixel_px(uint16_t x, uint16_t y) {
     if(check_dim_xy(x,y)) {
-        return bg[y*(H_RES+OFFSCREEN_X_PX)*BYTES_PER_PIXEL + x*BYTES_PER_PIXEL + 0];
+        return bg[y*(H_RES+OFFSCREEN_X_PX) + x];
     }
     return 0;
+}
+
+// The nearest palette entry to what is there, which on a 16-bit plane is a
+// rounding: a pixel set from an (r, g, b) does not read back as itself.
+uint8_t display_get_bg_pixel_pal(uint16_t x, uint16_t y) {
+    return px_to_pal(display_get_bg_pixel_px(x, y));
 }
 
 
@@ -1235,7 +1356,7 @@ static uint8_t term_tab[TFB_COLS];
 static uint8_t term_saved_x = 0, term_saved_y = 0;
 static uint8_t term_saved_g0 = 0, term_saved_g1 = 0, term_saved_gl = 0;
 static int16_t term_saved_format = -1;
-static uint8_t term_saved_fg = 0, term_saved_bg = 0;
+static tulip_px_t term_saved_fg = 0, term_saved_bg = 0;
 
 // A screen off the glass: the primary one while the alternate is up, and the
 // console's own while a session has borrowed the screen.
@@ -1787,7 +1908,7 @@ static void term_goto(int16_t row, int16_t col) {
 // One printable cell (or two, for a fullwidth Japanese character) at the cursor.
 // Split out of display_tfb_str() because CSI b -- repeat the last character --
 // has to be able to ask for exactly this again.
-static void tfb_put_cell(uint16_t ch, uint8_t format, uint8_t fg_color, uint8_t bg_color) {
+static void tfb_put_cell(uint16_t ch, uint8_t format, tulip_px_t fg_color, tulip_px_t bg_color) {
     uint8_t cols = term_cols();
     if(cols == 0) return;
     // Fullwidth Japanese takes two cells, the second a TFB_WIDE_CONT that the
@@ -1931,11 +2052,11 @@ static void term_sgr(uint16_t *p, uint8_t d) {
             // this screen keeps the nearest 3-3-2 of.
             uint8_t fg = (code == 38);
             if(l+1 < d && p[l+1] == 5 && l+2 < d) {
-                uint8_t c = ansi_pal[p[l+2] & 0xff];
+                tulip_px_t c = PX(ansi_pal[p[l+2] & 0xff]);
                 if(fg) ansi_active_fg_color = c; else ansi_active_bg_color = c;
                 l += 2;
             } else if(l+1 < d && p[l+1] == 2 && l+4 < d) {
-                uint8_t c = color_332((uint8_t)p[l+2], (uint8_t)p[l+3], (uint8_t)p[l+4]);
+                tulip_px_t c = px_from_rgb((uint8_t)p[l+2], (uint8_t)p[l+3], (uint8_t)p[l+4]);
                 if(fg) ansi_active_fg_color = c; else ansi_active_bg_color = c;
                 l += 4;
             }
@@ -2260,7 +2381,7 @@ static uint8_t esc_feed(unsigned char c) {
     return 1;
 }
 
-void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg_color, uint8_t bg_color) {
+void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, tulip_px_t fg_color, tulip_px_t bg_color) {
     if(TFB == NULL || TFBf == NULL || TFBfg == NULL || TFBbg == NULL) {
         return;
     }
@@ -2531,10 +2652,12 @@ void lv_flush_cb_8b(lv_display_t * display, const lv_area_t * area, unsigned cha
     if(lv_overlay != NULL) {
         for(int32_t y = area->y1; y <= area->y2; y++) {
             if(y < 0 || y >= V_RES + OFFSCREEN_Y_PX) continue;
-            uint8_t *row = lv_overlay + (uint32_t)y * LV_OVERLAY_STRIDE;
+            tulip_px_t *row = lv_overlay + (uint32_t)y * LV_OVERLAY_STRIDE;
+            // LVGL renders RGB565, which is the plane's own format: straight in,
+            // antialiasing and all.
             for(int32_t x = area->x1; x <= area->x2; x++) {
                 if(x < 0 || x >= H_RES + OFFSCREEN_X_PX) continue;
-                row[x] = rgb565to332(src[(y - area->y1) * area_width + (x - area->x1)]);
+                row[x] = src[(y - area->y1) * area_width + (x - area->x1)];
             }
             // Rescan the row rather than just widening the span with the flushed
             // area: the span has to be able to shrink again when a widget goes
@@ -2719,7 +2842,7 @@ void display_init(void) {
     // Nothing addressable moves: check_dim_xy() still stops at the plane and
     // display_reset_bg() still fills only the plane, so the slack stays the black
     // it was allocated as.
-    bg = (uint8_t*)calloc_caps(32, 1, (H_RES+OFFSCREEN_X_PX)*(V_RES+OFFSCREEN_Y_PX)*BYTES_PER_PIXEL + H_RES*BYTES_PER_PIXEL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    bg = (tulip_px_t*)calloc_caps(32, 1, (H_RES+OFFSCREEN_X_PX)*(V_RES+OFFSCREEN_Y_PX)*BYTES_PER_PIXEL + H_RES*BYTES_PER_PIXEL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 #ifndef TAB5
     // LVGL's band render buffer (see lv_flush_cb_8b). TAB5 allocates its own in
     // lv_start(): it renders RGB565 into a full-size buffer and composites from
@@ -2727,19 +2850,19 @@ void display_init(void) {
     lv_buf = (uint8_t*)calloc_caps(32, 1, LV_BUF_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 #endif
     // 614400 bytes
-    bg_tfb = (uint8_t*)calloc_caps(32, 1, (H_RES*V_RES), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    bg_tfb = (tulip_px_t*)calloc_caps(32, 1, (H_RES*V_RES)*BYTES_PER_PIXEL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
 #ifdef TAB5
     // LVGL's plane, the same shape as bg so a flush needs no coordinate change,
     // and cleared to ALPHA so nothing covers the BG plane until LVGL draws.
-    lv_overlay = (uint8_t*)malloc_caps(LV_OVERLAY_STRIDE*(V_RES+OFFSCREEN_Y_PX), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if(lv_overlay != NULL) memset(lv_overlay, ALPHA, LV_OVERLAY_STRIDE*(V_RES+OFFSCREEN_Y_PX));
+    lv_overlay = (tulip_px_t*)malloc_caps(LV_OVERLAY_STRIDE*(V_RES+OFFSCREEN_Y_PX)*BYTES_PER_PIXEL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(lv_overlay != NULL) px_fill(lv_overlay, ALPHA, LV_OVERLAY_STRIDE*(V_RES+OFFSCREEN_Y_PX));
     for(uint16_t i=0;i<V_RES+OFFSCREEN_Y_PX;i++) { lv_overlay_x0[i] = 0; lv_overlay_x1[i] = 0; }
 #endif
 
     // And various ptrs
     sprite_ids = (uint8_t*)malloc_caps(H_RES *  sizeof(uint8_t), MALLOC_CAP_INTERNAL);
-    sprite_ram = (uint8_t*)malloc_caps(SPRITE_RAM_BYTES*sizeof(uint8_t), MALLOC_CAP_INTERNAL);
+    sprite_ram = (tulip_px_t*)malloc_caps(SPRITE_RAM_BYTES*sizeof(tulip_px_t), MALLOC_CAP_INTERNAL);
     sprite_x_px = (uint16_t*)malloc_caps(SPRITES*sizeof(uint16_t), MALLOC_CAP_INTERNAL);
     sprite_y_px = (uint16_t*)malloc_caps(SPRITES*sizeof(uint16_t), MALLOC_CAP_INTERNAL);
     sprite_w_px = (uint16_t*)malloc_caps(SPRITES*sizeof(uint16_t), MALLOC_CAP_INTERNAL);
@@ -2752,8 +2875,8 @@ void display_init(void) {
 
     TFB = (uint16_t*)malloc_caps(TFB_ROWS*TFB_COLS*sizeof(uint16_t), MALLOC_CAP_INTERNAL);
     TFBf = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS*sizeof(uint8_t), MALLOC_CAP_INTERNAL);
-    TFBfg = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS*sizeof(uint8_t), MALLOC_CAP_INTERNAL);
-    TFBbg = (uint8_t*)malloc_caps(TFB_ROWS*TFB_COLS*sizeof(uint8_t), MALLOC_CAP_INTERNAL);
+    TFBfg = (tulip_px_t*)malloc_caps(TFB_ROWS*TFB_COLS*sizeof(tulip_px_t), MALLOC_CAP_INTERNAL);
+    TFBbg = (tulip_px_t*)malloc_caps(TFB_ROWS*TFB_COLS*sizeof(tulip_px_t), MALLOC_CAP_INTERNAL);
 
 
     x_offsets = (int16_t*)malloc_caps(V_RES*sizeof(uint16_t), MALLOC_CAP_INTERNAL);

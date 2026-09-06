@@ -34,8 +34,8 @@ uint16_t lines = 0;
 uint8_t dirty = 0;
 uint16_t *saved_tfb;
 uint8_t *saved_tfbf;
-uint8_t *saved_tfbfg;
-uint8_t *saved_tfbbg;
+tulip_px_t *saved_tfbfg;
+tulip_px_t *saved_tfbbg;
 uint16_t saved_tfb_y;
 uint16_t saved_tfb_x;
 uint8_t quit_flag = 0;
@@ -52,7 +52,7 @@ uint8_t editor_on_screen = 0;
 // The colour of the cell the cursor is standing on. The cursor takes the cell's
 // foreground colour over while the IME is on, and this is how the syntax
 // highlighting gets it back when the cursor moves off.
-static uint8_t cursor_fg_under = EDITOR_COLOR_FG;
+static tulip_px_t cursor_fg_under = 0;   // a TFBfg pixel; set from PX(EDITOR_COLOR_FG) when the editor comes up
 #define EDITOR_NORMAL 0
 #define EDITOR_PROMPT_CHAR 1
 #define EDITOR_PROMPT_SEARCH 2
@@ -170,8 +170,9 @@ static uint16_t ed_prev_byte(const char *s, uint16_t bytes) {
 // Colour a character's cells. A fullwidth one is two, and colouring only the
 // left half leaves the right half in whatever colour the previous line left it.
 static void ed_paint_fg(uint16_t y, uint16_t col, uint8_t cells, uint8_t color) {
+    tulip_px_t px = PX(color);
     for(uint8_t c=0;c<cells;c++) {
-        if(col + c < TFB_COLS) TFBfg[y*TFB_COLS+col+c] = color;
+        if(col + c < TFB_COLS) TFBfg[y*TFB_COLS+col+c] = px;
     }
 }
 
@@ -249,8 +250,8 @@ void format_at_row(uint8_t format, int16_t len, uint16_t y) {
 		if(len <0) len = TFB_COLS;
 		for(uint16_t i=0;i<len;i++) {
 			TFBf[y*TFB_COLS+i] = format;
-			TFBfg[y*TFB_COLS+i] = EDITOR_COLOR_FG;
-			TFBbg[y*TFB_COLS+i] = EDITOR_COLOR_BG;
+			TFBfg[y*TFB_COLS+i] = PX(EDITOR_COLOR_FG);
+			TFBbg[y*TFB_COLS+i] = PX(EDITOR_COLOR_BG);
             // Fill in spaces if not given, for screen-wide banners
             if(TFB[y*TFB_COLS+i]==0) TFB[y*TFB_COLS+i] = 32;
 		}
@@ -272,8 +273,8 @@ void string_at_row(char * s, int16_t len, uint16_t y) {
             if(truncated) s[len] = saved;
     		for(uint16_t i=0;i<cells;i++) {
     			TFBf[y*TFB_COLS+i] = 0; ;
-    			TFBfg[y*TFB_COLS+i] = EDITOR_COLOR_FG;
-    			TFBbg[y*TFB_COLS+i] = EDITOR_COLOR_BG;
+    			TFBfg[y*TFB_COLS+i] = PX(EDITOR_COLOR_FG);
+    			TFBbg[y*TFB_COLS+i] = PX(EDITOR_COLOR_BG);
     		}
     		for(uint16_t i=cells;i<TFB_COLS;i++) {
     			TFB[y*TFB_COLS+i] = 0;
@@ -417,8 +418,8 @@ void save_tfb() {
 	// truncate every Japanese character on screen to its low byte.
 	saved_tfb = (uint16_t*)editor_malloc(TFB_ROWS*TFB_COLS*sizeof(uint16_t));
 	saved_tfbf= (uint8_t*)editor_malloc(TFB_ROWS*TFB_COLS);
-	saved_tfbfg= (uint8_t*)editor_malloc(TFB_ROWS*TFB_COLS);
-	saved_tfbbg= (uint8_t*)editor_malloc(TFB_ROWS*TFB_COLS);
+	saved_tfbfg= (tulip_px_t*)editor_malloc(TFB_ROWS*TFB_COLS*sizeof(tulip_px_t));
+	saved_tfbbg= (tulip_px_t*)editor_malloc(TFB_ROWS*TFB_COLS*sizeof(tulip_px_t));
 	for(uint16_t y=0;y<TFB_ROWS*TFB_COLS;y++) {
 		saved_tfb[y] = TFB[y];
 		saved_tfbf[y]= TFBf[y];
@@ -426,11 +427,11 @@ void save_tfb() {
 		saved_tfbbg[y]= TFBbg[y];
 		TFB[y] = 0;
 		TFBf[y] = 0;
-		TFBfg[y] = EDITOR_COLOR_FG;
-		TFBbg[y] = EDITOR_COLOR_BG;
+		TFBfg[y] = PX(EDITOR_COLOR_FG);
+		TFBbg[y] = PX(EDITOR_COLOR_BG);
 	}
 	editor_on_screen = 1;
-	cursor_fg_under = EDITOR_COLOR_FG;
+	cursor_fg_under = PX(EDITOR_COLOR_FG);
 	saved_tfb_y = tfb_y_row;
 	saved_tfb_x = tfb_x_col;
 	tfb_y_row = 0;

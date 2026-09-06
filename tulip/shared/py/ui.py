@@ -165,6 +165,15 @@ def get_keypad_indev():
 
 # Convert tulip rgb332 pal idx into lv color
 def pal_to_lv(pal):
+    if _lvgl_overlays_bg:
+        # The Tab5's BG plane is RGB565, and a palette index expands onto it by
+        # replicating the 3-3-2 bits downwards (display.c pal_to_px). LVGL has to
+        # get the same expansion, or the pixel it paints for LV_ALPHA is not the
+        # plane's ALPHA and a transparent screen comes out opaque.
+        r = (pal & 0xe0) | ((pal & 0xe0) >> 3) | ((pal & 0xc0) >> 6)
+        g = ((pal & 0x1c) << 3) | (pal & 0x1c) | ((pal & 0x18) >> 3)
+        b = (pal & 0x03) | ((pal & 0x03) << 2) | ((pal & 0x03) << 4) | ((pal & 0x03) << 6)
+        return lv.color_make(r,g,b)
     (r,g,b) = tulip_graphics.rgb(pal, wide=True) # todo -- not sure if we use wide or not
     return lv.color_make(r,g,b)
 

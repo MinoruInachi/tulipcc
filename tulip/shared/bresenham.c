@@ -3,13 +3,13 @@
 #include "bresenham.h"
 
 
-void drawPixel(int cx, int cy, uint8_t pal_idx) {
-    display_set_bg_pixel_pal(cx, cy, pal_idx);
+void drawPixel(int cx, int cy, tulip_px_t color) {
+    display_set_bg_pixel_px(cx, cy, color);
 }
 
 
 // bresenham but it's per scanline, increasing on y not x
-void drawLine_scanline(short x0, short y0,short x1, short y1,unsigned short color, unsigned short width) {
+void drawLine_scanline(short x0, short y0,short x1, short y1,tulip_px_t color, unsigned short width) {
     short steep = abs(x1 - x0) > abs(y1 - y0);
     if (steep) {
         swap(y0, x0);
@@ -54,18 +54,18 @@ void drawLine_scanline(short x0, short y0,short x1, short y1,unsigned short colo
 
 
 
-uint8_t getPixel(int cx, int cy) {
-    return display_get_bg_pixel_pal(cx,cy);
+tulip_px_t getPixel(int cx, int cy) {
+    return display_get_bg_pixel_px(cx,cy);
 }
 
-void drawFastHLine(int16_t x, int16_t y, int16_t w, uint16_t color) {
+void drawFastHLine(int16_t x, int16_t y, int16_t w, tulip_px_t color) {
     drawLine(x, y, x + w - 1, y, color);
 }
-void drawFastVLine(short x0, short y0, short h, short color) {
+void drawFastVLine(short x0, short y0, short h, tulip_px_t color) {
     drawLine(x0, y0, x0, y0+h-1, color);
 }
 
-uint16_t draw_new_char(const char c, uint16_t x, uint16_t y, uint8_t fg, uint8_t font_no) {
+uint16_t draw_new_char(const char c, uint16_t x, uint16_t y, tulip_px_t fg, uint8_t font_no) {
   u8g2_font_t ufont;
   ufont.font = NULL; 
   ufont.font_decode.fg_color = 1; 
@@ -80,7 +80,7 @@ uint16_t draw_new_char(const char c, uint16_t x, uint16_t y, uint8_t fg, uint8_t
   return u8g2_DrawGlyph(&ufont, x,y,c);
 }
 
-uint16_t draw_new_str(const char * str, uint16_t x, uint16_t y, uint8_t fg, uint8_t font_no, uint16_t w, uint16_t h, uint8_t centered) {
+uint16_t draw_new_str(const char * str, uint16_t x, uint16_t y, tulip_px_t fg, uint8_t font_no, uint16_t w, uint16_t h, uint8_t centered) {
   u8g2_font_t ufont;
   ufont.font = NULL; 
   ufont.font_decode.fg_color = 1; 
@@ -171,7 +171,7 @@ void floodFillScanline(int x, int y, int newColor, int oldColor)
   }
 }
 
-void floodFill(int16_t x, int16_t y, uint8_t color, uint8_t old_color) {   
+void floodFill(int16_t x, int16_t y, tulip_px_t color, tulip_px_t old_color) {   
     if ( 0 <= x && x < (H_RES + OFFSCREEN_X_PX)  && 0 <= y && y < V_RES+OFFSCREEN_Y_PX) {
         if(display_get_bg_pixel_pal(x,y) == old_color) {
             display_set_bg_pixel_pal(x,y, color);
@@ -184,12 +184,12 @@ void floodFill(int16_t x, int16_t y, uint8_t color, uint8_t old_color) {
 }
 
 
-void fill(int16_t x, int16_t y, uint8_t color) {   
-    uint8_t old_color = display_get_bg_pixel_pal(x,y);  
+void fill(int16_t x, int16_t y, tulip_px_t color) {   
+    tulip_px_t old_color = display_get_bg_pixel_px(x,y);  
     floodFillScanline(x,y,color, old_color);
 }
 
-void fillRect(int16_t x, int16_t y, int16_t w, int16_t h,  uint16_t color) {
+void fillRect(int16_t x, int16_t y, int16_t w, int16_t h,  tulip_px_t color) {
     // do this H line by line instead
 
     for(int16_t i = y; i < y+h; i++) {
@@ -200,7 +200,7 @@ void fillRect(int16_t x, int16_t y, int16_t w, int16_t h,  uint16_t color) {
     //}
 }
 
-void drawCircle(short x0, short y0, short r, unsigned short color) {
+void drawCircle(short x0, short y0, short r, tulip_px_t color) {
 /* Draw a circle outline with center (x0,y0) and radius r, with given color
  * Parameters:
  *      x0: x-coordinate of center of circle. The top-left of the screen
@@ -245,7 +245,7 @@ void drawCircle(short x0, short y0, short r, unsigned short color) {
 }
 
 void drawCircleHelper( short x0, short y0,
-               short r, unsigned char cornername, unsigned short color) {
+               short r, unsigned char cornername, tulip_px_t color) {
 // Helper function for drawing circles and circular objects
   short f     = 1 - r;
   short ddF_x = 1;
@@ -281,7 +281,7 @@ void drawCircleHelper( short x0, short y0,
   }
 }
 
-void fillCircle(short x0, short y0, short r, unsigned short color) {
+void fillCircle(short x0, short y0, short r, tulip_px_t color) {
 /* Draw a filled circle with center (x0,y0) and radius r, with given color
  * Parameters:
  *      x0: x-coordinate of center of circle. The top-left of the screen
@@ -297,7 +297,7 @@ void fillCircle(short x0, short y0, short r, unsigned short color) {
 }
 
 void fillCircleHelper(short x0, short y0, short r,
-    unsigned char cornername, short delta, unsigned short color) {
+    unsigned char cornername, short delta, tulip_px_t color) {
 // Helper function for drawing filled circles
   short f     = 1 - r;
   short ddF_x = 1;
@@ -329,7 +329,7 @@ void fillCircleHelper(short x0, short y0, short r,
 // Bresenham's algorithm - thx wikpedia
 void drawLine(short x0, short y0,
                 short x1, short y1,
-                unsigned short color) {
+                tulip_px_t color) {
 /* Draw a straight line from (x0,y0) to (x1,y1) with given color
  * Parameters:
  *      x0: x-coordinate of starting point of line. The x-coordinate of
@@ -381,7 +381,7 @@ void drawLine(short x0, short y0,
 }
 
 // Draw a rectangle
-void drawRect(short x, short y, short w, short h, unsigned short color) {
+void drawRect(short x, short y, short w, short h, tulip_px_t color) {
 /* Draw a rectangle outline with top left vertex (x,y), width w
  * and height h at given color
  * Parameters:
@@ -402,7 +402,7 @@ void drawRect(short x, short y, short w, short h, unsigned short color) {
 
 // Draw a rounded rectangle
 void drawRoundRect(short x, short y, short w, short h,
-        short r, unsigned short color) {
+        short r, tulip_px_t color) {
 /* Draw a rounded rectangle outline with top left vertex (x,y), width w,
  * height h and radius of curvature r at given color
  * Parameters:
@@ -429,7 +429,7 @@ void drawRoundRect(short x, short y, short w, short h,
 
 // Fill a rounded rectangle
 void fillRoundRect(short x, short y, short w,
-                 short h, short r, unsigned short color) {
+                 short h, short r, tulip_px_t color) {
   // smarter version
   fillRect(x+r, y, w-2*r, h, color);
 
@@ -441,7 +441,7 @@ void fillRoundRect(short x, short y, short w,
 // Draw a triangle
 void drawTriangle(short x0, short y0,
                 short x1, short y1,
-                short x2, short y2, unsigned short color) {
+                short x2, short y2, tulip_px_t color) {
 /* Draw a triangle outline with vertices (x0,y0),(x1,y1),(x2,y2) with given color
  * Parameters:
  *      x0: x-coordinate of one of the 3 vertices
@@ -461,7 +461,7 @@ void drawTriangle(short x0, short y0,
 // Fill a triangle
 void fillTriangle ( short x0, short y0,
                   short x1, short y1,
-                  short x2, short y2, unsigned short color) {
+                  short x2, short y2, tulip_px_t color) {
 /* Draw a filled triangle with vertices (x0,y0),(x1,y1),(x2,y2) with given color
  * Parameters:
  *      x0: x-coordinate of one of the 3 vertices
@@ -546,7 +546,7 @@ void fillTriangle ( short x0, short y0,
   }
 }
 
-void plotQuadBezierSeg(int x0, int y0, int x1, int y1, int x2, int y2, uint8_t pal_idx) {                            
+void plotQuadBezierSeg(int x0, int y0, int x1, int y1, int x2, int y2, tulip_px_t pal_idx) {                            
   int sx = x2-x1, sy = y2-y1;
   long xx = x0-x1, yy = y0-y1, xy;         /* relative values for checks */
   double dx, dy, err, cur = xx*sy-yy*sx;                    /* curvature */
@@ -578,7 +578,7 @@ void plotQuadBezierSeg(int x0, int y0, int x1, int y1, int x2, int y2, uint8_t p
   drawLine(x0,y0, x2,y2, pal_idx);                  /* plot remaining part to end */
 }  
 
-void plotQuadBezier(int x0, int y0, int x1, int y1, int x2, int y2, uint8_t pal_idx)
+void plotQuadBezier(int x0, int y0, int x1, int y1, int x2, int y2, tulip_px_t pal_idx)
 {                                          /* plot any quadratic Bezier curve */
    int x = x0-x1, y = y0-y1;
    double t = x0-2*x1+x2, r;
@@ -611,7 +611,7 @@ void plotQuadBezier(int x0, int y0, int x1, int y1, int x2, int y2, uint8_t pal_
 }
 
 
-void plot_basic_bezier (int x0, int y0, int x1, int y1, int x2, int y2, uint8_t pal_idx) {                            
+void plot_basic_bezier (int x0, int y0, int x1, int y1, int x2, int y2, tulip_px_t pal_idx) {                            
     int sx = x0 < x2 ? 1 : -1;
     int sy = y0 < y2 ? 1 : -1; /* step direction */
     int cur = sx * sy *((x0 - x1) * (y2 - y1) - (x2 - x1) * (y0 - y1)); /* curvature */

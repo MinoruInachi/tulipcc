@@ -2,6 +2,31 @@
 
 #ifndef __DISPLAYH__
 #define __DISPLAYH__
+#include <stdint.h>
+// Before the includes: ui.h pulls in bresenham.h, whose prototypes need the
+// pixel type, and it gets here through this header's own include guard.
+// The BG plane's pixel format. Every board but the Tab5 keeps the 8-bit RGB332
+// palette its RGB panel scans out directly. The Tab5's MIPI-DSI panel takes
+// RGB565 and its compositor was expanding the palette on the way out anyway, so
+// there the plane holds the native 16-bit pixel: LVGL's antialiased text and the
+// camera preview land in their own colours instead of the nearest of 256.
+//
+// The Python API keeps the 0-255 palette index everywhere (PX() expands one to
+// the native pixel, px_to_pal() rounds one back), so a program written for the
+// palette draws the same on both. On a 16-bit board a colour argument can also
+// be an (r, g, b) tuple -- see px_from_rgb().
+#if defined(TAB5)
+#define TULIP_RGB565
+#else
+#define RGB332
+#endif
+
+#ifdef TULIP_RGB565
+typedef uint16_t tulip_px_t;
+#else
+typedef uint8_t tulip_px_t;
+#endif
+
 #include <stdio.h>
 #include <time.h>
 #include <string.h>
@@ -11,7 +36,6 @@
 #include "ui.h"
 #include <inttypes.h>
 #include "lvgl.h"
-#define RGB332
 
 #if defined(ESP_PLATFORM) && !defined(TAB5)
 #include "esp32s3_display.h"
@@ -25,11 +49,13 @@ void esp_display_set_clock(uint8_t mhz);
 #define IRAM_ATTR
 #endif
 
+// A palette index: the default BG fill, and what bg_clear() falls back to.
 extern uint8_t bg_pal_color;
-extern uint8_t tfb_fg_pal_color;
-extern uint8_t tfb_bg_pal_color;
-extern uint8_t ansi_active_bg_color; 
-extern uint8_t ansi_active_fg_color; 
+// Native pixels, since they are what gets written into TFBfg/TFBbg.
+extern tulip_px_t tfb_fg_pal_color;
+extern tulip_px_t tfb_bg_pal_color;
+extern tulip_px_t ansi_active_bg_color; 
+extern tulip_px_t ansi_active_fg_color; 
 extern int16_t ansi_active_format;
 
 #define TULIP_TEAL 9
@@ -65,9 +91,11 @@ void display_set_clock(uint8_t mhz) ;
 uint8_t lvgl_focused();
 
 void display_set_bg_pixel_pal(uint16_t x, uint16_t y, uint8_t pal_idx);
+void display_set_bg_pixel_px(uint16_t x, uint16_t y, tulip_px_t px);
 void display_set_bg_pixel(uint16_t x, uint16_t y, uint8_t r, uint8_t g, uint8_t b);
 void display_get_bg_pixel(uint16_t x, uint16_t y, uint8_t *r, uint8_t *g, uint8_t *b);
 uint8_t display_get_bg_pixel_pal(uint16_t x, uint16_t y);
+tulip_px_t display_get_bg_pixel_px(uint16_t x, uint16_t y);
 void display_invert_bg(uint16_t x, uint16_t y, uint16_t w, uint16_t h) ;
 
 void display_get_bg_bitmap_raw(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint8_t *data);
@@ -79,7 +107,7 @@ void display_bg_bitmap_blit_alpha(uint16_t x,uint16_t y,uint16_t w,uint16_t h,ui
 void display_load_sprite_rgba(uint32_t mem_pos, uint32_t len, uint8_t* data);
 void display_load_sprite_raw(uint32_t mem_pos, uint32_t len, uint8_t* data);
 void display_screenshot(char * screenshot_fn, int16_t x, int16_t y, int16_t w, int16_t h);
-void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, uint8_t fg_color, uint8_t bg_color);
+void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, tulip_px_t fg_color, tulip_px_t bg_color);
 // The console driven as a terminal: cursor addressing, a scroll region, an
 // alternate screen, and answers to send back. See "The terminal" in display.c.
 void display_term_start(uint8_t reset);
@@ -105,6 +133,21 @@ bool display_frame_done_generic();
 void display_swap();
 uint8_t rgb565to332(uint16_t rgb565);
 uint8_t color_332(uint8_t red, uint8_t green, uint8_t blue);
+// Between the 0-255 palette and the plane's native pixel. On an RGB332 board
+// these are the identity and r,g,b packs to 3-3-2; on a 16-bit board a palette
+// index expands by unpack_rgb_332_repeat() -- the bit replication Tulip Desktop
+// and the web build show the palette with -- and ui.pal_to_lv() expands it the
+// same way there, so a colour picked from the palette is the same pixel whether
+// Tulip or LVGL drew it.
+tulip_px_t pal_to_px(uint8_t pal_idx);
+uint8_t px_to_pal(tulip_px_t px);
+tulip_px_t px_from_rgb(uint8_t r, uint8_t g, uint8_t b);
+void px_to_rgb(tulip_px_t px, uint8_t *r, uint8_t *g, uint8_t *b);
+#ifdef TULIP_RGB565
+#define PX(pal_idx) pal_to_px(pal_idx)
+#else
+#define PX(pal_idx) ((tulip_px_t)(pal_idx))
+#endif
 void display_teardown(void);
 
 uint8_t check_dim_xy(uint16_t x, uint16_t y);
@@ -196,18 +239,20 @@ extern uint16_t PIXEL_CLOCK_MHZ;
 #define CHECK_BIT(var,pos) ((var) & (1<<(pos)))
 
 
-#ifdef RGB332
-#define BYTES_PER_PIXEL 1
-#else
+#ifdef TULIP_RGB565
 #define BYTES_PER_PIXEL 2
+// The transparent pixel of the overlay planes (TFB, sprites, LVGL). It is what
+// palette entry 0x55 expands to (see pal_to_px), so the 0x55 that programs and
+// ui.py already use for "see through" keeps meaning that -- and it is exactly
+// the RGB565 LVGL paints for ui.pal_to_lv(0x55), which is how a transparent
+// LVGL screen is told apart from a painted one in lv_flush_cb_8b().
+#define ALPHA 0x4daa
+#else
+#define BYTES_PER_PIXEL 1
+#define ALPHA 0x55
 #endif
 
-
-
 #define FLASH_FRAMES 12
-#define ALPHA0 0x55
-#define ALPHA1 0x53
-#define ALPHA 0x55
 
 #define FORMAT_INVERSE 0x80 
 #define FORMAT_UNDERLINE 0x40
@@ -229,7 +274,7 @@ extern uint8_t tfb_x_col;
 void display_tfb_refresh_cursor(void);
 // The cursor colour while the IME holds the keyboard. Shared by the console and
 // the editor so the indicator is the same wherever the typing is going.
-#define IME_CURSOR_COLOR color_332(255,160,0) 
+#define IME_CURSOR_COLOR px_from_rgb(255,160,0) 
 extern int32_t vsync_count;
 extern uint8_t brightness;
 extern float reported_fps;
@@ -252,9 +297,12 @@ extern uint8_t *collision_bitfield;
 extern const uint16_t rgb332_rgb565_i[256];
 // RAM for sprites and background FB
 extern uint8_t *sprite_ids;  // IRAM
-extern uint8_t *sprite_ram; // in IRAM
-extern uint8_t * bg; // in SPIRAM
-extern uint8_t * bg_tfb; // in SPIRAM
+// Pixels, not bytes: sprite_mem[] and the mem_pos the Python side juggles index
+// this by pixel, and SPRITE_RAM_BYTES counts pixels too (the name predates the
+// 16-bit plane). Allocated at SPRITE_RAM_BYTES*sizeof(tulip_px_t).
+extern tulip_px_t *sprite_ram; // in IRAM
+extern tulip_px_t * bg; // in SPIRAM
+extern tulip_px_t * bg_tfb; // in SPIRAM
 extern uint16_t *sprite_x_px;//[SPRITES]; 
 extern uint16_t *sprite_y_px;//[SPRITES]; 
 extern uint16_t *sprite_w_px;//[SPRITES]; 
@@ -265,8 +313,8 @@ extern uint32_t *sprite_mem;//[SPRITES];
 // than 256 of them, and TFB_WIDE_CONT marks the right half of a fullwidth cell.
 // 0 still means "nothing here", which is also how a row's end is found.
 extern uint16_t *TFB;//[TFB_ROWS][TFB_COLS];
-extern uint8_t *TFBfg;//[TFB_ROWS][TFB_COLS];
-extern uint8_t *TFBbg;//[TFB_ROWS][TFB_COLS];
+extern tulip_px_t *TFBfg;//[TFB_ROWS][TFB_COLS];
+extern tulip_px_t *TFBbg;//[TFB_ROWS][TFB_COLS];
 extern uint8_t *TFBf;//[TFB_ROWS][TFB_COLS];
 extern int16_t *x_offsets;//[V_RES];
 extern int16_t *y_offsets;//[V_RES];

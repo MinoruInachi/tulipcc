@@ -429,23 +429,73 @@ static void tab5_require_xy(int x, int y) {
     }
 }
 
+// A colour argument to anything that draws. The BG plane on this board is
+// RGB565, so besides the 0-255 palette index every Tulip takes -- expanded to
+// the pixel the palette entry names, the same one LVGL paints for it -- an
+// (r, g, b) tuple or list of 0-255 picks the colour directly. An int outside
+// 0-255 is refused rather than read as a raw pixel: the two ranges overlap, and
+// a value that silently meant a palette index on one board and a dark blue on
+// another is exactly the bug this avoids.
+static tulip_px_t tab5_color_arg(mp_obj_t obj) {
+    if (mp_obj_is_int(obj)) {
+        mp_int_t v = mp_obj_get_int(obj);
+        if (v < 0 || v > 255) {
+            mp_raise_ValueError(MP_ERROR_TEXT("color must be a palette index 0-255 or an (r, g, b) tuple"));
+        }
+        return PX((uint8_t)v);
+    }
+    if (mp_obj_is_type(obj, &mp_type_tuple) || mp_obj_is_type(obj, &mp_type_list)) {
+        size_t len;
+        mp_obj_t *items;
+        mp_obj_get_array(obj, &len, &items);
+        if (len == 3) {
+            mp_int_t r = mp_obj_get_int(items[0]);
+            mp_int_t g = mp_obj_get_int(items[1]);
+            mp_int_t b = mp_obj_get_int(items[2]);
+            if (r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255) {
+                mp_raise_ValueError(MP_ERROR_TEXT("r, g, b must each be 0-255"));
+            }
+            return px_from_rgb((uint8_t)r, (uint8_t)g, (uint8_t)b);
+        }
+    }
+    mp_raise_TypeError(MP_ERROR_TEXT("color must be a palette index 0-255 or an (r, g, b) tuple"));
+}
+
 static mp_obj_t tulip_bg_pixel(size_t n_args, const mp_obj_t *args) {
     tab5_require_bg();
     int x = mp_obj_get_int(args[0]);
     int y = mp_obj_get_int(args[1]);
     tab5_require_xy(x, y);
     if (n_args == 3) {
-        display_set_bg_pixel_pal((uint16_t)x, (uint16_t)y, (uint8_t)mp_obj_get_int(args[2]));
+        display_set_bg_pixel_px((uint16_t)x, (uint16_t)y, tab5_color_arg(args[2]));
         return mp_const_none;
     }
+    // The nearest palette entry, as on every Tulip; bg_pixel_rgb() reads the
+    // pixel exactly.
     return mp_obj_new_int(display_get_bg_pixel_pal((uint16_t)x, (uint16_t)y));
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_pixel_obj, 2, 3, tulip_bg_pixel);
 
+// (r, g, b) = tulip.bg_pixel_rgb(x, y): the pixel as the panel shows it,
+// 5-6-5 widened to 8 bits. The only exact reading of a pixel set from a tuple.
+static mp_obj_t tulip_bg_pixel_rgb(mp_obj_t x_obj, mp_obj_t y_obj) {
+    tab5_require_bg();
+    int x = mp_obj_get_int(x_obj);
+    int y = mp_obj_get_int(y_obj);
+    tab5_require_xy(x, y);
+    uint8_t r, g, b;
+    display_get_bg_pixel((uint16_t)x, (uint16_t)y, &r, &g, &b);
+    mp_obj_t tuple[] = { mp_obj_new_int(r), mp_obj_new_int(g), mp_obj_new_int(b) };
+    return mp_obj_new_tuple(3, tuple);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(tulip_bg_pixel_rgb_obj, tulip_bg_pixel_rgb);
+
 static mp_obj_t tulip_bg_clear(size_t n_args, const mp_obj_t *args) {
     tab5_require_bg();
-    uint8_t color = n_args == 0 ? bg_pal_color : (uint8_t)mp_obj_get_int(args[0]);
-    memset(bg, color, (H_RES + OFFSCREEN_X_PX) * (V_RES + OFFSCREEN_Y_PX));
+    tulip_px_t color = n_args == 0 ? PX(bg_pal_color) : tab5_color_arg(args[0]);
+    const size_t count = (size_t)(H_RES + OFFSCREEN_X_PX) * (V_RES + OFFSCREEN_Y_PX);
+    for (size_t i = 0; i < count; i++) bg[i] = color;
+    display_mark_dirty();
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_clear_obj, 0, 1, tulip_bg_clear);
@@ -460,7 +510,8 @@ static mp_obj_t tulip_bg_bitmap(size_t n_args, const mp_obj_t *args) {
         y + h > V_RES + OFFSCREEN_Y_PX) {
         mp_raise_ValueError(MP_ERROR_TEXT("bitmap rectangle out of range"));
     }
-    size_t length = (size_t)w * (size_t)h;
+    // Native pixels: w*h*BYTES_PER_PIXEL bytes, RGB565 little-endian here.
+    size_t length = (size_t)w * (size_t)h * BYTES_PER_PIXEL;
     if (n_args == 5) {
         mp_buffer_info_t buffer;
         mp_get_buffer_raise(args[4], &buffer, MP_BUFFER_READ);
@@ -554,7 +605,7 @@ static mp_obj_t tulip_bg_bezier(size_t n_args, const mp_obj_t *args) {
     plotQuadBezier(mp_obj_get_int(args[0]), mp_obj_get_int(args[1]),
                    mp_obj_get_int(args[2]), mp_obj_get_int(args[3]),
                    mp_obj_get_int(args[4]), mp_obj_get_int(args[5]),
-                   mp_obj_get_int(args[6]));
+                   tab5_color_arg(args[6]));
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_bezier_obj, 7, 7, tulip_bg_bezier);
@@ -563,7 +614,7 @@ static mp_obj_t tulip_bg_line(size_t n_args, const mp_obj_t *args) {
     uint16_t width = n_args == 6 ? mp_obj_get_int(args[5]) : 1;
     drawLine_scanline(mp_obj_get_int(args[0]), mp_obj_get_int(args[1]),
                       mp_obj_get_int(args[2]), mp_obj_get_int(args[3]),
-                      mp_obj_get_int(args[4]), width);
+                      tab5_color_arg(args[4]), width);
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_line_obj, 5, 6, tulip_bg_line);
@@ -574,7 +625,7 @@ static mp_obj_t tulip_bg_roundrect(size_t n_args, const mp_obj_t *args) {
     int16_t w = mp_obj_get_int(args[2]);
     int16_t h = mp_obj_get_int(args[3]);
     int16_t radius = mp_obj_get_int(args[4]);
-    uint8_t color = mp_obj_get_int(args[5]);
+    tulip_px_t color = tab5_color_arg(args[5]);
     if (n_args == 7 && mp_obj_is_true(args[6])) fillRoundRect(x, y, w, h, radius, color);
     else drawRoundRect(x, y, w, h, radius, color);
     return mp_const_none;
@@ -586,7 +637,7 @@ static mp_obj_t tulip_bg_rect(size_t n_args, const mp_obj_t *args) {
     int16_t y = mp_obj_get_int(args[1]);
     int16_t w = mp_obj_get_int(args[2]);
     int16_t h = mp_obj_get_int(args[3]);
-    uint8_t color = mp_obj_get_int(args[4]);
+    tulip_px_t color = tab5_color_arg(args[4]);
     if (n_args == 6 && mp_obj_is_true(args[5])) fillRect(x, y, w, h, color);
     else drawRect(x, y, w, h, color);
     return mp_const_none;
@@ -597,7 +648,7 @@ static mp_obj_t tulip_bg_circle(size_t n_args, const mp_obj_t *args) {
     int16_t x = mp_obj_get_int(args[0]);
     int16_t y = mp_obj_get_int(args[1]);
     int16_t radius = mp_obj_get_int(args[2]);
-    uint8_t color = mp_obj_get_int(args[3]);
+    tulip_px_t color = tab5_color_arg(args[3]);
     if (n_args == 5 && mp_obj_is_true(args[4])) fillCircle(x, y, radius, color);
     else drawCircle(x, y, radius, color);
     return mp_const_none;
@@ -611,7 +662,7 @@ static mp_obj_t tulip_bg_triangle(size_t n_args, const mp_obj_t *args) {
     int16_t y1 = mp_obj_get_int(args[3]);
     int16_t x2 = mp_obj_get_int(args[4]);
     int16_t y2 = mp_obj_get_int(args[5]);
-    uint8_t color = mp_obj_get_int(args[6]);
+    tulip_px_t color = tab5_color_arg(args[6]);
     if (n_args == 8 && mp_obj_is_true(args[7])) fillTriangle(x0, y0, x1, y1, x2, y2, color);
     else drawTriangle(x0, y0, x1, y1, x2, y2, color);
     return mp_const_none;
@@ -619,7 +670,7 @@ static mp_obj_t tulip_bg_triangle(size_t n_args, const mp_obj_t *args) {
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_bg_triangle_obj, 7, 8, tulip_bg_triangle);
 
 static mp_obj_t tulip_bg_fill(mp_obj_t x, mp_obj_t y, mp_obj_t color) {
-    fill(mp_obj_get_int(x), mp_obj_get_int(y), mp_obj_get_int(color));
+    fill(mp_obj_get_int(x), mp_obj_get_int(y), tab5_color_arg(color));
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_3(tulip_bg_fill_obj, tulip_bg_fill);
@@ -628,7 +679,7 @@ static mp_obj_t tulip_bg_str(size_t n_args, const mp_obj_t *args) {
     const char *text = mp_obj_str_get_str(args[0]);
     uint16_t x = mp_obj_get_int(args[1]);
     uint16_t y = mp_obj_get_int(args[2]);
-    uint8_t color = mp_obj_get_int(args[3]);
+    tulip_px_t color = tab5_color_arg(args[3]);
     uint8_t font = mp_obj_get_int(args[4]);
     if (n_args == 7) {
         return mp_obj_new_int(draw_new_str(text, x, y, color, font,
@@ -737,28 +788,37 @@ static size_t tab5_sprite_index(mp_obj_t sprite_obj) {
     return (size_t)sprite;
 }
 
-static size_t tab5_sprite_mem_pos(mp_obj_t mem_obj, size_t length) {
+// mem_pos and `pixels` count pixels of sprite RAM (SPRITE_RAM_BYTES is the
+// pixel count too, whatever its name says).
+static size_t tab5_sprite_mem_pos(mp_obj_t mem_obj, size_t pixels) {
     int mem_pos = mp_obj_get_int(mem_obj);
-    if (mem_pos < 0 || (size_t)mem_pos > SPRITE_RAM_BYTES || length > SPRITE_RAM_BYTES - (size_t)mem_pos) {
+    if (mem_pos < 0 || (size_t)mem_pos > SPRITE_RAM_BYTES || pixels > SPRITE_RAM_BYTES - (size_t)mem_pos) {
         mp_raise_ValueError(MP_ERROR_TEXT("sprite RAM range out of bounds"));
     }
     return (size_t)mem_pos;
 }
 
+// Raw sprite bytes are native pixels, like bg_bitmap()'s: BYTES_PER_PIXEL
+// bytes each, so a bg_bitmap() of w x h goes straight in and takes w*h of
+// sprite RAM.
 static mp_obj_t tulip_sprite_bitmap(mp_obj_t data_or_pos, mp_obj_t pos_or_length) {
     tab5_require_sprites_ready();
     mp_buffer_info_t bitmap;
     if (mp_get_buffer(data_or_pos, &bitmap, MP_BUFFER_READ)) {
-        size_t mem_pos = tab5_sprite_mem_pos(pos_or_length, bitmap.len);
+        if (bitmap.len % BYTES_PER_PIXEL != 0) {
+            mp_raise_ValueError(MP_ERROR_TEXT("sprite bitmap must be whole pixels"));
+        }
+        size_t mem_pos = tab5_sprite_mem_pos(pos_or_length, bitmap.len / BYTES_PER_PIXEL);
         memcpy(sprite_ram + mem_pos, bitmap.buf, bitmap.len);
+        display_mark_dirty();
         return mp_obj_new_int_from_uint(bitmap.len);
     }
     int length = mp_obj_get_int(pos_or_length);
-    if (length < 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("sprite bitmap length must be non-negative"));
+    if (length < 0 || length % BYTES_PER_PIXEL != 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("sprite bitmap length must be whole pixels"));
     }
-    size_t mem_pos = tab5_sprite_mem_pos(data_or_pos, (size_t)length);
-    return mp_obj_new_bytes(sprite_ram + mem_pos, (size_t)length);
+    size_t mem_pos = tab5_sprite_mem_pos(data_or_pos, (size_t)length / BYTES_PER_PIXEL);
+    return mp_obj_new_bytes((const uint8_t *)(sprite_ram + mem_pos), (size_t)length);
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(tulip_sprite_bitmap_obj, tulip_sprite_bitmap);
 
@@ -820,7 +880,7 @@ static mp_obj_t tulip_sprite_png(mp_obj_t png_obj, mp_obj_t mem_obj) {
     }
     for (size_t pixel = 0; pixel < pixels; pixel++) {
         const uint8_t *rgba = image + pixel * 4;
-        sprite_ram[mem_pos + pixel] = rgba[3] == 0 ? ALPHA : color_332(rgba[0], rgba[1], rgba[2]);
+        sprite_ram[mem_pos + pixel] = rgba[3] == 0 ? ALPHA : px_from_rgb(rgba[0], rgba[1], rgba[2]);
     }
     free_caps(image);
 
@@ -993,8 +1053,8 @@ static mp_obj_t tulip_tfb_str(size_t n_args, const mp_obj_t *args) {
         mp_obj_t tuple[] = {
             mp_obj_new_str(utf8, strlen(utf8)),
             mp_obj_new_int(TFBf[offset]),
-            mp_obj_new_int(TFBfg[offset]),
-            mp_obj_new_int(TFBbg[offset]),
+            mp_obj_new_int(px_to_pal(TFBfg[offset])),
+            mp_obj_new_int(px_to_pal(TFBbg[offset])),
         };
         return mp_obj_new_tuple(MP_ARRAY_SIZE(tuple), tuple);
     }
@@ -1003,10 +1063,18 @@ static mp_obj_t tulip_tfb_str(size_t n_args, const mp_obj_t *args) {
     // two cells, so the byte length is the wrong count to spread attributes over.
     const char *text = mp_obj_str_get_str(args[2]);
     uint16_t cells = display_tfb_place_str(text, x, y);
+    // -1 (or nothing) leaves an attribute alone; a palette index or (r, g, b)
+    // tuple sets it, as for the BG drawing calls.
+    bool set_f = n_args > 3 && mp_obj_get_int(args[3]) >= 0;
+    bool set_fg = n_args > 4 && !(mp_obj_is_int(args[4]) && mp_obj_get_int(args[4]) < 0);
+    bool set_bg = n_args > 5 && !(mp_obj_is_int(args[5]) && mp_obj_get_int(args[5]) < 0);
+    uint8_t f = set_f ? (uint8_t)mp_obj_get_int(args[3]) : 0;
+    tulip_px_t fg = set_fg ? tab5_color_arg(args[4]) : 0;
+    tulip_px_t bgc = set_bg ? tab5_color_arg(args[5]) : 0;
     for (uint16_t i = 0; i < cells; i++) {
-        if (n_args > 3 && mp_obj_get_int(args[3]) >= 0) TFBf[offset + i] = mp_obj_get_int(args[3]);
-        if (n_args > 4 && mp_obj_get_int(args[4]) >= 0) TFBfg[offset + i] = mp_obj_get_int(args[4]);
-        if (n_args > 5 && mp_obj_get_int(args[5]) >= 0) TFBbg[offset + i] = mp_obj_get_int(args[5]);
+        if (set_f) TFBf[offset + i] = f;
+        if (set_fg) TFBfg[offset + i] = fg;
+        if (set_bg) TFBbg[offset + i] = bgc;
     }
     display_tfb_update(y);
     return mp_const_none;
@@ -1802,13 +1870,13 @@ static mp_obj_t tulip_boot_status(size_t n_args, const mp_obj_t *args) {
     static const char header[] =
         "TAB5 SAFE MODE\n"
         "The UI did not start. Connect USB serial for the log.\n";
-    display_tfb_str((unsigned char *)header, (uint16_t)(sizeof(header) - 1), 0, 255, 9);
+    display_tfb_str((unsigned char *)header, (uint16_t)(sizeof(header) - 1), 0, PX(255), PX(9));
 
     if (n_args == 1) {
         size_t len = 0;
         const char *detail = mp_obj_str_get_data(args[0], &len);
-        display_tfb_str((unsigned char *)detail, (uint16_t)len, 0, 251, 9);
-        display_tfb_str((unsigned char *)"\n", 1, 0, 251, 9);
+        display_tfb_str((unsigned char *)detail, (uint16_t)len, 0, PX(251), PX(9));
+        display_tfb_str((unsigned char *)"\n", 1, 0, PX(251), PX(9));
     }
     return mp_const_none;
 }
@@ -2202,6 +2270,7 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_brightness), MP_ROM_PTR(&tulip_brightness_obj) },
     { MP_ROM_QSTR(MP_QSTR_int_screenshot), MP_ROM_PTR(&tulip_int_screenshot_obj) },
     { MP_ROM_QSTR(MP_QSTR_bg_pixel), MP_ROM_PTR(&tulip_bg_pixel_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bg_pixel_rgb), MP_ROM_PTR(&tulip_bg_pixel_rgb_obj) },
     { MP_ROM_QSTR(MP_QSTR_bg_clear), MP_ROM_PTR(&tulip_bg_clear_obj) },
     { MP_ROM_QSTR(MP_QSTR_bg_bitmap), MP_ROM_PTR(&tulip_bg_bitmap_obj) },
     { MP_ROM_QSTR(MP_QSTR_bg_blit), MP_ROM_PTR(&tulip_bg_blit_obj) },

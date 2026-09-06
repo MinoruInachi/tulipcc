@@ -78,8 +78,8 @@ static const char *TAG = "tab5_camera";
 #define CAM_TASK_PRIORITY (tskIDLE_PRIORITY + 2)
 #define CAM_TASK_CORE 0
 
-#if BYTES_PER_PIXEL != 1
-#error "camera_tab5.c writes the BG plane as RGB332"
+#ifndef TULIP_RGB565
+#error "camera_tab5.c writes the BG plane as native RGB565"
 #endif
 
 static bool s_video_inited = false;
@@ -111,11 +111,6 @@ static int64_t s_fps_window_start_us = 0;
 static bool s_hflip = false;
 static bool s_vflip = false;
 
-// RGB565 -> RGB332 through a 64 KB table, built once from the same color_332()
-// the rest of the BG drawing uses, so a camera pixel lands on the same palette
-// entry a bg_png() of the same colour would.
-static uint8_t *s_lut_332 = NULL;
-
 static jpeg_encoder_handle_t s_jpeg = NULL;
 
 static const char *sensor_name(uint16_t pid)
@@ -125,25 +120,6 @@ static const char *sensor_name(uint16_t pid)
     case 0: return "none";
     default: return "unknown";
     }
-}
-
-static esp_err_t ensure_lut(void)
-{
-    if (s_lut_332 != NULL) {
-        return ESP_OK;
-    }
-    uint8_t *lut = malloc_caps(65536, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (lut == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-    for (uint32_t v = 0; v < 65536; v++) {
-        uint8_t r5 = (v >> 11) & 0x1f;
-        uint8_t g6 = (v >> 5) & 0x3f;
-        uint8_t b5 = v & 0x1f;
-        lut[v] = color_332((r5 << 3) | (r5 >> 2), (g6 << 2) | (g6 >> 4), (b5 << 3) | (b5 >> 2));
-    }
-    s_lut_332 = lut;
-    return ESP_OK;
 }
 
 // One V4L2 control by id. esp_video routes anything but its own
@@ -623,7 +599,6 @@ esp_err_t tab5_camera_draw_bg(int x, int y, int w, int h)
         x + w > H_RES + OFFSCREEN_X_PX || y + h > V_RES + OFFSCREEN_Y_PX) {
         return ESP_ERR_INVALID_ARG;
     }
-    ESP_RETURN_ON_ERROR(ensure_lut(), TAG, "lut");
     const uint16_t *src;
     ESP_RETURN_ON_ERROR(frame_acquire(&src), TAG, "no frame");
     uint16_t *xmap = NULL;
@@ -634,18 +609,17 @@ esp_err_t tab5_camera_draw_bg(int x, int y, int w, int h)
             return ESP_ERR_NO_MEM;
         }
     }
+    // The ISP's RGB565 is the plane's own format, so a full-width row is one
+    // copy and a scaled one is a gather; no colour conversion either way.
     const size_t stride = (size_t)(H_RES + OFFSCREEN_X_PX);
-    const uint8_t *lut = s_lut_332;
     for (int j = 0; j < h; j++) {
         const uint16_t *row = src + ((size_t)j * CAM_H / (size_t)h) * CAM_W;
-        uint8_t *out = bg + ((size_t)(y + j) * stride + (size_t)x);
+        tulip_px_t *out = bg + ((size_t)(y + j) * stride + (size_t)x);
         if (xmap == NULL) {
-            for (int i = 0; i < w; i++) {
-                out[i] = lut[row[i]];
-            }
+            memcpy(out, row, (size_t)w * sizeof(tulip_px_t));
         } else {
             for (int i = 0; i < w; i++) {
-                out[i] = lut[row[xmap[i]]];
+                out[i] = row[xmap[i]];
             }
         }
     }

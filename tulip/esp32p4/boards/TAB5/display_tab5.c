@@ -84,16 +84,17 @@ static bool tab5_scaffold_bounce_empty(void *bounce_buf, int pos_px, int len_byt
         return false;
     }
 
-    uint8_t *out = (uint8_t *)bounce_buf;
+    uint16_t *out = (uint16_t *)bounce_buf;
     const int row0 = pos_px / BSP_LCD_H_RES;
-    const int rows = len_bytes / BSP_LCD_H_RES;
+    const int rows = len_bytes / (BSP_LCD_H_RES * (int)sizeof(uint16_t));
 
     for (int r = 0; r < rows; r++) {
         const int y = row0 + r;
         for (int x = 0; x < BSP_LCD_H_RES; x++) {
-            const uint8_t bar = (uint8_t)((x * 8) / BSP_LCD_H_RES);
-            const uint8_t anim = (uint8_t)((y + (int)(s_bridge_frame_id & 0x1f)) & 0x1f);
-            out[r * BSP_LCD_H_RES + x] = (uint8_t)((bar << 5) | anim);
+            /* Eight red bars, a blue ramp scrolling down them: RGB565. */
+            const uint16_t bar = (uint16_t)((x * 8) / BSP_LCD_H_RES);
+            const uint16_t anim = (uint16_t)((y + (int)(s_bridge_frame_id & 0x1f)) & 0x1f);
+            out[r * BSP_LCD_H_RES + x] = (uint16_t)((bar << 13) | anim);
         }
     }
 
@@ -110,17 +111,13 @@ static void tab5_render_bridge_buffers_deinit(void);
 
 static tab5_render_bounce_empty_fn_t s_render_bounce_empty = tab5_scaffold_bounce_empty;
 static tab5_render_frame_done_fn_t s_render_frame_done = tab5_scaffold_frame_done;
-static uint8_t *s_line332 = NULL;
+/* One chunk of composed rows, RGB565 -- the compositor's own format now that
+ * the BG plane is 16-bit, so nothing is converted between it and the panel. */
 static uint16_t *s_line565 = NULL;
 /* Landscape RGB565 staging image, exactly what Tulip renders (1280x720).
  * The panel is physically portrait, so this gets rotated on the way out. */
 static uint16_t *s_stage565 = NULL;
 static int s_linebuf_width = 0;
-
-/* rgb332 -> rgb565 lookup, built once. The arithmetic version costs three
- * integer divides per pixel, which at 921600 pixels a frame is not affordable. */
-static uint16_t s_rgb332_565[256];
-static bool s_rgb332_565_ready = false;
 
 /* Hardware rotation. The ESP32-P4 PPA does scale/rotate/mirror in a DMA engine,
  * so the CPU never touches the portrait framebuffer. */
@@ -160,7 +157,7 @@ static int s_ppa_stuck_y = -1, s_ppa_stuck_rows = 0, s_ppa_last_y = -1, s_ppa_la
  * Surfaced through tulip.tab5_render_stats() so the cost of a change can be
  * attributed instead of guessed at. */
 static uint32_t s_us_composite = 0;   /* Tulip compositor callbacks */
-static uint32_t s_us_convert = 0;     /* rgb332 -> rgb565 into the staging image */
+static uint32_t s_us_convert = 0;     /* the composed chunk copied into the staging image */
 static uint32_t s_us_rotate = 0;      /* PPA (or CPU fallback) rotation */
 static uint32_t s_us_present = 0;     /* draw_bitmap: cache write-back + fb swap */
 static uint32_t s_us_wait = 0;        /* blocked waiting for the panel */
@@ -292,23 +289,6 @@ void tab5_set_render_provider_with_geometry(tab5_render_bounce_empty_fn_t bounce
     }
 }
 
-static void tab5_build_color_lut(void)
-{
-    if (s_rgb332_565_ready) {
-        return;
-    }
-    for (int i = 0; i < 256; i++) {
-        const uint8_t r3 = (uint8_t)((i >> 5) & 0x07);
-        const uint8_t g3 = (uint8_t)((i >> 2) & 0x07);
-        const uint8_t b2 = (uint8_t)(i & 0x03);
-        const uint16_t r5 = (uint16_t)((r3 * 31) / 7);
-        const uint16_t g6 = (uint16_t)((g3 * 63) / 7);
-        const uint16_t b5 = (uint16_t)((b2 * 31) / 3);
-        s_rgb332_565[i] = (uint16_t)((r5 << 11) | (g6 << 5) | b5);
-    }
-    s_rgb332_565_ready = true;
-}
-
 static bool tab5_render_bridge_buffers_init(void)
 {
     const bool needs_stage_frame = (s_provider_width != BSP_LCD_H_RES || s_provider_height != BSP_LCD_V_RES);
@@ -316,9 +296,7 @@ static bool tab5_render_bridge_buffers_init(void)
     const size_t chunk_bytes = (size_t)s_provider_width * TAB5_BRIDGE_CHUNK_ROWS;
     const size_t px_count = row_bytes > chunk_bytes ? row_bytes : chunk_bytes;
 
-    tab5_build_color_lut();
-
-    if (s_line332 != NULL && s_line565 != NULL) {
+    if (s_line565 != NULL) {
         const bool linebuf_matches = (s_linebuf_width == s_provider_width);
         const bool framebuf_matches = (!needs_stage_frame || s_stage565 != NULL);
         if (linebuf_matches && framebuf_matches) {
@@ -332,21 +310,13 @@ static bool tab5_render_bridge_buffers_init(void)
         tab5_render_bridge_buffers_deinit();
     }
 
-    /* Scratch line buffers are touched per pixel by the CPU; keep them in
-     * internal SRAM so the compositor is not paying PSRAM latency per row. */
-    s_line332 = heap_caps_malloc(px_count, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (s_line332 == NULL) {
-        s_line332 = heap_caps_malloc(px_count, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    }
+    /* The scratch chunk is touched per pixel by the compositor; keep it in
+     * internal SRAM so it is not paying PSRAM latency per pixel. */
     s_line565 = heap_caps_malloc(px_count * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (s_line565 == NULL) {
         s_line565 = heap_caps_malloc(px_count * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
-    if (s_line332 == NULL || s_line565 == NULL) {
-        heap_caps_free(s_line332);
-        heap_caps_free(s_line565);
-        s_line332 = NULL;
-        s_line565 = NULL;
+    if (s_line565 == NULL) {
         s_linebuf_width = 0;
         ESP_LOGE(TAG, "No memory for render bridge buffers");
         return false;
@@ -375,10 +345,8 @@ static bool tab5_render_bridge_buffers_init(void)
 
 static void tab5_render_bridge_buffers_deinit(void)
 {
-    heap_caps_free(s_line332);
     heap_caps_free(s_line565);
     heap_caps_free(s_stage565);
-    s_line332 = NULL;
     s_line565 = NULL;
     s_stage565 = NULL;
     s_linebuf_width = 0;
@@ -399,24 +367,6 @@ static volatile uint32_t s_vsync_count = 0;
 static bool s_display_owned_locally = false;
 static esp_ldo_channel_handle_t s_dsi_phy_pwr_chan = NULL;
 static bsp_lcd_handles_t tab5_lcd_handles;
-
-/* Convert one compositor row (rgb332) into the staging image (rgb565).
- * Straight-line, contiguous destination writes: one cache line fill per 32 px
- * instead of the one-per-pixel that the old in-place rotation forced. */
-static inline void tab5_row332_to_stage565(const uint8_t *src, uint16_t *dst, int width)
-{
-    const uint16_t *lut = s_rgb332_565;
-    int x = 0;
-    for (; x + 4 <= width; x += 4) {
-        dst[x + 0] = lut[src[x + 0]];
-        dst[x + 1] = lut[src[x + 1]];
-        dst[x + 2] = lut[src[x + 2]];
-        dst[x + 3] = lut[src[x + 3]];
-    }
-    for (; x < width; x++) {
-        dst[x] = lut[src[x]];
-    }
-}
 
 /* Rotate the landscape staging image onto a portrait panel framebuffer.
  *
@@ -576,7 +526,7 @@ static void tab5_render_bridge_tick_native(void)
     for (int y = 0; y < BSP_LCD_V_RES; y += TAB5_BRIDGE_CHUNK_ROWS) {
         const int rows = (y + TAB5_BRIDGE_CHUNK_ROWS <= BSP_LCD_V_RES) ? TAB5_BRIDGE_CHUNK_ROWS : (BSP_LCD_V_RES - y);
         const int pixels = BSP_LCD_H_RES * rows;
-        if (!s_render_bounce_empty(s_line332, y * BSP_LCD_H_RES, pixels, NULL)) {
+        if (!s_render_bounce_empty(s_line565, y * BSP_LCD_H_RES, pixels * (int)sizeof(uint16_t), NULL)) {
             ESP_LOGW(TAG, "render bounce callback returned false at y=%d", y);
             s_native_callback_failures++;
             if (s_shared_provider_active) {
@@ -585,7 +535,6 @@ static void tab5_render_bridge_tick_native(void)
             break;
         }
 
-        tab5_row332_to_stage565(s_line332, s_line565, pixels);
         esp_lcd_panel_draw_bitmap(tab5_lcd_handles.panel, 0, y, BSP_LCD_H_RES, y + rows, s_line565);
     }
 
@@ -655,17 +604,17 @@ static void tab5_render_bridge_tick_rotated(int band_y0, int band_y1)
     int64_t t0 = esp_timer_get_time();
 
     /* Work a band of rows at a time. Composing in chunks amortises the
-     * per-call overhead of the Tulip compositor, and converting into an
-     * internal-RAM band before a single bulk copy keeps the scalar LUT loop
-     * off PSRAM -- a per-pixel store straight to PSRAM stalls on the cache
-     * line fetch and was the single most expensive phase of the frame. */
+     * per-call overhead of the Tulip compositor, and composing into an
+     * internal-RAM chunk before one bulk copy keeps its per-pixel overlay
+     * stores off PSRAM -- a per-pixel store straight to PSRAM stalls on the
+     * cache line fetch and was the single most expensive phase of the frame. */
     for (int y = band_y0; y < band_y1; y += TAB5_BRIDGE_CHUNK_ROWS) {
         const int rows = (y + TAB5_BRIDGE_CHUNK_ROWS <= band_y1)
                              ? TAB5_BRIDGE_CHUNK_ROWS
                              : (band_y1 - y);
         const int pixels = s_provider_width * rows;
 
-        if (!s_render_bounce_empty(s_line332, y * s_provider_width, pixels, NULL)) {
+        if (!s_render_bounce_empty(s_line565, y * s_provider_width, pixels * (int)sizeof(uint16_t), NULL)) {
             ESP_LOGW(TAG, "render bounce callback returned false at src y=%d", y);
             s_rotated_callback_failures++;
             if (s_shared_provider_active) {
@@ -675,7 +624,6 @@ static void tab5_render_bridge_tick_rotated(int band_y0, int band_y1)
         }
         const int64_t t1 = esp_timer_get_time();
 
-        tab5_row332_to_stage565(s_line332, s_line565, pixels);
         memcpy(s_stage565 + (size_t)y * s_provider_width, s_line565,
                (size_t)pixels * sizeof(uint16_t));
         const int64_t t2 = esp_timer_get_time();

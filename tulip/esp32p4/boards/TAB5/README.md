@@ -52,6 +52,13 @@ This is documentation for the first scaffolded Tab5 port. The display helper now
 - `storage_tab5.c` intentionally does not call `bsp_spiffs_mount()` or `bsp_sdcard_mount()` during bring-up.
 - Reason: BSP mount helpers pull ESP-IDF FATFS symbols that conflict with MicroPython `lib/oofatfs` (`ff.c` duplicate symbols at link).
 - Any future BSP storage re-enable must first move the port to a single filesystem authority.
+- The partition table is `esp32p4/partitions-8MiBplus-ota.csv`: two 4.5 MiB
+  app slots (`ota_0` at 0x10000, `ota_1` at 0x490000), a 3 MiB `system`
+  (/sys) at 0x910000 and a 3.94 MiB `vfs` (/user) at 0xc10000. The slots grew
+  from 0x3f0000 in September 2026, when the camera stack left 72 KB of app
+  flash; `vfs` paid for it. A device on the old table has to be flashed whole
+  and its /user put back by hand, since the old littlefs sits at an offset the
+  new table does not know.
 
 ## Touch and revision policy (current)
 
@@ -122,6 +129,30 @@ readable instead:
 - For esp32p4 bring-up, `shared_provider_tab5.c` currently provides a temporary implementation of these symbols (1280x720 source) so the rotated shared-provider path is exercised end-to-end.
 - This temporary provider is a transition step; it will be replaced by the actual Tulip shared renderer integration.
 
+## Display colour (current)
+
+The BG plane, the TFB plane, the sprites and LVGL's overlay are all native
+RGB565 here (`TULIP_RGB565` in `shared/display.h`; every other board keeps
+RGB332). The compositor hands the bridge finished 16-bit rows, so the
+332-to-565 lookup the bridge used to run per pixel is gone, and so is the
+64 KB table the camera used to drop its RGB565 frames to the palette --
+`camera_bg()` is a row copy now. LVGL's antialiased fonts no longer fringe
+blue, because its RGB565 goes into the overlay untouched instead of being
+rounded to the nearest of 256 colours.
+
+The Python API is unchanged for palette programs: every colour argument still
+takes the 0-255 index, expanded by replicating its bits down (the same palette
+Tulip Desktop shows; `ui.pal_to_lv()` does the same sum for LVGL here), so
+palette entry 0x55 is still the transparent colour (`ALPHA`, 0x4daa as a
+pixel). Colour arguments also take an `(r, g, b)` tuple; `bg_pixel_rgb()`
+reads a pixel exactly; `bg_bitmap()` / `sprite_bitmap()` bytes are two a pixel;
+`screenshot()` writes an RGB PNG. See "Tab5" under BG in `docs/tulip_api.md`.
+
+Cost: the BG plane is 2.4 MB of PSRAM instead of 1.2, the TFB plane 1.8 instead
+of 0.9, the LVGL overlay 2.4 instead of 1.2, and sprite RAM 64 KB of internal
+RAM instead of 32 (its 32768 entries are pixels, so Python's sprite accounting
+is unchanged).
+
 ## Camera (current)
 
 The back camera is an SC2356 on the P4's MIPI-CSI port; it answers to the
@@ -145,7 +176,7 @@ The Python API (`tulip.camera_*`, see `docs/tulip_api.md`, Tab5 only):
 `camera_start()`, `camera_stop()`, `camera_running()`, `camera_info()`,
 `camera_wait()`, `camera_frame()` (RGB565, the same layout as LVGL's 16-bit
 colour here, so it drops into an `lv.image_dsc_t`), `camera_bg()` (the
-frame converted to RGB332 onto the BG plane, the cheap live preview),
+frame copied onto the RGB565 BG plane, the cheap live preview),
 `camera_capture()` (JPEG through the P4's hardware encoder, or PNG through
 lodepng), `camera_flip()` and `camera_test_pattern()` (the sensor's black-to-white
 ramp, for checking the path without a scene; its colour follows the ISP's
@@ -212,7 +243,7 @@ timeout and recovery counts, and the band of the first rotation that stalled.
 
 The Tab5 native module currently exposes the common display APIs used by
 `docs/tulip_api.md`: BG pixels, bitmaps, PNGs, drawing primitives, scrolling,
-RGB332 color conversion, screenshots, TFB access, brightness, frame/touch
+palette and (r, g, b) colours, screenshots, TFB access, brightness, frame/touch
 callbacks, and sprite PNG/bitmap/register/move/visibility/collision operations.
 These paths use the shared Tulip renderer and are tested on hardware through
 `mpremote ... resume` so attaching does not soft-reset the running board.
