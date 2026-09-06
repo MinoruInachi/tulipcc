@@ -133,6 +133,49 @@ CONFIG_SOC_ULP_SUPPORTED=n
 CONFIG_ULP_COPROC_ENABLED=n
 CONFIG_ULP_COPROC_TYPE_FSM=n
 
+# Built-in camera (camera_tab5.c). The Tab5's SC2356 answers to the SC202CS
+# driver: MIPI-CSI, RAW8 1280x720 at 30 fps, which the ISP turns into RGB565.
+# The BSP pulls esp_video in but leaves every sensor off, so nothing was
+# detected until this. The ISP pipeline controller is the task that runs auto
+# exposure and white balance against the ISP statistics; without it the frames
+# come out dark and green. Tab5 has no parallel (DVP) camera connector.
+CONFIG_CAMERA_SC202CS=y
+CONFIG_CAMERA_SC202CS_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
+CONFIG_CAMERA_SC202CS_MIPI_RAW8_1280X720_30FPS=y
+CONFIG_CAMERA_SC202CS_MIPI_DEFAULT_FMT_RAW8_1280X720_30FPS=y
+CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
+# CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE is not set
+# The SC202CS IPA configuration (sc202cs_default.json) runs ian, awb, agc,
+# adn, acc and aen. Auto focus needs a lens motor the Tab5 does not have, and
+# the AE target-level controller is not in that list either.
+# CONFIG_ESP_IPA_AF_ALGORITHM is not set
+# CONFIG_ESP_IPA_ATC_ALGORITHM is not set
+# The hardware JPEG encoder (camera_capture()) hands a whole 1.8 MB RGB565 frame
+# to esp_cache_msync() before the DMA reads it, and a cache-to-memory sync runs
+# with interrupts off for the entire buffer. Chunking bounds that critical
+# section to 128 KB on the P4. (It was tried first for the interrupt-watchdog
+# panic in camera_capture() and did not cure it -- that turned out to be the
+# camera interrupts living on the MicroPython core, see camera_tab5.c -- but a
+# 1.8 MB stretch with interrupts off is still not something the audio task
+# should have to live with.)
+CONFIG_ESP_MM_CACHE_MSYNC_C2M_CHUNKED_OPS=y
+# LVGL's example sources are compiled by default and never linked; skip them.
+# CONFIG_LV_BUILD_EXAMPLES is not set
+
+# Flash budget. Upstream MicroPython's ports/esp32/boards/sdkconfig.base sets
+# these on every ESP32 board (Tulip CC inherits them; TAB5 does not, see the
+# watchdog note above), and the camera stack is what finally pushed the app past
+# its 0x3f0000 slot without them. The ROM already carries the nano printf
+# (ESP_ROM_HAS_NEWLIB_NANO_FORMAT), so choosing it drops newlib's own vfprintf
+# from flash; the Brainpool curves, Curve25519 and ALPN are TLS options nothing
+# here negotiates.
+CONFIG_NEWLIB_NANO_FORMAT=y
+CONFIG_MBEDTLS_SSL_ALPN=n
+CONFIG_MBEDTLS_ECP_DP_BP256R1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_BP384R1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_BP512R1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_CURVE25519_ENABLED=n
+
 # Keep new I2C slave API enabled and silence legacy conflict checks.
 CONFIG_I2C_SKIP_LEGACY_CONFLICT_CHECK=y
 CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2=y

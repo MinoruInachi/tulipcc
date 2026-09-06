@@ -6,6 +6,9 @@ list(APPEND IDF_COMPONENTS esp_driver_ppa esp_lcd)
 # The USB-A connector is a host port (usb_host_tab5.c). MicroPython's esp32
 # component list only carries the device-side pieces.
 list(APPEND IDF_COMPONENTS usb)
+# The built-in camera (camera_tab5.c): esp_video and the sensor drivers come in
+# through the BSP, the P4's hardware JPEG encoder does not.
+list(APPEND IDF_COMPONENTS esp_driver_jpeg espressif__esp_video espressif__esp_cam_sensor)
 # Tab5 drives the touch controllers directly rather than through bsp_touch_new(),
 # so it can raise the I2C clock and keep the TP_INT interrupt.
 list(APPEND IDF_COMPONENTS
@@ -58,11 +61,21 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
 		VERBATIM
 	)
 
+	# The generated binding is argument-marshalling glue around every LVGL call,
+	# a quarter of a megabyte of it at -O2, and none of it is on a hot path:
+	# the work happens inside LVGL. -Os on this one file (the last -O flag on
+	# the command line wins) buys back most of what the camera stack costs in
+	# the app partition. ulab gets the same treatment: matplotlib plots and the
+	# occasional FFT do not need -O2 loop unrolling, and it is the next largest
+	# body of code that is not a font or frozen Python.
 	set_source_files_properties(
 		${TAB5_LV_MPY}
 		PROPERTIES COMPILE_OPTIONS
-			"-include;${TAB5_LVGL_DIR}/src/lvgl_private.h;-include;${TAB5_LV_FONTS_HEADER}"
+			"-include;${TAB5_LVGL_DIR}/src/lvgl_private.h;-include;${TAB5_LV_FONTS_HEADER};-Os"
 	)
+	get_filename_component(TAB5_ULAB_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../ulab ABSOLUTE)
+	file(GLOB_RECURSE TAB5_ULAB_SOURCES ${TAB5_ULAB_DIR}/code/*.c)
+	set_source_files_properties(${TAB5_ULAB_SOURCES} PROPERTIES COMPILE_OPTIONS "-Os")
 
 	# CONFIG_LV_GLOBAL_CUSTOM_INCLUDE names lv_global_tab5.h, which lives in the
 	# board directory. main already has that on its include path via
@@ -70,5 +83,17 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
 	# sources reaches it through lv_global.h.
 	idf_component_get_property(TAB5_LVGL_LIB lvgl__lvgl COMPONENT_LIB)
 	target_include_directories(${TAB5_LVGL_LIB} PUBLIC ${MICROPY_BOARD_DIR})
+
+	# The camera stack is control-plane code -- ioctl plumbing, sensor register
+	# tables, the ISP statistics loop -- with the per-pixel work done by the
+	# CSI/ISP/JPEG hardware, so it gains nothing from the -O2 the rest of the
+	# firmware is built with, and the app partition is tight.
+	foreach(cam_lib espressif__esp_video espressif__esp_cam_sensor espressif__esp_sccb_intf
+	                esp_driver_isp esp_driver_cam esp_driver_jpeg)
+		idf_component_get_property(TAB5_CAM_LIB ${cam_lib} COMPONENT_LIB)
+		if(TAB5_CAM_LIB)
+			target_compile_options(${TAB5_CAM_LIB} PRIVATE -Os)
+		endif()
+	endforeach()
 
 endif()

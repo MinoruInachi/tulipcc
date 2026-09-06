@@ -99,7 +99,16 @@ readable instead:
   handlers, touch init error, touch init attempts, revision probe ms, vsync
   count. A touch controller that never initialized reads exactly like a screen
   nobody touched without those last four.
-- `tulip.tab5_render_stats()` -> per-frame render phase timings.
+- `tulip.tab5_render_stats()` -> per-frame render phase timings: composite,
+  convert, rotate, present and vsync-wait microseconds, frames skipped, band
+  rows, PPA failures, DSI frame buffer count, PPA active, vsync paced, PPA
+  timeouts, the phase the display task is in right now (0 waiting for
+  vsync, 1 compositing, 2 rotating, 3 presenting, 4 frame-done hook), the
+  last PPA error code, the PPA client recoveries, the band (y, rows) of the
+  first rotation that timed out, and the band of the latest one. If the
+  screen has stopped, the phase says which step it never came back from; a
+  PPA timeout count above zero says the 2D-DMA rotation stalled (see "The
+  PPA stall" under Camera).
 - `tulip.tab5_lcd_errors()` -> what display start-up returned.
 - `tulip.tab5_lcd_cmd(cmd, data)` / `tulip.tab5_lcd_read(cmd, len)` -> raw DCS
   to the panel. **These disturb the running video stream**: a read is enough to
@@ -112,6 +121,92 @@ readable instead:
 - Real shared provider symbols (`display_bounce_empty`, `display_frame_done_generic`) are adopted only when actually linked.
 - For esp32p4 bring-up, `shared_provider_tab5.c` currently provides a temporary implementation of these symbols (1280x720 source) so the rotated shared-provider path is exercised end-to-end.
 - This temporary provider is a transition step; it will be replaced by the actual Tulip shared renderer integration.
+
+## Camera (current)
+
+The back camera is an SC2356 on the P4's MIPI-CSI port; it answers to the
+SC202CS driver in `esp_cam_sensor` (chip id 0xeb52), which is why
+`sdkconfig.board` turns that sensor on. `camera_tab5.c` brings it up through
+the BSP (`bsp_camera_start()`: sensor power via the IO expander, SCCB on the
+BSP's I2C bus, `esp_video_init()` with the ISP pipeline controller doing auto
+exposure and white balance) and reads it as a V4L2 device: RAW8 1280x720 at
+30 fps from the sensor, RGB565 out of the ISP, three MMAP buffers (5.5 MB of
+PSRAM while streaming, given back on stop).
+
+A task on core 0 owns the stream and keeps the newest frame dequeued, so the
+Python calls never block on the sensor. It also owns every step that
+allocates an interrupt -- `esp_video_init()`, the V4L2 setup, the JPEG
+engine -- because interrupts are serviced on the core that allocated them,
+and with the CSI/ISP/JPEG interrupts on the MicroPython core a
+`camera_capture()` to `/user` deadlocked against the littlefs flash write
+(interrupt watchdog on core 1, spinning in `shared_intr_isr()`).
+
+The Python API (`tulip.camera_*`, see `docs/tulip_api.md`, Tab5 only):
+`camera_start()`, `camera_stop()`, `camera_running()`, `camera_info()`,
+`camera_wait()`, `camera_frame()` (RGB565, the same layout as LVGL's 16-bit
+colour here, so it drops into an `lv.image_dsc_t`), `camera_bg()` (the
+frame converted to RGB332 onto the BG plane, the cheap live preview),
+`camera_capture()` (JPEG through the P4's hardware encoder, or PNG through
+lodepng), `camera_flip()` and `camera_test_pattern()` (the sensor's black-to-white
+ramp, for checking the path without a scene; its colour follows the ISP's
+white balance, so read it for orientation and byte order, not tint).
+
+Measured on the v2 board: start 130 ms, 30 fps sustained while the display
+runs, `camera_bg()` 100 ms full screen / 40 ms at 640x360, `camera_frame()`
+70 ms into a caller-supplied buffer, JPEG 140 ms in memory (plus the littlefs
+write, 1-1.5 s for a 150-200 KB file), PNG about 17 s. Twenty JPEG captures
+to `/user` in a row and five stop/start cycles leak nothing. A reader that
+keeps the newest frame for longer than half a frame time (a full-screen
+`camera_bg()` does) has the frames that arrive meanwhile handed straight
+back to the driver; `camera_info()['dropped']` counts them and `fps` counts
+the frames accepted.
+
+`camera_info()` also reports `gain`, `exposure` (sensor, via V4L2_CID_GAIN /
+V4L2_CID_EXPOSURE) and `red_balance`, `blue_balance` (ISP, x1000) so you can see
+whether the ISP pipeline controller (`isp_task`, AE/AWB from
+`sc202cs_default.json`) is doing anything. On both boards it settles within
+2 s to roughly gain 129, exposure 1125, red 1.6-1.8, blue 1.55 for an indoor
+scene. The sensor defaults are 10 / 750 / 1.000 / 1.000; the one time they
+stayed there (first bring-up on the v1 board after a cold start) the picture
+was dark and green and `camera_stop()`/`camera_start()` did not recover it,
+only a reset did. Not reproduced in nine warm restarts (an RTS reset leaves
+the camera power on through the IO expander), so a power-cycled start is the
+case still to watch.
+
+Verified on both boards: v1 (ILI9881C, P4 rev v1.0) and v2 (ST7121, P4 rev
+v1.3). Same API results, same ~9 fps in the camera app, and no PPA timeouts
+in a 3-minute run on v1.
+
+### The PPA stall
+
+With the camera app (`/sys/ex/camera.py`) running for a few minutes, one of
+the display's PPA rotations -- the 2D-DMA scale-rotate-mirror transaction
+that turns the landscape staging image into the portrait panel framebuffer
+-- never completes. Before this was understood, `ppa_do_scale_rotate_mirror()`
+was called in blocking mode, which waits on the DMA2D completion forever, so
+the display task parked inside the driver: the screen froze while the REPL,
+touch, audio and the camera all kept running, and nothing could report why.
+
+What is known, from runs of 10-15 minutes each: it needs the camera
+streaming *and* Python reading frames (`camera_bg()`); the same PPA load
+without the camera, or with the camera streaming but the band drawn from a
+static bitmap, never stalled. It is not the chunked cache msync option, not
+the driver running out of buffers (a non-blocking capture task with four
+buffers stalls the same way), and not a particular band geometry -- a run
+that logged every band's offset and height stalled on the same shapes it had
+rotated thousands of times, and an identical run went 15 minutes without.
+Once stalled, the SRM engine is wedged: a fresh PPA client's transactions
+queue behind the stuck one and time out too.
+
+So the display task defends itself instead (`tab5_ppa_rotate_to_fb()`):
+non-blocking transactions with a completion callback and a 250 ms wait; on
+a timeout it abandons the client (the driver refuses to unregister one with
+a pending transaction) and opens another, up to three times, then stays on
+the CPU rotation -- band-limited and block-transposed, about 80 ms for a
+full-screen band instead of the 40 ms the PPA takes, and a frame that runs
+long yields a tick so IDLE0 keeps the task watchdog fed. The screen slows
+down; it no longer stops. `tulip.tab5_render_stats()` shows the phase, the
+timeout and recovery counts, and the band of the first rotation that stalled.
 
 ## Tulip API status
 

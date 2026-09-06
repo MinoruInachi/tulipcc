@@ -25,7 +25,23 @@ typedef struct {
 	uint8_t dsi_fb_count;
 	bool ppa_active;
 	bool vsync_paced;
+	uint32_t ppa_timeouts;  /* PPA rotations that did not finish in time */
+	uint8_t phase;          /* what the display task is doing right now, see TAB5_PHASE_* */
+	int ppa_last_err;       /* esp_err_t of the last failed PPA call (the log does not reach the console) */
+	uint32_t ppa_recoveries;
+	int ppa_stuck_y;        /* band of the first rotation that timed out: y_start, rows */
+	int ppa_stuck_rows;
+	int ppa_last_y;         /* band of the most recent rotation */
+	int ppa_last_rows;
 } tab5_render_stats_t;
+
+/* Where the display task is. Read through tulip.tab5_render_stats() -- if the
+ * screen has stopped, this says which step it never came back from. */
+#define TAB5_PHASE_WAIT_VSYNC 0
+#define TAB5_PHASE_COMPOSITE 1
+#define TAB5_PHASE_ROTATE 2
+#define TAB5_PHASE_PRESENT 3
+#define TAB5_PHASE_FRAME_DONE 4
 
 void tab5_display_render_stats(tab5_render_stats_t *out);
 

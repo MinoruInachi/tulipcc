@@ -1286,6 +1286,89 @@ p.joy_move() # ジョイスティックの入力に応じて位置を更新し�
 
 `Game` クラスと `Sprite` クラスを使った本格的な例としては、`/sys/ex/` の `planet_boing` を参照してください。
 
+## カメラ（Tab5 のみ）
+
+Tab5 の前面には 2 メガピクセルのカメラ（ESP32-P4 の MIPI-CSI ポートにつながった
+SC2356）があります。Tulip はこれを画面と同じ 1280x720 の RGB565 で読み出します。
+Tab5 の LVGL が使う 16 ビットのレイアウトと同じなので、フレームをそのまま
+`lv.image` に渡せます。カメラを開始すると、センサーの自動露出とホワイトバランスは
+バックグラウンドで動き続けます。
+
+```python
+tulip.camera_start()            # センサーに電源を入れ、30 fps でストリーミングを始めます
+tulip.camera_running()          # ストリーミング中なら True
+tulip.camera_info()             # {'sensor': 'SC202CS', 'width': 1280, 'height': 720,
+                                #  'format': 'RGB565', 'fps': 30, 'frames': 1289,
+                                #  'errors': 0, 'dropped': 12, 'hflip': False, 'vflip': False, ...}
+                                # dropped: 最新フレームをまだ読んでいる最中に届いたため、
+                                # 読まれずに返されたフレーム数（長い camera_bg() で増えます）
+                                # gain / exposure / red_balance / blue_balance: ISP の自動露出と
+                                # ホワイトバランスが落ち着いた値（停止中は -1）。センサー既定値は
+                                # 10 / 750 / 1000 / 1000 で、ここから動かなければ ISP 制御が
+                                # 動いていない状態です（画像が暗く緑がかります。色変換の問題ではありません）
+tulip.camera_stop()             # ストリーミングを止め、フレームバッファ（5.5 MB）を解放します
+```
+
+映像を手軽に見る方法は、BG 面に描くことです。フレームは Tulip の RGB332 に変換されて
+BG に置かれます。これがライブプレビューで、フレームコールバックから呼べば BG が
+カメラに追従します。
+
+```python
+tulip.camera_bg()                          # フレーム全体を全画面に
+tulip.camera_bg(x=640, y=0, w=640, h=360)  # 右上の 1/4 に縮小して
+```
+
+`camera_frame()` はピクセルそのものを返します。引数なしなら 1280x720x2 バイトの
+新しい `bytearray` を返します。`w` と `h` を渡すと最近傍法で縮小したコピーになり、
+`buf` を渡すと毎回確保する代わりに手持ちのバッファ（ちょうど `w*h*2` バイト必要）に
+書き込みます。結果は `cf=lv.COLOR_FORMAT.RGB565` の `lv.image_dsc_t` がそのまま
+受け取れる形です。
+
+```python
+buf = bytearray(640 * 360 * 2)
+tulip.camera_frame(640, 360, buf=buf)
+dsc = lv.image_dsc_t({'header': {'w': 640, 'h': 360, 'cf': lv.COLOR_FORMAT.RGB565}, 'data_size': len(buf), 'data': buf})
+img = lv.image(tulip.current_uiscreen().group)
+img.set_src(dsc)
+```
+
+`camera_wait()` は、前回見たものより新しいフレームが届くまで（`timeout_ms`、
+既定 1000 ms まで）ブロックし、そのシーケンス番号を返します。タイムアウトなら
+`None` です。呼んだ時点の最新フレームではなく、すべてのフレームを順に扱いたい
+ループ向けです。
+
+```python
+seq = None
+while True:
+    seq = tulip.camera_wait(seq)
+    tulip.camera_bg(0, 0, 640, 360)
+```
+
+静止画は `camera_capture()` で撮ります。ファイル名の末尾が `.jpg` なら P4 の
+ハードウェア JPEG エンコーダ（約 150 ms＋flash への書き込み）、`.png` なら lodepng
+（24 ビット。遅く、フル画面で 17 秒ほど）で保存し、書き込んだバイト数を返します。
+ファイル名を省くと JPEG を `bytes` で返すので、そのままアップロードや送信に使えます。
+
+```python
+tulip.camera_capture("/user/photo.jpg")            # quality の既定値は 80
+tulip.camera_capture("/user/photo.jpg", quality=95)
+tulip.camera_capture("/user/photo.png")
+jpeg = tulip.camera_capture()                       # bytes
+```
+
+`camera_flip(hflip=, vflip=)` はセンサー側で画像を反転し、現在の
+`(hflip, vflip)` を返します。設定は `camera_stop()` / `camera_start()` をまたいで
+保持されます。`camera_test_pattern(True)` は被写体の代わりにセンサー内蔵の
+テストパターン（左端が黒、右端が白のランプ）を流します。カメラを何かに向けなくても、
+フレームが届いていること、向きとバイト順が正しいことを確かめられます。ただし色は
+基準になりません。ランプも被写体と同じように ISP を通るので、自動ホワイトバランスが
+色かぶり（測定した個体ではマゼンタ）に落ち着きます。`camera_test_pattern(False)` で
+被写体に戻ります。
+
+エラーは `RuntimeError`（`camera is not running`、または起動に失敗したときの
+ESP-IDF のエラー名。センサーが応答しない場合など）と、サイズ・矩形・quality・
+拡張子が不正なときの `ValueError` で返ります。
+
 # 手伝ってもらえませんか？
 
 私たちが考えている、協力していただけると嬉しいことです。

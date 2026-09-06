@@ -1301,6 +1301,93 @@ p.load("me.png", 32, 32)
 p.joy_move() # will update the position based on the joystick
 ```
 
+## Camera (Tab5 only)
+
+The Tab5 has a 2 megapixel camera on its front (an SC2356 on the ESP32-P4's
+MIPI-CSI port). Tulip reads it at 1280x720, which is also the size of the
+screen, as RGB565 -- the same 16-bit layout LVGL uses on the Tab5, so a frame
+can go straight into an `lv.image`. The sensor's own auto exposure and white
+balance run in the background once the camera is started.
+
+```python
+tulip.camera_start()            # powers the sensor and starts streaming at 30 fps
+tulip.camera_running()          # True while streaming
+tulip.camera_info()             # {'sensor': 'SC202CS', 'width': 1280, 'height': 720,
+                                #  'format': 'RGB565', 'fps': 30, 'frames': 1289,
+                                #  'errors': 0, 'dropped': 12, 'hflip': False, 'vflip': False, ...}
+                                # dropped: frames handed back unread because you were still
+                                # reading the newest one (a long camera_bg() does that)
+                                # gain / exposure / red_balance / blue_balance: what the ISP's
+                                # auto exposure and white balance have settled on (-1 when
+                                # stopped). Sensor defaults are 10 / 750 / 1000 / 1000; if they
+                                # stay there the picture is dark and green because the ISP
+                                # controller never ran, not because of the colour conversion.
+tulip.camera_stop()             # stops streaming and frees the frame buffers (5.5 MB)
+```
+
+The cheap way to see the picture is to draw it on the BG plane, converted to
+Tulip's RGB332. This is the live preview: call it from a frame callback and
+the BG follows the camera.
+
+```python
+tulip.camera_bg()                        # the whole frame, full screen
+tulip.camera_bg(x=640, y=0, w=640, h=360)  # scaled into the top-right quarter
+```
+
+`camera_frame()` gives you the pixels. With no arguments it returns a new
+`bytearray` of 1280x720x2 bytes; pass `w` and `h` for a nearest-neighbour
+scaled copy, and `buf` to fill a buffer you already have (it must be exactly
+`w*h*2` bytes) instead of allocating a new one each time. The result is what
+an `lv.image_dsc_t` with `cf=lv.COLOR_FORMAT.RGB565` wants:
+
+```python
+buf = bytearray(640 * 360 * 2)
+tulip.camera_frame(640, 360, buf=buf)
+dsc = lv.image_dsc_t({'header': {'w': 640, 'h': 360, 'cf': lv.COLOR_FORMAT.RGB565}, 'data_size': len(buf), 'data': buf})
+img = lv.image(tulip.current_uiscreen().group)
+img.set_src(dsc)
+```
+
+`camera_wait()` blocks until a frame newer than the last one you saw arrives
+(up to `timeout_ms`, default 1000) and returns its sequence number, or `None`
+on a timeout -- for a loop that wants every frame rather than the newest one
+at the time it asks:
+
+```python
+seq = None
+while True:
+    seq = tulip.camera_wait(seq)
+    tulip.camera_bg(0, 0, 640, 360)
+```
+
+Stills come out of `camera_capture()`. A filename ending in `.jpg` (through
+the P4's hardware JPEG encoder, about 150 ms plus the flash write) or `.png`
+(lodepng, 24-bit, and slow -- around 17 seconds for a full frame) writes the
+file and returns the byte count; no filename returns the JPEG as `bytes`,
+ready to upload or send:
+
+```python
+tulip.camera_capture("/user/photo.jpg")            # quality defaults to 80
+tulip.camera_capture("/user/photo.jpg", quality=95)
+tulip.camera_capture("/user/photo.png")
+jpeg = tulip.camera_capture()                       # bytes
+```
+
+`camera_flip(hflip=, vflip=)` mirrors the image on the sensor and returns the
+current `(hflip, vflip)`; the settings persist across `camera_stop()` /
+`camera_start()`. `camera_test_pattern(True)` replaces the scene with the
+sensor's built-in ramp -- black at the left edge to white at the right -- which
+is how to check that frames arrive, in the right orientation and byte order,
+without pointing the camera at anything. Its colour is not a reference: the
+ramp passes through the ISP like a scene, and the auto white balance settles
+on a tint for it (magenta, on the units measured). `camera_test_pattern(False)`
+puts the scene back.
+
+Errors come back as `RuntimeError` (`camera is not running`, or the ESP-IDF
+error name for a failure to start, e.g. when no sensor answers) and `ValueError`
+for a bad size, rectangle, quality or filename extension.
+
+
 See `planet_boing` in `/sys/ex/` for a fleshed out example of using the `Game` and `Sprite` classes.
 
 # Can you help? 

@@ -129,6 +129,32 @@ static void *s_dsi_fb[2] = {NULL, NULL};
 static uint8_t s_dsi_fb_count = 0;
 static uint8_t s_dsi_fb_next = 0;
 static uint32_t s_ppa_failures = 0;
+/* The PPA transaction is issued non-blocking and waited for here, with a
+ * timeout. In blocking mode the driver waits on the DMA2D completion forever,
+ * and a completion that never arrives took the whole display task with it:
+ * the screen froze while everything else kept running, and nothing could say
+ * why because the task was parked inside the driver. A timeout turns that
+ * into one slow frame, a counter and a log line. */
+static SemaphoreHandle_t s_ppa_done_sem = NULL;
+static uint32_t s_ppa_timeouts = 0;
+static volatile uint8_t s_phase = TAB5_PHASE_WAIT_VSYNC;
+#define TAB5_PPA_TIMEOUT_MS 250
+/* Recovery after a timeout. The transaction that never finished still holds
+ * the client's one pending slot, and ppa_unregister_client() refuses a
+ * client with unprocessed transactions, so the client is abandoned (a few
+ * hundred bytes) and a fresh one opened. Measured with the camera app: one
+ * rotation out of tens of thousands stalls, some minutes in, and the next
+ * client carries on at full speed. After this many the PPA is left alone
+ * and rotation stays on the CPU. */
+#define TAB5_PPA_MAX_RECOVERIES 3
+static uint32_t s_ppa_recoveries = 0;
+static int s_ppa_last_err = 0;
+static int s_ppa_stuck_y = -1, s_ppa_stuck_rows = 0, s_ppa_last_y = -1, s_ppa_last_rows = 0;
+/* A frame that ran this long without blocking hands the core to IDLE0 for a
+ * tick before waiting for vsync, or the idle-task watchdog fires on core 0
+ * (its check is deliberately on, see sdkconfig.board). Only the CPU rotation
+ * fallback gets near it. */
+#define TAB5_FRAME_YIELD_US 50000
 
 /* Per-frame phase timings, in microseconds, for the last completed frame.
  * Surfaced through tulip.tab5_render_stats() so the cost of a change can be
@@ -402,11 +428,55 @@ static inline void tab5_row332_to_stage565(const uint8_t *src, uint16_t *dst, in
  * `y_start`/`rows` select a horizontal band of the staging image. After a
  * 90 CCW rotation that band lands as a vertical column of the panel, at
  * panel x == y_start, so the destination block offset is on x, not y. */
-static bool tab5_ppa_rotate_to_fb(void *dst_fb, int y_start, int rows)
+static bool IRAM_ATTR tab5_ppa_trans_done(ppa_client_handle_t client, ppa_event_data_t *edata, void *user)
 {
-    if (s_ppa_srm == NULL || dst_fb == NULL) {
+    (void)edata; (void)user;
+    /* An abandoned client finishing late must not wake the current wait. */
+    if (client != s_ppa_srm) {
         return false;
     }
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_ppa_done_sem, &woken);
+    return woken == pdTRUE;
+}
+
+/* Register a PPA scale-rotate-mirror client with its completion callback.
+ * Leaves s_ppa_srm NULL, and rotation on the CPU, if either step fails. */
+static void tab5_ppa_client_open(void)
+{
+    const ppa_client_config_t ppa_cfg = {
+        .oper_type = PPA_OPERATION_SRM,
+        .max_pending_trans_num = 1,
+    };
+    ppa_client_handle_t client = NULL;
+    if (ppa_register_client(&ppa_cfg, &client) != ESP_OK) {
+        s_ppa_srm = NULL;
+        ESP_LOGW(TAG, "PPA unavailable; rotation will run on the CPU");
+        return;
+    }
+    if (s_ppa_done_sem == NULL) {
+        s_ppa_done_sem = xSemaphoreCreateBinary();
+    }
+    const ppa_event_callbacks_t ppa_cbs = { .on_trans_done = tab5_ppa_trans_done };
+    if (s_ppa_done_sem == NULL || ppa_client_register_event_callbacks(client, &ppa_cbs) != ESP_OK) {
+        ESP_LOGW(TAG, "PPA completion callback unavailable; rotation will run on the CPU");
+        ppa_unregister_client(client);
+        s_ppa_srm = NULL;
+        return;
+    }
+    s_ppa_srm = client;
+}
+
+static bool tab5_ppa_rotate_to_fb(void *dst_fb, int y_start, int rows)
+{
+    if (s_ppa_srm == NULL || dst_fb == NULL || s_ppa_done_sem == NULL) {
+        return false;
+    }
+    /* A transaction that timed out earlier may have completed since; its
+     * give must not count for this one. */
+    xSemaphoreTake(s_ppa_done_sem, 0);
+    s_ppa_last_y = y_start;
+    s_ppa_last_rows = rows;
 
     const ppa_srm_oper_config_t srm = {
         .in = {
@@ -431,30 +501,68 @@ static bool tab5_ppa_rotate_to_fb(void *dst_fb, int y_start, int rows)
         .rotation_angle = PPA_SRM_ROTATION_ANGLE_90,
         .scale_x = 1.0f,
         .scale_y = 1.0f,
-        .mode = PPA_TRANS_MODE_BLOCKING,
+        .mode = PPA_TRANS_MODE_NON_BLOCKING,
     };
 
     const esp_err_t err = ppa_do_scale_rotate_mirror(s_ppa_srm, &srm);
     if (err != ESP_OK) {
+        /* Also where a timed-out transaction lands us afterwards: the client
+         * allows one pending transaction, and the stuck one still holds it. */
         s_ppa_failures++;
+        s_ppa_last_err = (int)err;
         if (s_ppa_failures == 1) {
             ESP_LOGE(TAG, "PPA rotate failed (%s); falling back to CPU rotation",
                      esp_err_to_name(err));
         }
         return false;
     }
+    if (xSemaphoreTake(s_ppa_done_sem, pdMS_TO_TICKS(TAB5_PPA_TIMEOUT_MS)) != pdTRUE) {
+        s_ppa_timeouts++;
+        if (s_ppa_stuck_y < 0) {
+            s_ppa_stuck_y = y_start;
+            s_ppa_stuck_rows = rows;
+        }
+        if (s_ppa_recoveries < TAB5_PPA_MAX_RECOVERIES) {
+            s_ppa_recoveries++;
+            ESP_LOGE(TAG, "PPA rotate did not complete within %d ms (band y=%d rows=%d); "
+                     "opening a new PPA client (%u of %d)", TAB5_PPA_TIMEOUT_MS, y_start, rows,
+                     (unsigned)s_ppa_recoveries, TAB5_PPA_MAX_RECOVERIES);
+            s_ppa_srm = NULL; /* abandoned, see TAB5_PPA_MAX_RECOVERIES */
+            tab5_ppa_client_open();
+        } else {
+            ESP_LOGE(TAG, "PPA rotate did not complete within %d ms again; "
+                     "rotation stays on the CPU from here", TAB5_PPA_TIMEOUT_MS);
+            s_ppa_srm = NULL;
+        }
+        return false;
+    }
     return true;
 }
 
-/* CPU fallback for the rotation, kept only for the case where the PPA cannot
- * be registered. This is the slow path the PPA exists to replace. */
-static void tab5_cpu_rotate_to_fb(uint16_t *dst_fb)
+/* CPU fallback for the rotation: the PPA could not be registered, or one of
+ * its transactions never completed (see TAB5_PPA_TIMEOUT_MS). */
+/* Rotate staging rows [y0, y1) onto the panel, 32x32 blocks at a time so that
+ * both the reads (one staging row segment per x) and the writes (32
+ * consecutive panel pixels, one cache line) stay in cache. The pixel-at-a-time
+ * version this replaces wrote every pixel to a different cache line and took
+ * 100 ms for a full frame; this does a full frame in a third of that and a
+ * typical band in less. Still the fallback: the PPA does the same in 40 ms
+ * without touching the CPU. */
+static void tab5_cpu_rotate_band(uint16_t *dst_fb, int y0, int y1)
 {
-    for (int y = 0; y < s_provider_height; y++) {
-        const uint16_t *src = s_stage565 + (size_t)y * s_provider_width;
-        uint16_t *col = dst_fb + y;
-        for (int x = 0; x < s_provider_width; x++) {
-            col[(size_t)((s_provider_width - 1) - x) * BSP_LCD_H_RES] = src[x];
+    const int W = s_provider_width;
+    for (int by = y0; by < y1; by += 32) {
+        const int ye = (by + 32 < y1) ? by + 32 : y1;
+        for (int bx = 0; bx < W; bx += 32) {
+            const int xe = (bx + 32 < W) ? bx + 32 : W;
+            for (int x = bx; x < xe; x++) {
+                uint16_t *drow = dst_fb + (size_t)(W - 1 - x) * BSP_LCD_H_RES + by;
+                const uint16_t *src = s_stage565 + (size_t)by * W + x;
+                for (int y = by; y < ye; y++) {
+                    *drow++ = *src;
+                    src += W;
+                }
+            }
         }
     }
 }
@@ -495,6 +603,7 @@ static void tab5_render_bridge_tick_rotated(int band_y0, int band_y1)
         ESP_LOGE(TAG, "Rotated path requires a staging frame buffer");
         return;
     }
+    s_phase = TAB5_PHASE_COMPOSITE;
 
     if (s_provider_width != TAB5_SHARED_RENDER_W || s_provider_height != TAB5_SHARED_RENDER_H) {
         ESP_LOGW(TAG, "Unsupported provider geometry %dx%d", s_provider_width, s_provider_height);
@@ -580,13 +689,15 @@ static void tab5_render_bridge_tick_rotated(int band_y0, int band_y1)
 
     if (target_fb != NULL) {
         const int64_t t_rot = esp_timer_get_time();
+        s_phase = TAB5_PHASE_ROTATE;
         if (!tab5_ppa_rotate_to_fb(target_fb, band_y0, band_y1 - band_y0)) {
-            tab5_cpu_rotate_to_fb((uint16_t *)target_fb);
-        } else if (prev_y1 > prev_y0 &&
-                   !tab5_ppa_rotate_to_fb(target_fb, prev_y0, prev_y1 - prev_y0)) {
-            tab5_cpu_rotate_to_fb((uint16_t *)target_fb);
+            tab5_cpu_rotate_band((uint16_t *)target_fb, band_y0, band_y1);
+        }
+        if (prev_y1 > prev_y0 && !tab5_ppa_rotate_to_fb(target_fb, prev_y0, prev_y1 - prev_y0)) {
+            tab5_cpu_rotate_band((uint16_t *)target_fb, prev_y0, prev_y1);
         }
         const int64_t t_pres = esp_timer_get_time();
+        s_phase = TAB5_PHASE_PRESENT;
         /* The buffer already lives inside the panel's framebuffer set, so this
          * is a cache write-back plus a framebuffer index switch -- no copy. */
         esp_lcd_panel_draw_bitmap(tab5_lcd_handles.panel, 0, 0, BSP_LCD_H_RES, BSP_LCD_V_RES, target_fb);
@@ -597,6 +708,7 @@ static void tab5_render_bridge_tick_rotated(int band_y0, int band_y1)
         }
     }
 
+    s_phase = TAB5_PHASE_FRAME_DONE;
     (void)s_render_frame_done();
     s_bridge_frames++;
 }
@@ -791,14 +903,7 @@ void tab5_display_start(void)
     }
     s_dsi_fb_next = (s_dsi_fb_count > 1) ? 1u : 0u;
 
-    const ppa_client_config_t ppa_cfg = {
-        .oper_type = PPA_OPERATION_SRM,
-        .max_pending_trans_num = 1,
-    };
-    if (ppa_register_client(&ppa_cfg, &s_ppa_srm) != ESP_OK) {
-        s_ppa_srm = NULL;
-        ESP_LOGW(TAG, "PPA unavailable; rotation will run on the CPU");
-    }
+    tab5_ppa_client_open();
 
     bsp_display_backlight_on();
     brightness = 5;
@@ -989,13 +1094,18 @@ void run_tab5_display(void *arg)
              * and LVGL would never get the chance to mark anything dirty. */
             (void)s_render_frame_done();
         }
-        s_window_busy_us += esp_timer_get_time() - busy_start_us;
+        const int64_t busy_us = esp_timer_get_time() - busy_start_us;
+        s_window_busy_us += busy_us;
         tab5_bridge_update_stats();
+        if (busy_us > TAB5_FRAME_YIELD_US) {
+            vTaskDelay(1);
+        }
 
         /* Pace to the panel. Waiting on the refresh-done interrupt keeps the
          * loop aligned to the display instead of adding a fixed delay on top
          * of however long the frame took. */
         const int64_t wait_start_us = esp_timer_get_time();
+        s_phase = TAB5_PHASE_WAIT_VSYNC;
         if (s_vsync_sem != NULL) {
             xSemaphoreTake(s_vsync_sem, pdMS_TO_TICKS(100));
         } else {
@@ -1028,6 +1138,14 @@ void tab5_display_render_stats(tab5_render_stats_t *out)
     out->frames_skipped = s_frames_skipped;
     out->band_rows = s_band_rows;
     out->ppa_failures = s_ppa_failures;
+    out->ppa_timeouts = s_ppa_timeouts;
+    out->phase = s_phase;
+    out->ppa_last_err = s_ppa_last_err;
+    out->ppa_recoveries = s_ppa_recoveries;
+    out->ppa_stuck_y = s_ppa_stuck_y;
+    out->ppa_stuck_rows = s_ppa_stuck_rows;
+    out->ppa_last_y = s_ppa_last_y;
+    out->ppa_last_rows = s_ppa_last_rows;
     out->dsi_fb_count = s_dsi_fb_count;
     out->ppa_active = (s_ppa_srm != NULL);
     out->vsync_paced = (s_vsync_sem != NULL);

@@ -29,6 +29,7 @@
 #include "tsequencer_tab5.h"
 #include "power_tab5.h"
 #include "usb_host_tab5.h"
+#include "camera_tab5.h"
 
 extern int16_t lvgl_is_repl;
 
@@ -1251,6 +1252,14 @@ static mp_obj_t tulip_tab5_render_stats(void) {
         mp_obj_new_int_from_uint(st.dsi_fb_count),
         mp_obj_new_bool(st.ppa_active),
         mp_obj_new_bool(st.vsync_paced),
+        mp_obj_new_int_from_uint(st.ppa_timeouts),
+        mp_obj_new_int(st.phase),
+        mp_obj_new_int(st.ppa_last_err),
+        mp_obj_new_int_from_uint(st.ppa_recoveries),
+        mp_obj_new_int(st.ppa_stuck_y),
+        mp_obj_new_int(st.ppa_stuck_rows),
+        mp_obj_new_int(st.ppa_last_y),
+        mp_obj_new_int(st.ppa_last_rows),
     };
     return mp_obj_new_tuple(MP_ARRAY_SIZE(values), values);
 }
@@ -1902,6 +1911,261 @@ static mp_obj_t tulip_cpu(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_cpu_obj, 0, 1, tulip_cpu);
 
+// Camera. The Tab5's built-in SC2356 on MIPI-CSI, see camera_tab5.c. Frames are
+// 1280x720 RGB565 -- the screen's size and LVGL's colour depth on this board --
+// so camera_frame() output drops straight into an lv.image_dsc_t, and
+// camera_bg() is the cheap preview: the frame converted onto the BG plane.
+
+static void tab5_camera_raise(esp_err_t err, const char *what) {
+    if (err == ESP_ERR_INVALID_STATE) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("camera is not running"));
+    }
+    if (err == ESP_ERR_TIMEOUT) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("camera produced no frame"));
+    }
+    if (err == ESP_ERR_NO_MEM) {
+        mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("camera: out of memory"));
+    }
+    mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("camera %s: %s"), what, esp_err_to_name(err));
+}
+
+static int tab5_camera_flip_arg(mp_obj_t obj) {
+    if (obj == mp_const_none) {
+        return -1;
+    }
+    return mp_obj_is_true(obj) ? 1 : 0;
+}
+
+static mp_obj_t tulip_camera_start(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum { ARG_hflip, ARG_vflip };
+    static const mp_arg_t allowed[] = {
+        { MP_QSTR_hflip, MP_ARG_OBJ, {.u_obj = mp_const_none} },
+        { MP_QSTR_vflip, MP_ARG_OBJ, {.u_obj = mp_const_none} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
+    // Set before starting so the first frame already comes out the right way round.
+    tab5_camera_set_flip(tab5_camera_flip_arg(args[ARG_hflip].u_obj),
+                         tab5_camera_flip_arg(args[ARG_vflip].u_obj));
+    esp_err_t err = tab5_camera_start();
+    if (err != ESP_OK) {
+        tab5_camera_raise(err, "start");
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(tulip_camera_start_obj, 0, tulip_camera_start);
+
+static mp_obj_t tulip_camera_stop(void) {
+    esp_err_t err = tab5_camera_stop();
+    if (err != ESP_OK) {
+        tab5_camera_raise(err, "stop");
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_camera_stop_obj, tulip_camera_stop);
+
+static mp_obj_t tulip_camera_running(void) {
+    return mp_obj_new_bool(tab5_camera_running());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_camera_running_obj, tulip_camera_running);
+
+static mp_obj_t tulip_camera_info(void) {
+    tab5_camera_info_t info;
+    tab5_camera_info(&info);
+    mp_obj_t dict = mp_obj_new_dict(16);
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_sensor), mp_obj_new_str(info.sensor, strlen(info.sensor)));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_chip_id), mp_obj_new_int(info.chip_id));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_width), mp_obj_new_int(info.width));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_height), mp_obj_new_int(info.height));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_format), MP_ROM_QSTR(MP_QSTR_RGB565));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_initialized), mp_obj_new_bool(info.initialized));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_running), mp_obj_new_bool(info.running));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_frames), mp_obj_new_int_from_uint(info.frames));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_errors), mp_obj_new_int_from_uint(info.errors));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_dropped), mp_obj_new_int_from_uint(info.dropped));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_fps), mp_obj_new_int_from_uint(info.fps));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_hflip), mp_obj_new_bool(info.hflip));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_vflip), mp_obj_new_bool(info.vflip));
+    // AE/AWB state from the ISP pipeline controller; -1 when the camera is stopped.
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_gain), mp_obj_new_int(info.gain));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_exposure), mp_obj_new_int(info.exposure));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_red_balance), mp_obj_new_int(info.red_balance));
+    mp_obj_dict_store(dict, MP_ROM_QSTR(MP_QSTR_blue_balance), mp_obj_new_int(info.blue_balance));
+    return dict;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_camera_info_obj, tulip_camera_info);
+
+// camera_wait(seq=None, timeout_ms=1000): block until a frame newer than seq
+// (default: whatever is newest now) arrives. Returns the new sequence number,
+// or None on timeout.
+static mp_obj_t tulip_camera_wait(size_t n_args, const mp_obj_t *args) {
+    uint32_t seq = (n_args > 0 && args[0] != mp_const_none) ? (uint32_t)mp_obj_get_int(args[0]) : tab5_camera_seq();
+    uint32_t timeout_ms = n_args > 1 ? (uint32_t)mp_obj_get_int(args[1]) : 1000;
+    if (!tab5_camera_running()) {
+        tab5_camera_raise(ESP_ERR_INVALID_STATE, "wait");
+    }
+    uint32_t got = tab5_camera_wait(seq, timeout_ms);
+    if (got == 0) {
+        return mp_const_none;
+    }
+    return mp_obj_new_int_from_uint(got);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_camera_wait_obj, 0, 2, tulip_camera_wait);
+
+// camera_frame(w=1280, h=720, buf=None): the newest frame as RGB565, w*h*2
+// bytes, scaled to w x h. Fills and returns buf when given, else a new bytearray.
+static mp_obj_t tulip_camera_frame(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum { ARG_w, ARG_h, ARG_buf };
+    static const mp_arg_t allowed[] = {
+        { MP_QSTR_w, MP_ARG_INT, {.u_int = TAB5_CAMERA_WIDTH} },
+        { MP_QSTR_h, MP_ARG_INT, {.u_int = TAB5_CAMERA_HEIGHT} },
+        { MP_QSTR_buf, MP_ARG_OBJ, {.u_obj = mp_const_none} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
+    int w = args[ARG_w].u_int;
+    int h = args[ARG_h].u_int;
+    if (w <= 0 || h <= 0 || w > TAB5_CAMERA_WIDTH || h > TAB5_CAMERA_HEIGHT) {
+        mp_raise_ValueError(MP_ERROR_TEXT("frame size must be 1..1280 x 1..720"));
+    }
+    size_t need = (size_t)w * (size_t)h * 2;
+    mp_obj_t result = args[ARG_buf].u_obj;
+    uint16_t *dst;
+    if (result == mp_const_none) {
+        dst = (uint16_t *)m_new(byte, need);
+        result = mp_obj_new_bytearray_by_ref(need, dst);
+    } else {
+        mp_buffer_info_t info;
+        mp_get_buffer_raise(result, &info, MP_BUFFER_WRITE);
+        if (info.len != need) {
+            mp_raise_ValueError(MP_ERROR_TEXT("buf length does not match w*h*2"));
+        }
+        dst = (uint16_t *)info.buf;
+    }
+    esp_err_t err = tab5_camera_read_rgb565(dst, w, h);
+    if (err != ESP_OK) {
+        tab5_camera_raise(err, "frame");
+    }
+    return result;
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(tulip_camera_frame_obj, 0, tulip_camera_frame);
+
+// camera_bg(x=0, y=0, w=1280, h=720): draw the newest frame onto the BG plane.
+static mp_obj_t tulip_camera_bg(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum { ARG_x, ARG_y, ARG_w, ARG_h };
+    static const mp_arg_t allowed[] = {
+        { MP_QSTR_x, MP_ARG_INT, {.u_int = 0} },
+        { MP_QSTR_y, MP_ARG_INT, {.u_int = 0} },
+        { MP_QSTR_w, MP_ARG_INT, {.u_int = H_RES} },
+        { MP_QSTR_h, MP_ARG_INT, {.u_int = V_RES} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
+    tab5_require_bg();
+    int x = args[ARG_x].u_int, y = args[ARG_y].u_int;
+    int w = args[ARG_w].u_int, h = args[ARG_h].u_int;
+    if (w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > H_RES + OFFSCREEN_X_PX ||
+        y + h > V_RES + OFFSCREEN_Y_PX) {
+        mp_raise_ValueError(MP_ERROR_TEXT("bitmap rectangle out of range"));
+    }
+    esp_err_t err = tab5_camera_draw_bg(x, y, w, h);
+    if (err != ESP_OK) {
+        tab5_camera_raise(err, "bg");
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(tulip_camera_bg_obj, 0, tulip_camera_bg);
+
+static bool tab5_str_ends_with(const char *s, const char *suffix) {
+    size_t n = strlen(s), m = strlen(suffix);
+    if (m > n) {
+        return false;
+    }
+    for (size_t i = 0; i < m; i++) {
+        char a = s[n - m + i], b = suffix[i];
+        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+        if (a != b) return false;
+    }
+    return true;
+}
+
+// camera_capture(filename=None, quality=80): the newest frame as a still.
+// With a filename ending .jpg/.jpeg or .png, writes it and returns the byte
+// count; with none, returns the JPEG as bytes.
+static mp_obj_t tulip_camera_capture(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum { ARG_filename, ARG_quality };
+    static const mp_arg_t allowed[] = {
+        { MP_QSTR_filename, MP_ARG_OBJ, {.u_obj = mp_const_none} },
+        { MP_QSTR_quality, MP_ARG_INT, {.u_int = 80} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
+    int quality = args[ARG_quality].u_int;
+    if (quality < 1 || quality > 100) {
+        mp_raise_ValueError(MP_ERROR_TEXT("quality must be 1..100"));
+    }
+    const char *filename = NULL;
+    bool png = false;
+    if (args[ARG_filename].u_obj != mp_const_none) {
+        filename = mp_obj_str_get_str(args[ARG_filename].u_obj);
+        if (tab5_str_ends_with(filename, ".png")) {
+            png = true;
+        } else if (!tab5_str_ends_with(filename, ".jpg") && !tab5_str_ends_with(filename, ".jpeg")) {
+            mp_raise_ValueError(MP_ERROR_TEXT("filename must end in .jpg or .png"));
+        }
+    }
+    uint8_t *data = NULL;
+    size_t len = 0;
+    esp_err_t err = png ? tab5_camera_encode_png(&data, &len) : tab5_camera_encode_jpeg(quality, &data, &len);
+    if (err != ESP_OK) {
+        tab5_camera_raise(err, png ? "png" : "jpeg");
+    }
+    if (filename == NULL) {
+        mp_obj_t result = mp_obj_new_bytes(data, len);
+        free_caps(data);
+        return result;
+    }
+    uint32_t written = write_file(filename, data, (uint32_t)len, 1);
+    free_caps(data);
+    if (written != len) {
+        mp_raise_OSError(MP_EIO);
+    }
+    return mp_obj_new_int_from_uint(written);
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(tulip_camera_capture_obj, 0, tulip_camera_capture);
+
+// camera_flip(hflip=None, vflip=None): mirror on the sensor; returns (hflip, vflip).
+static mp_obj_t tulip_camera_flip(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum { ARG_hflip, ARG_vflip };
+    static const mp_arg_t allowed[] = {
+        { MP_QSTR_hflip, MP_ARG_OBJ, {.u_obj = mp_const_none} },
+        { MP_QSTR_vflip, MP_ARG_OBJ, {.u_obj = mp_const_none} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
+    esp_err_t err = tab5_camera_set_flip(tab5_camera_flip_arg(args[ARG_hflip].u_obj),
+                                         tab5_camera_flip_arg(args[ARG_vflip].u_obj));
+    if (err != ESP_OK) {
+        tab5_camera_raise(err, "flip");
+    }
+    tab5_camera_info_t info;
+    tab5_camera_info(&info);
+    mp_obj_t tuple[] = { mp_obj_new_bool(info.hflip), mp_obj_new_bool(info.vflip) };
+    return mp_obj_new_tuple(2, tuple);
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(tulip_camera_flip_obj, 0, tulip_camera_flip);
+
+// camera_test_pattern(on=True): the sensor's colour bars instead of the scene.
+static mp_obj_t tulip_camera_test_pattern(size_t n_args, const mp_obj_t *args) {
+    bool on = n_args == 0 ? true : mp_obj_is_true(args[0]);
+    esp_err_t err = tab5_camera_set_test_pattern(on);
+    if (err != ESP_OK) {
+        tab5_camera_raise(err, "test pattern");
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_camera_test_pattern_obj, 0, 1, tulip_camera_test_pattern);
+
 static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR__tulip) },
     { MP_ROM_QSTR(MP_QSTR_board), MP_ROM_PTR(&tulip_board_obj) },
@@ -2017,6 +2281,17 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_usb_status), MP_ROM_PTR(&tulip_usb_status_obj) },
     { MP_ROM_QSTR(MP_QSTR_usb_host_power), MP_ROM_PTR(&tulip_usb_host_power_obj) },
     { MP_ROM_QSTR(MP_QSTR_wifi_country), MP_ROM_PTR(&tulip_wifi_country_obj) },
+    // Camera
+    { MP_ROM_QSTR(MP_QSTR_camera_start), MP_ROM_PTR(&tulip_camera_start_obj) },
+    { MP_ROM_QSTR(MP_QSTR_camera_stop), MP_ROM_PTR(&tulip_camera_stop_obj) },
+    { MP_ROM_QSTR(MP_QSTR_camera_running), MP_ROM_PTR(&tulip_camera_running_obj) },
+    { MP_ROM_QSTR(MP_QSTR_camera_info), MP_ROM_PTR(&tulip_camera_info_obj) },
+    { MP_ROM_QSTR(MP_QSTR_camera_wait), MP_ROM_PTR(&tulip_camera_wait_obj) },
+    { MP_ROM_QSTR(MP_QSTR_camera_frame), MP_ROM_PTR(&tulip_camera_frame_obj) },
+    { MP_ROM_QSTR(MP_QSTR_camera_bg), MP_ROM_PTR(&tulip_camera_bg_obj) },
+    { MP_ROM_QSTR(MP_QSTR_camera_capture), MP_ROM_PTR(&tulip_camera_capture_obj) },
+    { MP_ROM_QSTR(MP_QSTR_camera_flip), MP_ROM_PTR(&tulip_camera_flip_obj) },
+    { MP_ROM_QSTR(MP_QSTR_camera_test_pattern), MP_ROM_PTR(&tulip_camera_test_pattern_obj) },
 };
 
 static MP_DEFINE_CONST_DICT(tulip_module_globals, tulip_module_globals_table);
