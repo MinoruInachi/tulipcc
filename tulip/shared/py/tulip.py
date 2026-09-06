@@ -195,6 +195,76 @@ def root_dir():
     except:
         return "/"
 
+# --- microSD card (Tab5 only) -------------------------------------------------
+# The Tab5's built-in microSD slot is driven through MicroPython's machine.SDCard
+# block device (not the BSP's bsp_sdcard_mount, which pulls in ESP-IDF FATFS and
+# clashes with MicroPython's own oofatfs at link time). Pins come from the M5Stack
+# BSP: CLK=43, CMD=44, D0-3=39/40/41/42; the card's I/O rail is the P4 on-chip LDO
+# channel 4 (ldo=4 is mandatory -- omitting it resets the board). The SDCard object
+# is kept in a module global so the GC can't collect it (its __del__ releases the
+# LDO and unpowers the card).
+_sd_card = None
+
+def sd_mount(path="/sd", width=4, freq=20_000_000):
+    # Mount the Tab5 microSD card at `path`. width=4 (fast) or 1. Returns the mount
+    # path; if already mounted, returns the existing path without remounting.
+    global _sd_card
+    if board() != "TAB5":
+        raise OSError("sd_mount is Tab5 only")
+    if _sd_card is not None:
+        return _sd_card[1]
+    if width not in (1, 4):
+        raise ValueError("width must be 1 or 4")
+    import machine, vfs
+    data = (39, 40, 41, 42) if width == 4 else (39,)
+    sd = machine.SDCard(slot=0, width=width, sck=43, cmd=44, data=data, ldo=4, freq=freq)
+    try:
+        if sd.ioctl(1, 0) != 0:  # card init; -1 usually means no card inserted
+            raise OSError("no SD card / init failed")
+        vfs.mount(sd, path)
+    except Exception:
+        sd.deinit()
+        raise
+    _sd_card = (sd, path)
+    return path
+
+def sd_unmount():
+    # Unmount the Tab5 microSD card and release the SDCard/LDO. Safe to call when
+    # nothing is mounted.
+    global _sd_card
+    if _sd_card is None:
+        return
+    sd, mp = _sd_card
+    _sd_card = None
+    import vfs
+    try:
+        vfs.umount(mp)
+    except Exception:
+        pass
+    sd.deinit()
+
+def sd_mounted():
+    # True if the microSD card is currently mounted by sd_mount().
+    return _sd_card is not None
+
+def sd_info():
+    # Dict of size/geometry for the mounted card, or None if not mounted.
+    if _sd_card is None:
+        return None
+    import os
+    sd, mp = _sd_card
+    st = os.statvfs(mp)
+    sectors = sd.ioctl(4, 0)
+    sector_size = sd.ioctl(5, 0)
+    return {
+        "mount": mp,
+        "sectors": sectors,
+        "sector_size": sector_size,
+        "capacity": sectors * sector_size,
+        "total": st[1] * st[2],
+        "free": st[1] * st[3],
+    }
+
 # This is only (fow now) done from macOS .app packages.
 # For linux/windows, it's copied on build -- no predefined packages for those (yet)
 # For iOS we work in the app folder, so no need to copy

@@ -1475,6 +1475,36 @@ error name for a failure to start) and `ValueError` for a bad `frames`,
 `seconds` or filename extension.
 
 
+## microSD card (Tab5 only)
+
+The Tab5 has a built-in microSD slot. `tulip.sd_mount()` brings it up and mounts
+it at `/sd`, after which it is a normal part of the filesystem -- use `os`,
+`open()`, etc. against `/sd/...`:
+
+```python
+tulip.sd_mount()                 # mount at /sd (4-bit mode); returns the mount path
+tulip.sd_mounted()               # True while mounted
+import os
+os.listdir("/sd")
+open("/sd/hello.txt", "w").write("hi\n")
+tulip.sd_info()                  # {'mount': '/sd', 'sectors': 61175808, 'sector_size': 512,
+                                 #  'capacity': 31322013696, 'total': ..., 'free': ...}
+tulip.sd_unmount()               # unmount and power the card down
+```
+
+`sd_mount(path="/sd", width=4, freq=20_000_000)` -- `width=1` is a slower but more
+forgiving fallback if a card won't enumerate at 4-bit. Calling it again while
+already mounted just returns the existing mount path (it does not remount).
+`sd_info()` returns `None` when nothing is mounted; `capacity` is the raw card
+size, `free`/`total` come from the mounted filesystem.
+
+The card must be inserted before `sd_mount()` -- an empty slot raises
+`OSError("no SD card / init failed")`. Under the hood this uses MicroPython's
+`machine.SDCard` block device (pins CLK=43/CMD=44/D0-3=39-42, powered by the P4
+on-chip LDO channel 4), not the BSP's FAT mount, so it coexists with Tulip's own
+flash filesystem.
+
+
 See `planet_boing` in `/sys/ex/` for a fleshed out example of using the `Game` and `Sprite` classes.
 
 # Can you help? 

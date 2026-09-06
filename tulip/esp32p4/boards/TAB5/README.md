@@ -52,6 +52,14 @@ This is documentation for the first scaffolded Tab5 port. The display helper now
 - `storage_tab5.c` intentionally does not call `bsp_spiffs_mount()` or `bsp_sdcard_mount()` during bring-up.
 - Reason: BSP mount helpers pull ESP-IDF FATFS symbols that conflict with MicroPython `lib/oofatfs` (`ff.c` duplicate symbols at link).
 - Any future BSP storage re-enable must first move the port to a single filesystem authority.
+- The built-in microSD slot **does** work, via MicroPython's `machine.SDCard`
+  block device (not the BSP FAT mount, which is what causes the `ff.c` clash
+  above). `tulip.sd_mount()` / `sd_unmount()` / `sd_mounted()` / `sd_info()`
+  (Python wrappers in `tulip/shared/py/tulip.py`) bring it up at `/sd`. Pins are
+  CLK=43, CMD=44, D0-3=39/40/41/42; the card's I/O rail is the P4 on-chip LDO
+  channel 4 (`ldo=4` is mandatory -- omitting it resets the board; the display
+  MIPI-DSI PHY uses LDO ch3, so no conflict). Verified on the v2 board with a
+  32 GB FAT32 card: 1-bit and 4-bit, mount + read/write + statvfs, no reset.
 - The partition table is `esp32p4/partitions-8MiBplus-ota.csv`: two 4.5 MiB
   app slots (`ota_0` at 0x10000, `ota_1` at 0x490000), a 3 MiB `system`
   (/sys) at 0x910000 and a 3.94 MiB `vfs` (/user) at 0xc10000. The slots grew

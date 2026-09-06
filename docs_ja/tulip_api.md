@@ -1445,6 +1445,36 @@ Python 側でコピーを間引いてください。たとえば 3 フレーム�
 ESP-IDF のエラー名）と、`frames`・`seconds`・拡張子が不正なときの `ValueError` で
 返ります。
 
+
+## microSD カード（Tab5 のみ）
+
+Tab5 には microSD スロットが内蔵されています。`tulip.sd_mount()` でカードを
+立ち上げて `/sd` にマウントすると、あとは通常のファイルシステムの一部として
+`os` や `open()` から `/sd/...` を普通に扱えます。
+
+```python
+tulip.sd_mount()                 # /sd にマウント（4bit モード）。マウントパスを返す
+tulip.sd_mounted()               # マウント中は True
+import os
+os.listdir("/sd")
+open("/sd/hello.txt", "w").write("hi\n")
+tulip.sd_info()                  # {'mount': '/sd', 'sectors': 61175808, 'sector_size': 512,
+                                 #  'capacity': 31322013696, 'total': ..., 'free': ...}
+tulip.sd_unmount()               # アンマウントしてカードの電源を落とす
+```
+
+`sd_mount(path="/sd", width=4, freq=20_000_000)` — `width=1` は遅いものの、
+4bit でカードが認識されないときの安全側フォールバックです。マウント済みの状態で
+再度呼ぶと、再マウントはせず既存のマウントパスをそのまま返します。`sd_info()` は
+未マウント時に `None` を返し、`capacity` はカードの生の容量、`free`/`total` は
+マウントしたファイルシステムから得た値です。
+
+`sd_mount()` の前にカードを挿入しておく必要があります。空スロットでは
+`OSError("no SD card / init failed")` になります。内部では BSP の FAT マウントでは
+なく MicroPython の `machine.SDCard` ブロックデバイス（ピンは CLK=43／CMD=44／
+D0-3=39-42、電源は P4 内蔵 LDO チャンネル 4）を使っているため、Tulip 本体の
+フラッシュファイルシステムと共存できます。
+
 # 手伝ってもらえませんか？
 
 私たちが考えている、協力していただけると嬉しいことです。
