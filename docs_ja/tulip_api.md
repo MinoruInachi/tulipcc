@@ -1379,6 +1379,72 @@ jpeg = tulip.camera_capture()                       # bytes
 ESP-IDF のエラー名。センサーが応答しない場合など）と、サイズ・矩形・quality・
 拡張子が不正なときの `ValueError` で返ります。
 
+## マイク（Tab5 のみ）
+
+Tab5 には内蔵マイクが 2 つあり、ES7210 ADC を通してスピーカーと同じ ESP32-P4 の
+I2S バスを共有しています。この 2 つが 1 つのクロックで全二重動作するため、マイクは
+**44100 Hz・16 ビット・ステレオ固定**（AMY の再生レートと同じ）で、1 回の読み出しで
+両マイクが `(左, 右, 左, 右, ...)` の 16 ビットサンプルとしてインターリーブされて
+得られます。録音と再生は同時に行えるので、AMY が音を出している最中でも録れます。
+
+```python
+tulip.mic_start()               # ADC を初期化して取り込み開始（既定 gain=30 dB）
+tulip.mic_running()             # 取り込み中は True
+tulip.mic_info()                # {'running': True, 'sample_rate': 44100, 'channels': 2,
+                                #  'bits': 16, 'gain': 30, 'blocks': 512, 'available': 3840,
+                                #  'capacity': 22050, 'overruns': 0, 'read_errors': 0,
+                                #  'peak_left': 284, 'peak_right': 273, 'initialized': True}
+                                # available/capacity: リングに溜まっているフレーム数 / その容量
+                                #   （0.5 秒分）。overruns は読み出しが間に合わず捨てられた
+                                #   フレーム数で、読み出しを止めれば増えるのは正常です。
+tulip.mic_stop()                # 取り込みを止める（スピーカーはそのまま動きます）
+```
+
+`mic_read()` はリングからサンプルを `bytes` で取り出します（1 フレーム 4 バイト、L の次に
+R、リトルエンディアン int16）。引数なしなら溜まっている分をすべて返し、リングが空の
+ときは最初のブロックを最大 `timeout_ms`（既定 1000）まで待ち、タイムアウトすると `None` を
+返します。`frames` で取り出す上限を指定できます。
+
+```python
+pcm = tulip.mic_read(frames=1024)        # 最大 1024 フレーム＝4096 バイト
+import array
+samples = array.array('h', pcm)          # 符号付き 16 ビット
+left = samples[0::2]; right = samples[1::2]
+```
+
+`mic_level()` は直近ブロックの各マイクのピークを `(左, 右)` で返します（それぞれ
+`0.0`〜`1.0`）。データをコピーしないので軽く、VU メーターや「誰か話しているか」判定に
+使えます。
+
+```python
+while True:
+    l, r = tulip.mic_level()
+    tulip.bg_rect(0, 100, int(l * 300), 20, (0, 255, 0), 1)   # 簡単なレベルバー
+```
+
+`mic_gain(db)` は ADC の入力ゲイン（0〜37 dB、範囲外はクランプ）を設定して返し、
+引数なしの `mic_gain()` は現在値を読むだけです。
+
+`mic_record(seconds, filename=None, mono=False)` は `seconds`（最大 30）の間ブロックして
+音声を集めます。`.wav` で終わるファイル名を渡すと完成した WAV ファイルを書き出して
+バイト数を返し、ファイル名なしなら生 PCM を `bytes` で返します。`mono=True` は 2 つの
+マイクを 1 チャンネルに平均します。
+
+```python
+tulip.mic_start()
+tulip.mic_record(3.0, "/user/memo.wav")            # 3 秒ステレオ WAV
+tulip.mic_record(3.0, "/user/memo.wav", mono=True) # 3 秒モノラル WAV
+pcm = tulip.mic_record(0.5)                        # 生ステレオバイト列
+tulip.mic_stop()
+```
+
+レートは固定なので、低いレートのファイル（ボイスメモや音声認識向け）が欲しいときは
+Python 側でコピーを間引いてください。たとえば 3 フレームごとに取れば約 14.7 kHz です。
+
+エラーは `RuntimeError`（`microphone is not running`、または起動に失敗したときの
+ESP-IDF のエラー名）と、`frames`・`seconds`・拡張子が不正なときの `ValueError` で
+返ります。
+
 # 手伝ってもらえませんか？
 
 私たちが考えている、協力していただけると嬉しいことです。

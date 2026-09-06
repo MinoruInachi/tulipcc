@@ -1407,6 +1407,73 @@ Errors come back as `RuntimeError` (`camera is not running`, or the ESP-IDF
 error name for a failure to start, e.g. when no sensor answers) and `ValueError`
 for a bad size, rectangle, quality or filename extension.
 
+## Microphone (Tab5 only)
+
+The Tab5 has two built-in microphones, fed through an ES7210 ADC that shares the
+ESP32-P4's I2S bus with the speaker. Because the two run full-duplex off one
+clock, the microphone is **fixed at 44100 Hz, 16-bit, stereo** -- the same rate
+AMY plays at -- and each read gives you both mics interleaved as `(left, right,
+left, right, ...)` 16-bit samples. Recording and playback happen at once, so you
+can capture while AMY is making sound.
+
+```python
+tulip.mic_start()               # program the ADC and start capturing (gain=30 dB by default)
+tulip.mic_running()             # True while capturing
+tulip.mic_info()                # {'running': True, 'sample_rate': 44100, 'channels': 2,
+                                #  'bits': 16, 'gain': 30, 'blocks': 512, 'available': 3840,
+                                #  'capacity': 22050, 'overruns': 0, 'read_errors': 0,
+                                #  'peak_left': 284, 'peak_right': 273, 'initialized': True}
+                                # available/capacity: frames waiting in the ring / its size
+                                #   (half a second). overruns counts frames dropped because
+                                #   nobody read them in time -- normal if you stop reading.
+tulip.mic_stop()                # stop capturing (the speaker keeps working)
+```
+
+`mic_read()` pulls samples out of the ring as `bytes` (four bytes per frame: L
+then R, little-endian int16). With no argument it returns whatever is buffered,
+waiting up to `timeout_ms` (default 1000) for the first block if the ring is
+empty, or `None` on a timeout. Pass `frames` to cap how many you take:
+
+```python
+pcm = tulip.mic_read(frames=1024)        # up to 1024 stereo frames as 4096 bytes
+import array
+samples = array.array('h', pcm)          # signed 16-bit
+left = samples[0::2]; right = samples[1::2]
+```
+
+`mic_level()` returns the last block's peak for each mic as `(left, right)`,
+each `0.0`-`1.0` -- cheap, no data copied, for a VU meter or "is anyone
+talking":
+
+```python
+while True:
+    l, r = tulip.mic_level()
+    tulip.bg_rect(0, 100, int(l * 300), 20, (0, 255, 0), 1)   # a simple level bar
+```
+
+`mic_gain(db)` sets the ADC input gain (0-37 dB, clamped) and returns it;
+`mic_gain()` with no argument just reads it.
+
+`mic_record(seconds, filename=None, mono=False)` blocks for `seconds` (up to 30)
+and collects the audio. With a filename ending `.wav` it writes a finished WAV
+file and returns the byte count; with no filename it returns the raw PCM as
+`bytes`. `mono=True` averages the two mics into one channel:
+
+```python
+tulip.mic_start()
+tulip.mic_record(3.0, "/user/memo.wav")            # 3 s stereo WAV
+tulip.mic_record(3.0, "/user/memo.wav", mono=True) # 3 s mono WAV
+pcm = tulip.mic_record(0.5)                        # raw stereo bytes
+tulip.mic_stop()
+```
+
+The rate is fixed, so for a lower-rate file (voice memos, speech recognition)
+decimate a copy in Python -- e.g. take every third frame for ~14.7 kHz.
+
+Errors come back as `RuntimeError` (`microphone is not running`, or the ESP-IDF
+error name for a failure to start) and `ValueError` for a bad `frames`,
+`seconds` or filename extension.
+
 
 See `planet_boing` in `/sys/ex/` for a fleshed out example of using the `Game` and `Sprite` classes.
 

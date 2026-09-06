@@ -30,6 +30,7 @@
 #include "power_tab5.h"
 #include "usb_host_tab5.h"
 #include "camera_tab5.h"
+#include "mic_tab5.h"
 
 extern int16_t lvgl_is_repl;
 
@@ -2234,6 +2235,239 @@ static mp_obj_t tulip_camera_test_pattern(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_camera_test_pattern_obj, 0, 1, tulip_camera_test_pattern);
 
+// Microphone. The Tab5's two built-in mics through the ES7210 ADC, see
+// mic_tab5.c. The rate and format are fixed (44.1 kHz, 16-bit stereo) because
+// the ADC shares the speaker's full-duplex I2S; the two mics are the two
+// channels of every read.
+static void tab5_mic_raise(esp_err_t err, const char *what) {
+    if (err == ESP_ERR_NO_MEM) {
+        mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("microphone: out of memory"));
+    }
+    mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("microphone %s: %s"), what, esp_err_to_name(err));
+}
+
+// mic_start(gain=30): program the ADC (once), open it and start capturing into
+// the ring. gain is the ADC input gain in dB, 0..37.
+static mp_obj_t tulip_mic_start(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum { ARG_gain };
+    static const mp_arg_t allowed[] = {
+        { MP_QSTR_gain, MP_ARG_INT, {.u_int = 30} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
+    esp_err_t err = tab5_mic_start(args[ARG_gain].u_int);
+    if (err != ESP_OK) {
+        tab5_mic_raise(err, "start");
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(tulip_mic_start_obj, 0, tulip_mic_start);
+
+static mp_obj_t tulip_mic_stop(void) {
+    esp_err_t err = tab5_mic_stop();
+    if (err != ESP_OK) {
+        tab5_mic_raise(err, "stop");
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_mic_stop_obj, tulip_mic_stop);
+
+static mp_obj_t tulip_mic_running(void) {
+    return mp_obj_new_bool(tab5_mic_running());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_mic_running_obj, tulip_mic_running);
+
+static mp_obj_t tulip_mic_info(void) {
+    tab5_mic_info_t info;
+    tab5_mic_info(&info);
+    mp_obj_t d = mp_obj_new_dict(0);
+    mp_obj_dict_store(d, MP_ROM_QSTR(MP_QSTR_running), mp_obj_new_bool(info.running));
+    mp_obj_dict_store(d, MP_ROM_QSTR(MP_QSTR_initialized), mp_obj_new_bool(info.initialized));
+    mp_obj_dict_store(d, MP_ROM_QSTR(MP_QSTR_sample_rate), mp_obj_new_int(info.sample_rate));
+    mp_obj_dict_store(d, MP_ROM_QSTR(MP_QSTR_channels), mp_obj_new_int(info.channels));
+    mp_obj_dict_store(d, MP_ROM_QSTR(MP_QSTR_bits), mp_obj_new_int(info.bits));
+    mp_obj_dict_store(d, MP_ROM_QSTR(MP_QSTR_gain), mp_obj_new_int(info.gain));
+    mp_obj_dict_store(d, MP_ROM_QSTR(MP_QSTR_blocks), mp_obj_new_int_from_uint(info.blocks));
+    mp_obj_dict_store(d, MP_ROM_QSTR(MP_QSTR_read_errors), mp_obj_new_int_from_uint(info.read_errors));
+    mp_obj_dict_store(d, MP_ROM_QSTR(MP_QSTR_overruns), mp_obj_new_int_from_uint(info.overruns));
+    mp_obj_dict_store(d, MP_ROM_QSTR(MP_QSTR_available), mp_obj_new_int_from_uint(info.available));
+    mp_obj_dict_store(d, MP_ROM_QSTR(MP_QSTR_capacity), mp_obj_new_int_from_uint(info.capacity));
+    mp_obj_dict_store(d, MP_ROM_QSTR(MP_QSTR_peak_left), mp_obj_new_int_from_uint(info.peak_left));
+    mp_obj_dict_store(d, MP_ROM_QSTR(MP_QSTR_peak_right), mp_obj_new_int_from_uint(info.peak_right));
+    return d;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_mic_info_obj, tulip_mic_info);
+
+// mic_read(frames=None, timeout_ms=1000): pull interleaved L,R int16 frames out
+// of the ring as bytes (4 bytes per frame). With frames=None, returns whatever
+// is buffered, waiting up to timeout_ms for the first block if the ring is
+// empty. Returns None if nothing arrived in time.
+#define TAB5_MIC_READ_DEFAULT_FRAMES 4096
+static mp_obj_t tulip_mic_read(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum { ARG_frames, ARG_timeout_ms };
+    static const mp_arg_t allowed[] = {
+        { MP_QSTR_frames, MP_ARG_OBJ, {.u_obj = mp_const_none} },
+        { MP_QSTR_timeout_ms, MP_ARG_INT, {.u_int = 1000} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
+    if (!tab5_mic_running()) {
+        tab5_mic_raise(ESP_ERR_INVALID_STATE, "read");
+    }
+    size_t req = TAB5_MIC_READ_DEFAULT_FRAMES;
+    if (args[ARG_frames].u_obj != mp_const_none) {
+        mp_int_t f = mp_obj_get_int(args[ARG_frames].u_obj);
+        if (f <= 0) {
+            mp_raise_ValueError(MP_ERROR_TEXT("frames must be positive"));
+        }
+        req = (size_t)f;
+    }
+    uint32_t timeout_ms = args[ARG_timeout_ms].u_int < 0 ? 0 : (uint32_t)args[ARG_timeout_ms].u_int;
+    int16_t *buf = malloc_caps(req * TAB5_MIC_CHANNELS * sizeof(int16_t),
+                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        tab5_mic_raise(ESP_ERR_NO_MEM, "read");
+    }
+    size_t got = tab5_mic_read(buf, req, timeout_ms);
+    if (got == 0) {
+        free_caps(buf);
+        return mp_const_none;
+    }
+    mp_obj_t result = mp_obj_new_bytes((const uint8_t *)buf, got * TAB5_MIC_CHANNELS * sizeof(int16_t));
+    free_caps(buf);
+    return result;
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(tulip_mic_read_obj, 0, tulip_mic_read);
+
+// mic_level(): the last block's per-mic peak as (left, right), each 0.0..1.0.
+static mp_obj_t tulip_mic_level(void) {
+    float l = 0.0f, r = 0.0f;
+    tab5_mic_levels(&l, &r);
+    mp_obj_t tuple[] = { mp_obj_new_float(l), mp_obj_new_float(r) };
+    return mp_obj_new_tuple(2, tuple);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_mic_level_obj, tulip_mic_level);
+
+// mic_gain(db=None): with no argument, returns the current ADC gain; with one,
+// sets it (0..37 dB) and returns the clamped value.
+static mp_obj_t tulip_mic_gain(size_t n_args, const mp_obj_t *args) {
+    if (n_args > 0) {
+        esp_err_t err = tab5_mic_set_gain(mp_obj_get_int(args[0]));
+        if (err != ESP_OK) {
+            tab5_mic_raise(err, "gain");
+        }
+    }
+    tab5_mic_info_t info;
+    tab5_mic_info(&info);
+    return mp_obj_new_int(info.gain);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_mic_gain_obj, 0, 1, tulip_mic_gain);
+
+// mic_record(seconds, filename=None, mono=False): block for `seconds` and
+// collect the audio. With a filename ending .wav, writes a WAV and returns the
+// byte count; otherwise returns the raw PCM as bytes. mono averages the two mics
+// into one channel. Capped at 30 s so a stray call cannot exhaust PSRAM.
+#define TAB5_MIC_RECORD_MAX_SECONDS 30
+static mp_obj_t tulip_mic_record(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum { ARG_seconds, ARG_filename, ARG_mono };
+    static const mp_arg_t allowed[] = {
+        { MP_QSTR_seconds, MP_ARG_REQUIRED | MP_ARG_OBJ, {.u_obj = mp_const_none} },
+        { MP_QSTR_filename, MP_ARG_OBJ, {.u_obj = mp_const_none} },
+        { MP_QSTR_mono, MP_ARG_BOOL, {.u_bool = false} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
+    if (!tab5_mic_running()) {
+        tab5_mic_raise(ESP_ERR_INVALID_STATE, "record");
+    }
+    float seconds = mp_obj_get_float(args[ARG_seconds].u_obj);
+    if (seconds <= 0.0f || seconds > (float)TAB5_MIC_RECORD_MAX_SECONDS) {
+        mp_raise_ValueError(MP_ERROR_TEXT("seconds must be > 0 and <= 30"));
+    }
+    bool mono = args[ARG_mono].u_bool;
+
+    tab5_mic_info_t info;
+    tab5_mic_info(&info);
+    uint32_t total_frames = (uint32_t)(seconds * (float)info.sample_rate);
+    // Capture is always native stereo; a mono file is downmixed on the way out.
+    int16_t *pcm = malloc_caps(total_frames * TAB5_MIC_CHANNELS * sizeof(int16_t),
+                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (pcm == NULL) {
+        tab5_mic_raise(ESP_ERR_NO_MEM, "record");
+    }
+
+    tab5_mic_flush();
+    uint32_t got = 0;
+    while (got < total_frames) {
+        size_t n = tab5_mic_read(pcm + got * TAB5_MIC_CHANNELS, total_frames - got, 1000);
+        if (n == 0) {
+            break;  // capture stopped or timed out
+        }
+        got += n;
+    }
+
+    uint32_t out_channels = mono ? 1 : TAB5_MIC_CHANNELS;
+    if (mono) {
+        // Average L,R in place into a contiguous mono run at the front.
+        for (uint32_t f = 0; f < got; f++) {
+            int32_t l = pcm[f * TAB5_MIC_CHANNELS + 0];
+            int32_t r = pcm[f * TAB5_MIC_CHANNELS + 1];
+            pcm[f] = (int16_t)((l + r) / 2);
+        }
+    }
+    uint32_t pcm_bytes = got * out_channels * sizeof(int16_t);
+
+    const char *filename = NULL;
+    if (args[ARG_filename].u_obj != mp_const_none) {
+        filename = mp_obj_str_get_str(args[ARG_filename].u_obj);
+        if (!tab5_str_ends_with(filename, ".wav")) {
+            free_caps(pcm);
+            mp_raise_ValueError(MP_ERROR_TEXT("filename must end in .wav"));
+        }
+    }
+
+    if (filename == NULL) {
+        mp_obj_t result = mp_obj_new_bytes((const uint8_t *)pcm, pcm_bytes);
+        free_caps(pcm);
+        return result;
+    }
+
+    // Prepend a 44-byte canonical PCM WAV header, then write header + samples.
+    uint32_t data_bytes = pcm_bytes;
+    uint32_t byte_rate = info.sample_rate * out_channels * sizeof(int16_t);
+    uint16_t block_align = (uint16_t)(out_channels * sizeof(int16_t));
+    uint32_t riff_size = 36 + data_bytes;
+    uint8_t *file = malloc_caps(44 + data_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (file == NULL) {
+        free_caps(pcm);
+        tab5_mic_raise(ESP_ERR_NO_MEM, "record");
+    }
+    uint8_t *h = file;
+    memcpy(h, "RIFF", 4);                                        h += 4;
+    h[0] = riff_size; h[1] = riff_size >> 8; h[2] = riff_size >> 16; h[3] = riff_size >> 24; h += 4;
+    memcpy(h, "WAVEfmt ", 8);                                    h += 8;
+    h[0] = 16; h[1] = 0; h[2] = 0; h[3] = 0;                     h += 4;  // fmt chunk size
+    h[0] = 1; h[1] = 0;                                          h += 2;  // PCM
+    h[0] = out_channels; h[1] = out_channels >> 8;               h += 2;
+    h[0] = info.sample_rate; h[1] = info.sample_rate >> 8;
+    h[2] = info.sample_rate >> 16; h[3] = info.sample_rate >> 24; h += 4;
+    h[0] = byte_rate; h[1] = byte_rate >> 8; h[2] = byte_rate >> 16; h[3] = byte_rate >> 24; h += 4;
+    h[0] = block_align; h[1] = block_align >> 8;                 h += 2;
+    h[0] = TAB5_MIC_BITS; h[1] = 0;                              h += 2;  // bits per sample
+    memcpy(h, "data", 4);                                        h += 4;
+    h[0] = data_bytes; h[1] = data_bytes >> 8; h[2] = data_bytes >> 16; h[3] = data_bytes >> 24; h += 4;
+    memcpy(h, pcm, data_bytes);
+    free_caps(pcm);
+
+    uint32_t written = write_file(filename, file, 44 + data_bytes, 1);
+    free_caps(file);
+    if (written != 44 + data_bytes) {
+        mp_raise_OSError(MP_EIO);
+    }
+    return mp_obj_new_int_from_uint(written);
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(tulip_mic_record_obj, 1, tulip_mic_record);
+
 static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR__tulip) },
     { MP_ROM_QSTR(MP_QSTR_board), MP_ROM_PTR(&tulip_board_obj) },
@@ -2361,6 +2595,14 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_camera_capture), MP_ROM_PTR(&tulip_camera_capture_obj) },
     { MP_ROM_QSTR(MP_QSTR_camera_flip), MP_ROM_PTR(&tulip_camera_flip_obj) },
     { MP_ROM_QSTR(MP_QSTR_camera_test_pattern), MP_ROM_PTR(&tulip_camera_test_pattern_obj) },
+    { MP_ROM_QSTR(MP_QSTR_mic_start), MP_ROM_PTR(&tulip_mic_start_obj) },
+    { MP_ROM_QSTR(MP_QSTR_mic_stop), MP_ROM_PTR(&tulip_mic_stop_obj) },
+    { MP_ROM_QSTR(MP_QSTR_mic_running), MP_ROM_PTR(&tulip_mic_running_obj) },
+    { MP_ROM_QSTR(MP_QSTR_mic_info), MP_ROM_PTR(&tulip_mic_info_obj) },
+    { MP_ROM_QSTR(MP_QSTR_mic_read), MP_ROM_PTR(&tulip_mic_read_obj) },
+    { MP_ROM_QSTR(MP_QSTR_mic_level), MP_ROM_PTR(&tulip_mic_level_obj) },
+    { MP_ROM_QSTR(MP_QSTR_mic_gain), MP_ROM_PTR(&tulip_mic_gain_obj) },
+    { MP_ROM_QSTR(MP_QSTR_mic_record), MP_ROM_PTR(&tulip_mic_record_obj) },
 };
 
 static MP_DEFINE_CONST_DICT(tulip_module_globals, tulip_module_globals_table);

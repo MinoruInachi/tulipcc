@@ -239,6 +239,38 @@ long yields a tick so IDLE0 keeps the task watchdog fed. The screen slows
 down; it no longer stops. `tulip.tab5_render_stats()` shows the phase, the
 timeout and recovery counts, and the band of the first rotation that stalled.
 
+## Microphone (dual mic)
+
+The two built-in mics reach the P4 through the ES7210 ADC, which shares the same
+full-duplex I2S controller as the ES8388 speaker. `bsp_audio_init()` (from
+`tab5_audio_init()`) already brings up both the TX and RX halves of that
+controller at `AMY_SAMPLE_RATE` / 16-bit / stereo for AMY playback, so the mic
+path is clocked off the very same BCLK/WS. That fixes the capture format: the
+rate is `AMY_SAMPLE_RATE` (44.1 kHz) and the two mics are the two 16-bit I2S
+slots of every read. Reconfiguring the clock to record at some other rate would
+pull it out from under the speaker mid-block, so software decimates a copy
+instead if it wants a lower rate.
+
+`mic_tab5.c` programs the ES7210 lazily -- only on the first `mic_start()`, so
+the shared bus is untouched until a caller actually asks to record -- opens the
+codec (`bsp_audio_codec_microphone_init()` + `esp_codec_dev_open()`) and runs a
+capture task on core 0, beside the display, touch and camera tasks. The task
+blocks in `esp_codec_dev_read()` and pushes each 256-frame block into a PSRAM
+ring (half a second, drop-oldest with an overrun counter) under a lock; a reader
+on the MicroPython task copies out of the ring and never waits on the ADC.
+
+The Python API (`tulip.mic_*`, see `docs/tulip_api.md`, Tab5 only):
+`mic_start(gain=)`, `mic_stop()`, `mic_running()`, `mic_info()`, `mic_read()`
+(interleaved L,R int16 bytes), `mic_level()` (per-mic peak for a meter),
+`mic_gain()` and `mic_record()` (blocks for N seconds and returns raw PCM, or
+writes a WAV -- stereo, or `mono=True` to downmix).
+
+Verified on the v2 board (ST7123, P4 rev v1.3): both mics capture (peak/RMS
+comparable on left and right), `mic_read()` and `mic_record()` return the
+expected byte counts, the WAV header round-trips (44.1 kHz / 16-bit / 2 ch), and
+recording runs concurrently with AMY playback. Playback is unaffected by opening
+the mic.
+
 ## Tulip API status
 
 The Tab5 native module currently exposes the common display APIs used by
