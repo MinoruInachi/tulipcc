@@ -9,6 +9,9 @@ list(APPEND IDF_COMPONENTS usb)
 # The built-in camera (camera_tab5.c): esp_video and the sensor drivers come in
 # through the BSP, the P4's hardware JPEG encoder does not.
 list(APPEND IDF_COMPONENTS esp_driver_jpeg espressif__esp_video espressif__esp_cam_sensor)
+# The built-in IMU (imu_tab5.c) reads the BMI270 through its standalone driver,
+# which is pulled in through the BSP; name it so main links against it.
+list(APPEND IDF_COMPONENTS espressif__bmi270)
 # Tab5 drives the touch controllers directly rather than through bsp_touch_new(),
 # so it can raise the I2C clock and keep the TP_INT interrupt.
 list(APPEND IDF_COMPONENTS

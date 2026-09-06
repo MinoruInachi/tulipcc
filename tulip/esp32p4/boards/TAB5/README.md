@@ -279,6 +279,31 @@ expected byte counts, the WAV header round-trips (44.1 kHz / 16-bit / 2 ch), and
 recording runs concurrently with AMY playback. Playback is unaffected by opening
 the mic.
 
+## Motion sensor (IMU)
+
+The board carries a Bosch BMI270 6-axis IMU (accelerometer + gyroscope) on the
+shared I2C bus at 0x68. `imu_tab5.c` reads it through the standalone
+`espressif/bmi270` driver -- not the BSP's `bsp_sensor_init()` /
+`iot_sensor_hub` path, which needs an event loop and its own acquisition task.
+The sensor is brought up lazily on the first read (`bmi270_create()` +
+`bmi270_start()` at accel/gyro 100 Hz, +/-4 g / +/-2000 dps) using
+`bsp_i2c_get_handle()`, then polled on demand from the MicroPython task, so
+nothing runs unless a caller asks for a sample. The i2c_master bus serialises
+access, so sharing it with touch and the keyboard is safe. `bmi270`'s enable
+sequence returns all-zero for the first few reads, so `imu_tab5.c` polls (up to
+~250 ms, once, at init) for a real sample before returning, so the caller's very
+first read already reflects the sensor.
+
+The Python API (`docs/tulip_api.md`, Tab5 only) is a single call:
+`tulip.imu()` returns `(ax, ay, az, gx, gy, gz)` -- accel in g, gyro in
+degrees/second -- and raises `RuntimeError` if the sensor can't be reached. The
+`espressif__bmi270` component (a BSP dependency) is named in `main/CMakeLists.txt`
+`IDF_COMPONENTS` so `main` links against it.
+
+Verified on the v2 board (ST7123, P4 rev v1.3): at rest `sqrt(ax^2+ay^2+az^2)`
+is ~1.0 g and the gyro is near zero; the first read after boot already returns
+real data.
+
 ## Tulip API status
 
 The Tab5 native module currently exposes the common display APIs used by

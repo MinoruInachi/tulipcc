@@ -1505,6 +1505,33 @@ on-chip LDO channel 4), not the BSP's FAT mount, so it coexists with Tulip's own
 flash filesystem.
 
 
+## Motion sensor / IMU (Tab5 only)
+
+The Tab5 has a built-in Bosch BMI270 6-axis IMU (accelerometer + gyroscope).
+`tulip.imu()` reads one sample and returns six floats:
+
+```python
+ax, ay, az, gx, gy, gz = tulip.imu()   # accel in g, gyro in degrees/second
+```
+
+The accelerometer values are in g (at rest one axis reads about 1.0 from
+gravity, so `sqrt(ax*ax + ay*ay + az*az)` is ~1.0); the gyroscope values are in
+degrees/second (near zero when the board is still). The sensor is brought up on
+the first call (accel and gyro at 100 Hz, ranges +/-4 g and +/-2000 dps) and
+then polled on demand -- nothing runs until you ask for a sample. Read it as
+often as you like, e.g. from a `frame_callback`, to detect tilt or motion:
+
+```python
+import math
+ax, ay, az, _, _, _ = tulip.imu()
+# rough screen-tilt angle, degrees from flat
+pitch = math.degrees(math.atan2(ay, math.sqrt(ax*ax + az*az)))
+```
+
+If the IMU can't be reached (e.g. a board without it populated) `imu()` raises
+`RuntimeError`.
+
+
 See `planet_boing` in `/sys/ex/` for a fleshed out example of using the `Game` and `Sprite` classes.
 
 # Can you help? 

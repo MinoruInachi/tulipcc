@@ -75,6 +75,7 @@ set(MICROPY_SOURCE_BOARD
     ${MICROPY_BOARD_DIR}/usb_host_tab5.c
     ${MICROPY_BOARD_DIR}/camera_tab5.c
     ${MICROPY_BOARD_DIR}/mic_tab5.c
+    ${MICROPY_BOARD_DIR}/imu_tab5.c
     ${MICROPY_BOARD_DIR}/tab5_revision.c
     ${MICROPY_BOARD_DIR}/power_tab5.c
     ${MICROPY_BOARD_DIR}/storage_tab5.c

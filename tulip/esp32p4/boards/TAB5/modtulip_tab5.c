@@ -31,6 +31,7 @@
 #include "usb_host_tab5.h"
 #include "camera_tab5.h"
 #include "mic_tab5.h"
+#include "imu_tab5.h"
 
 extern int16_t lvgl_is_repl;
 
@@ -2468,6 +2469,24 @@ static mp_obj_t tulip_mic_record(size_t n_args, const mp_obj_t *pos_args, mp_map
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW(tulip_mic_record_obj, 1, tulip_mic_record);
 
+// imu(): read the Tab5's built-in BMI270 6-axis motion sensor and return
+// (ax, ay, az, gx, gy, gz) -- accelerometer in g, gyroscope in degrees/second.
+// The sensor is brought up on the first call; raises RuntimeError if it can't
+// be reached (e.g. on a board without the IMU populated).
+static mp_obj_t tulip_imu(void) {
+    float ax, ay, az, gx, gy, gz;
+    esp_err_t err = tab5_imu_read(&ax, &ay, &az, &gx, &gy, &gz);
+    if (err != ESP_OK) {
+        mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("imu: %s"), esp_err_to_name(err));
+    }
+    mp_obj_t t[6] = {
+        mp_obj_new_float(ax), mp_obj_new_float(ay), mp_obj_new_float(az),
+        mp_obj_new_float(gx), mp_obj_new_float(gy), mp_obj_new_float(gz),
+    };
+    return mp_obj_new_tuple(6, t);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_imu_obj, tulip_imu);
+
 static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR__tulip) },
     { MP_ROM_QSTR(MP_QSTR_board), MP_ROM_PTR(&tulip_board_obj) },
@@ -2603,6 +2622,7 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_mic_level), MP_ROM_PTR(&tulip_mic_level_obj) },
     { MP_ROM_QSTR(MP_QSTR_mic_gain), MP_ROM_PTR(&tulip_mic_gain_obj) },
     { MP_ROM_QSTR(MP_QSTR_mic_record), MP_ROM_PTR(&tulip_mic_record_obj) },
+    { MP_ROM_QSTR(MP_QSTR_imu), MP_ROM_PTR(&tulip_imu_obj) },
 };
 
 static MP_DEFINE_CONST_DICT(tulip_module_globals, tulip_module_globals_table);
