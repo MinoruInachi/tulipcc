@@ -153,6 +153,33 @@ try:
     # user pointed AMY at another board" and so sent transfer payload unmarked
     # instead of down the sysex-flagged path -- that is amy #1045, and it broke
     # amy.load_sample_bytes() here. override_send stays free for what it is for.
+
+    # amy.message() in C, same as the other targets get from shared/_boot.py:
+    # tulip.amy_message() builds the same wire string with a table walk into a
+    # stack buffer instead of per-argument map slicing and `+=`, all of which
+    # allocate. Capture the Python original FIRST and have the fallback call it
+    # by name, or the fallback finds this function again and recurses.
+    #
+    # The C side returns None for anything it does not reproduce exactly (an
+    # unknown keyword, a numeric string where an int was meant, an overlong
+    # message) and the Python original then runs, raising whatever it was going
+    # to raise. Kwarg combos that amy.message() warns about while
+    # amy.show_warnings is set skip the fast path so those diagnostics fire.
+    # Installed before midi.setup() so its sends take the fast path too.
+    _py_amy_message = amy.message
+    amy._py_message = _py_amy_message
+
+    def _c_amy_message(**kwargs):
+        if amy.show_warnings and ('patch_string' in kwargs or 'num_partials' in kwargs or
+                ('voices' in kwargs and ('preset' in kwargs or 'synth' in kwargs))):
+            return _py_amy_message(**kwargs)
+        m = tulip.amy_message(**kwargs)
+        if m is None:
+            return _py_amy_message(**kwargs)
+        return m
+
+    amy.message = _c_amy_message
+
     midi.setup()
 except Exception as e:
     print("TAB5 boot: audio/MIDI init skipped:", e)

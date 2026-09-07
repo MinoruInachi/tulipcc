@@ -335,8 +335,12 @@ palette and (r, g, b) colours, screenshots, TFB access, brightness, frame/touch
 callbacks, and sprite PNG/bitmap/register/move/visibility/collision operations.
 These paths use the shared Tulip renderer and are tested on hardware through
 `mpremote ... resume` so attaching does not soft-reset the running board.
-The module also exposes `amy_send`, `amy_ticks_ms`, and `midi_callback` for the
-in-process AMY engine and Python MIDI routing.
+The module also exposes `amy_send`, `amy_message`, `amy_ticks_ms`, and
+`midi_callback` for the in-process AMY engine and Python MIDI routing.
+`amy_message` is the C wire-string builder `_boot.py` installs over
+`amy.message()`; it comes from `shared/amy_message.inc`, textually included
+because this board does not build `amy_connector.c` where the other targets get
+it. Measured here: 3.7x on a note-on, 13x on a six-keyword message.
 
 The following APIs are intentionally not exposed yet:
 
@@ -346,7 +350,20 @@ The following APIs are intentionally not exposed yet:
 - `cpu`: the current ESP32-P4 FreeRTOS build does not enable runtime task stats.
 - `display_clock`, `display_start`, `display_stop`, and `display_restart`: the
 	MIPI display task does not yet support safe runtime teardown and recreation.
-- Hardware MIDI APIs: no Tab5 MIDI transport backend is integrated yet.
+- DIN/TRS MIDI: the Tab5 has no MIDI jack, and `amy_config.midi` is
+	`AMY_MIDI_IS_NONE`, so AMY's own UART transport is off. This is **not** a gap
+	in MIDI support -- `usb_host_tab5.c` drives MIDI in *and* out over the USB-A
+	host port, and `midi_in`, `midi_out`, `midi_local`, `sysex_in` and
+	`midi_callback` are all exposed -- so a class-compliant USB-MIDI adapter gives
+	full DIN I/O with no firmware change.
+- The AMY control APIs that live in `amy_connector.c`: `pcm_load_file`,
+	`amy_send_sysex`, `amy_overload_callback`, `amy_set_external_input_buffer`,
+	`amy_set_external_channel`, `set_cv_synth`. No external file/exec/reboot/
+	overload hooks are installed, so AMY's `zL` sample load, `zT` file transfer,
+	remote exec/reboot and the render-overload failsafe are all inert here.
+	Installing the file hooks needs the sysex dispatch moved to the MP thread
+	first: `amy_midi.c`'s non-`TULIP` branch calls `amy_add_message()` inline from
+	the USB host task, and the hooks reach MicroPython's VFS and heap.
 
 ## ulab (numpy / scipy)
 

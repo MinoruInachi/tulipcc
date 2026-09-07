@@ -2487,6 +2487,13 @@ static mp_obj_t tulip_imu(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(tulip_imu_obj, tulip_imu);
 
+// tulip.amy_message(): the C wire-string builder that _boot.py installs over
+// amy.message(). Shared verbatim with the other targets, which get it from
+// amy_connector.c -- a file this board does not build. It is pure string
+// building against MicroPython's own formatters, touching neither AMY nor the
+// board, so it needs nothing from here beyond the MP headers already included.
+#include "../../../shared/amy_message.inc"
+
 static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR__tulip) },
     { MP_ROM_QSTR(MP_QSTR_board), MP_ROM_PTR(&tulip_board_obj) },
@@ -2503,6 +2510,7 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_amy_render_load), MP_ROM_PTR(&tulip_amy_render_load_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_set_render_load_threshold), MP_ROM_PTR(&tulip_amy_set_render_load_threshold_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_send), MP_ROM_PTR(&tulip_amy_send_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_message), MP_ROM_PTR(&tulip_amy_message_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_send_wire_from_sysex), MP_ROM_PTR(&tulip_amy_send_wire_from_sysex_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_bleep), MP_ROM_PTR(&tulip_amy_bleep_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_process_single_midi_byte), MP_ROM_PTR(&tulip_amy_process_single_midi_byte_obj) },
