@@ -356,14 +356,46 @@ The following APIs are intentionally not exposed yet:
 	host port, and `midi_in`, `midi_out`, `midi_local`, `sysex_in` and
 	`midi_callback` are all exposed -- so a class-compliant USB-MIDI adapter gives
 	full DIN I/O with no firmware change.
-- The AMY control APIs that live in `amy_connector.c`: `pcm_load_file`,
-	`amy_send_sysex`, `amy_overload_callback`, `amy_set_external_input_buffer`,
-	`amy_set_external_channel`, `set_cv_synth`. No external file/exec/reboot/
-	overload hooks are installed, so AMY's `zL` sample load, `zT` file transfer,
-	remote exec/reboot and the render-overload failsafe are all inert here.
-	Installing the file hooks needs the sysex dispatch moved to the MP thread
-	first: `amy_midi.c`'s non-`TULIP` branch calls `amy_add_message()` inline from
-	the USB host task, and the hooks reach MicroPython's VFS and heap.
+- The remaining `amy_connector.c` APIs: `amy_overload_callback`,
+	`amy_set_external_input_buffer`, `amy_set_external_channel`, `set_cv_synth`.
+	No exec, reboot or overload hooks are installed, so remote exec/reboot and the
+	render-overload failsafe are inert here. (The exec/reboot/transfer-done hook
+	bodies are `AMYBOARD`-only anyway -- they are no-ops on Tulip CC too.)
+
+## Sysex, and the file hooks that depend on it
+
+AMY's file-I/O hooks (`shared/amy_file_hooks.inc`, registered in
+`audio_tab5.c`) are what make `zL` / `amy.disk_sample()` and `zT` file transfer
+work; without them `pcm.c` bails with "fopen hook not enabled on platform".
+They call `mp_vfs_open()` and `mp_stream_rw()` and allocate on the MicroPython
+heap, so **they may only run on the MP thread** -- which is a constraint on how
+sysex is dispatched, not on the hooks.
+
+`amy.send()` from Python is already on that thread. Sysex was not: it arrives on
+the USB host task, and `parse_sysex()`'s non-`TULIP` branch called
+`amy_add_message()` there inline. Installing the hooks on top of that would have
+let a sysex-borne `zL` reach the MP heap from the wrong task.
+
+So `TAB5` now joins `TULIP`/`AMYBOARD` in two places in the amy submodule:
+
+- `amy_midi.c` defers the dispatch, copying the payload into a ring slot and
+	scheduling `tulip_amy_send_sysex()` (in `modtulip_tab5.c`) on the MP thread.
+- `amy_midi.h` gives TAB5 `SYSEX_COPY_SLOTS 8`. This is **not** optional here:
+	with 0 slots the deferred branch finds a NULL slot and ACKs the message
+	*without processing it*, which is what Tulip CC does. On this board the ring
+	is what makes deferred sysex work at all. 8 x 16 KB comes out of PSRAM
+	(`ram_caps_sysex`), which this board has 32 MB of.
+
+`audio_tab5.c` also installs `amy_external_midi_output_hook = send_usb_midi_out`.
+`amy_config.midi` is `AMY_MIDI_IS_NONE`, so AMY's own `midi_out()` has no device
+to write to; without the hook its replies -- the `zI` identity ping and the sysex
+ACK that flow-controls a sender -- were dropped.
+
+Verified on hardware: a sysex-wrapped wire command produced identical audio
+before and after the change (peak 1074 both ways), and a 1 kHz WAV written to
+`/user`, loaded with `amy.disk_sample()` and played back measured 1034 Hz off
+`amy_get_output_buffer()` -- 12 zero crossings in a 256-frame block, which is
+that measurement's resolution.
 
 ## ulab (numpy / scipy)
 

@@ -17,6 +17,7 @@
 #include "modtulip_tab5.h"
 // tulip_amy_sequencer_hook() -- fans a sequencer tick out to Python callbacks.
 #include "tsequencer_tab5.h"
+#include "usb_host_tab5.h"  // send_usb_midi_out(), AMY's MIDI output hook
 
 static const char *TAG = "TAB5-AUDIO";
 static esp_codec_dev_handle_t s_speaker;
@@ -192,6 +193,25 @@ void tab5_audio_init(void)
     // tulip.midi_in()/sysex_in() and fires tulip.midi_callback(), which is what
     // midi.py listens on.
     amy_config.amy_external_midi_input_hook = tulip_amy_midi_hook;
+    // The other end of that: everything AMY sends goes out the USB-A port.
+    // amy_config.midi is AMY_MIDI_IS_NONE, so AMY's own midi_out() has no device
+    // interface to write to and this hook is the only route off the board.
+    // Without it AMY's replies are dropped -- the zI identity ping, and the
+    // sysex ACK that flow-controls a sender through tulip_amy_send_sysex().
+    amy_config.amy_external_midi_output_hook = send_usb_midi_out;
+    // File I/O over MicroPython's VFS, so AMY's `zL` (load a PCM preset from a
+    // file) and `zT` file transfer work instead of bailing with "fopen hook not
+    // enabled on platform". Definitions come from shared/amy_file_hooks.inc via
+    // modtulip_tab5.c. These run MicroPython calls, so they are only safe
+    // because every path that parses a wire message on this board now lands on
+    // the MP thread: amy.send() from Python is already there, and sysex is
+    // deferred through parse_sysex()'s copy-slot ring (amy_midi.c names TAB5)
+    // into tulip_amy_send_sysex().
+    amy_config.amy_external_fopen_hook = mp_fopen_hook;
+    amy_config.amy_external_fseek_hook = mp_fseek_hook;
+    amy_config.amy_external_fclose_hook = mp_fclose_hook;
+    amy_config.amy_external_fread_hook = mp_fread_hook;
+    amy_config.amy_external_fwrite_hook = mp_fwrite_hook;
     amy_start(amy_config);
 
     BaseType_t task_result = xTaskCreatePinnedToCore(

@@ -12,6 +12,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "../../../../amy/src/amy.h"
+// SYSEX_COPY_SLOTS / sysex_message_copies / sysex_copy_read_idx, for the
+// deferred sysex dispatch below, plus midi_out() for its ACK.
+#include "../../../../amy/src/amy_midi.h"
 
 #include "../../../shared/display.h"
 #include "../../../shared/bresenham.h"
@@ -400,6 +403,45 @@ static mp_obj_t tulip_midi_local(mp_obj_t data_obj) {
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(tulip_midi_local_obj, tulip_midi_local);
+
+/*
+ * Drain one sysex message on the MicroPython thread.
+ *
+ * AMY's parse_sysex() runs on whatever task the MIDI arrived on -- the USB host
+ * task here -- so it copies the payload into a ring slot and schedules this
+ * instead of dispatching inline. That matters because a wire command can reach
+ * the file hooks (zL, zT), and those call mp_vfs_open() and allocate on the MP
+ * heap; neither is safe off this thread. amy_midi.h gives TAB5 the slots, and
+ * amy_midi.c's deferred branch names TAB5 alongside TULIP and AMYBOARD.
+ *
+ * Not static: amy_midi.c declares `extern ... tulip_amy_send_sysex_obj` and
+ * schedules it by address.
+ */
+static mp_obj_t tulip_amy_send_sysex(size_t n_args, const mp_obj_t *args) {
+    (void)n_args; (void)args;
+#if SYSEX_COPY_SLOTS > 0
+    char *slot = sysex_message_copies[sysex_copy_read_idx];
+    sysex_copy_read_idx = (sysex_copy_read_idx + 1) % SYSEX_COPY_SLOTS;
+#else
+    char *slot = NULL;
+#endif
+    if (slot) {
+        // _from_sysex, not amy_add_message: during a file transfer this routes
+        // the payload to parse_transfer_message() instead of being read as a
+        // wire command. amy.send() from Python keeps the direct path.
+        amy_send_wire_from_sysex(slot);
+    }
+    // ACK only after the slot is drained, so a flow-controlled sender never runs
+    // more than the ring depth ahead. Reaches the USB port through the external
+    // MIDI output hook audio_tab5.c installs -- amy_config.midi is
+    // AMY_MIDI_IS_NONE here, so AMY's own midi_out() has no device to write to.
+    {
+        uint8_t ack[] = { 0xF0, 0x00, 0x03, 0x45, 'A', 'K', 0xF7 };
+        midi_out(ack, sizeof(ack));
+    }
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_amy_send_sysex_obj, 0, 1, tulip_amy_send_sysex);
 
 static mp_obj_t tulip_build_strings(void) {
     mp_obj_t tuple[] = {
@@ -2487,6 +2529,23 @@ static mp_obj_t tulip_imu(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(tulip_imu_obj, tulip_imu);
 
+// AMY's file-I/O hooks over MicroPython's VFS, shared with the other targets
+// (they get them from amy_connector.c). audio_tab5.c installs them into
+// amy_config; without them AMY's zL sample load and zT file transfer bail with
+// "fopen hook not enabled on platform". Safe here only because this board's
+// sysex dispatch is deferred to the MP thread -- see tulip_amy_send_sysex().
+#include "../../../shared/amy_file_hooks.inc"
+
+// pcm_load_file(): finish a `zL` (load PCM preset from a file) that a wire
+// message set up, and return AMY's result code. Same shape as the other
+// targets'. AMY reaches pcm_load_file() itself from parse.c; this exposes it to
+// Python so a sketch can drive the same load without going through the wire.
+static mp_obj_t tulip_pcm_load_file(size_t n_args, const mp_obj_t *args) {
+    (void)n_args; (void)args;
+    return mp_obj_new_int(pcm_load_file());
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_pcm_load_file_obj, 0, 1, tulip_pcm_load_file);
+
 // tulip.amy_message(): the C wire-string builder that _boot.py installs over
 // amy.message(). Shared verbatim with the other targets, which get it from
 // amy_connector.c -- a file this board does not build. It is pure string
@@ -2512,6 +2571,8 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_amy_send), MP_ROM_PTR(&tulip_amy_send_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_message), MP_ROM_PTR(&tulip_amy_message_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_send_wire_from_sysex), MP_ROM_PTR(&tulip_amy_send_wire_from_sysex_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_send_sysex), MP_ROM_PTR(&tulip_amy_send_sysex_obj) },
+    { MP_ROM_QSTR(MP_QSTR_pcm_load_file), MP_ROM_PTR(&tulip_pcm_load_file_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_bleep), MP_ROM_PTR(&tulip_amy_bleep_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_process_single_midi_byte), MP_ROM_PTR(&tulip_amy_process_single_midi_byte_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_set_cv_from_osc), MP_ROM_PTR(&tulip_amy_set_cv_from_osc_obj) },

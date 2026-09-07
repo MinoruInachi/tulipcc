@@ -23,4 +23,13 @@ void tab5_schedule_touch_callback(uint8_t up);
 // Runs on whichever task delivered the MIDI (the USB host task today).
 void tulip_amy_midi_hook(uint8_t *data, uint16_t len, uint8_t is_sysex);
 
+// AMY's external file-I/O hooks, defined by shared/amy_file_hooks.inc where
+// modtulip_tab5.c includes it and registered into amy_config in audio_tab5.c.
+// They call into MicroPython's VFS, so they may only run on the MP thread.
+uint32_t mp_fopen_hook(char *filename, const char *mode);
+uint32_t mp_fwrite_hook(uint32_t fptr, uint8_t *bytes, uint32_t len);
+uint32_t mp_fread_hook(uint32_t fptr, uint8_t *bytes, uint32_t len);
+void mp_fseek_hook(uint32_t fptr, uint32_t pos);
+void mp_fclose_hook(uint32_t fptr);
+
 #endif
