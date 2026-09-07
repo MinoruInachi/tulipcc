@@ -50,6 +50,7 @@ MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_touch_cb);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_midi_cb);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_ime_cb);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_keyboard_cb);
+MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_amy_overload_cb);
 
 #define s_tab5_process_defers_cb MP_STATE_PORT(tab5_process_defers_cb)
 #define s_tab5_frame_cb MP_STATE_PORT(tab5_frame_cb)
@@ -58,6 +59,7 @@ MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_keyboard_cb);
 #define s_tab5_midi_cb MP_STATE_PORT(tab5_midi_cb)
 #define s_tab5_ime_cb MP_STATE_PORT(tab5_ime_cb)
 #define _tab5_keyboard_cb MP_STATE_PORT(tab5_keyboard_cb)
+#define s_tab5_amy_overload_cb MP_STATE_PORT(tab5_amy_overload_cb)
 
 static void tab5_process_python_defers(void) {
     nlr_buf_t nlr;
@@ -2529,6 +2531,28 @@ static mp_obj_t tulip_imu(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(tulip_imu_obj, tulip_imu);
 
+/*
+ * amy_overload_callback(fn) / the hook AMY calls when its CPU overload failsafe
+ * trips. By the time the hook runs AMY has already reset the synth and played
+ * its bleep; this is only how Python finds out, so a sketch can back off or say
+ * something on screen instead of the audio just going quiet.
+ *
+ * The hook runs on the render task. It may therefore only schedule -- and it
+ * passes the load as a percent in a small int, which needs no allocation to
+ * build, so nothing here touches the MP heap off-thread.
+ */
+static mp_obj_t tulip_amy_overload_callback(size_t n_args, const mp_obj_t *args) {
+    s_tab5_amy_overload_cb = (n_args == 0 || args[0] == mp_const_none) ? MP_OBJ_NULL : args[0];
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_amy_overload_callback_obj, 0, 1, tulip_amy_overload_callback);
+
+void tulip_amy_overload_hook(float load) {
+    if (s_tab5_amy_overload_cb != MP_OBJ_NULL && s_tab5_amy_overload_cb != mp_const_none) {
+        mp_sched_schedule(s_tab5_amy_overload_cb, MP_OBJ_NEW_SMALL_INT((mp_int_t)(load * 100.0f)));
+    }
+}
+
 // AMY's file-I/O hooks over MicroPython's VFS, shared with the other targets
 // (they get them from amy_connector.c). audio_tab5.c installs them into
 // amy_config; without them AMY's zL sample load and zT file transfer bail with
@@ -2573,6 +2597,7 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_amy_send_wire_from_sysex), MP_ROM_PTR(&tulip_amy_send_wire_from_sysex_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_send_sysex), MP_ROM_PTR(&tulip_amy_send_sysex_obj) },
     { MP_ROM_QSTR(MP_QSTR_pcm_load_file), MP_ROM_PTR(&tulip_pcm_load_file_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_overload_callback), MP_ROM_PTR(&tulip_amy_overload_callback_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_bleep), MP_ROM_PTR(&tulip_amy_bleep_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_process_single_midi_byte), MP_ROM_PTR(&tulip_amy_process_single_midi_byte_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_set_cv_from_osc), MP_ROM_PTR(&tulip_amy_set_cv_from_osc_obj) },

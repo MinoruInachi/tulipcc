@@ -356,11 +356,23 @@ The following APIs are intentionally not exposed yet:
 	host port, and `midi_in`, `midi_out`, `midi_local`, `sysex_in` and
 	`midi_callback` are all exposed -- so a class-compliant USB-MIDI adapter gives
 	full DIN I/O with no firmware change.
-- The remaining `amy_connector.c` APIs: `amy_overload_callback`,
-	`amy_set_external_input_buffer`, `amy_set_external_channel`, `set_cv_synth`.
-	No exec, reboot or overload hooks are installed, so remote exec/reboot and the
-	render-overload failsafe are inert here. (The exec/reboot/transfer-done hook
-	bodies are `AMYBOARD`-only anyway -- they are no-ops on Tulip CC too.)
+- The remaining `amy_connector.c` APIs: `amy_set_external_input_buffer`,
+	`amy_set_external_channel`, `set_cv_synth`. These are the CV routing surface,
+	and it is worth knowing that it is **vestigial on Tulip CC too** -- the DAC
+	write inside `external_cv_render()` is `#ifdef AMYBOARD`, so TULIP4_R11
+	exposes the API and emits nothing. Real CV here would mean an I2C DAC on the
+	Grove port, not porting these.
+- No exec or reboot hooks. Their bodies are `AMYBOARD`-only anyway, so they are
+	no-ops on Tulip CC as well.
+
+### Known, pre-existing: over-allocating oscillators asserts
+
+Asking for more oscillators than `max_oscs` (250) does not degrade, it aborts:
+`amy.send(synth=1, patch=256, num_voices=16)` followed by note-ons reliably
+panics with `assert failed` and an osc index of 900 in the register dump. This
+is in AMY and is not specific to this board -- it reproduces identically with no
+callbacks or hooks registered. Noted here because it is easy to hit while
+load-testing the synth and looks like a board bug.
 
 ## Sysex, and the file hooks that depend on it
 
@@ -396,6 +408,15 @@ before and after the change (peak 1074 both ways), and a 1 kHz WAV written to
 `/user`, loaded with `amy.disk_sample()` and played back measured 1034 Hz off
 `amy_get_output_buffer()` -- 12 zero crossings in a 256-frame block, which is
 that measurement's resolution.
+
+One exception to "wire parsing happens on the MP thread", for whoever revisits
+this argument: `cv_trigger.c:119` calls `amy_add_message()` from the render
+path. It is unreachable unless `amy_external_coef_hook` is installed, which this
+board does not do at startup -- but `tulip.amy_set_cv_from_osc()` installs it.
+A CV trigger whose message template contained `zF`/`zL`/`zT` would then reach
+the file hooks off-thread. Narrow, and **not specific to this board**: Tulip CC
+runs the same code with the same hooks installed. The sequencer is fine -- it
+replays pre-parsed events and never calls `amy_add_message()`.
 
 ## ulab (numpy / scipy)
 

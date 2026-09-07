@@ -23,6 +23,11 @@ void tab5_schedule_touch_callback(uint8_t up);
 // Runs on whichever task delivered the MIDI (the USB host task today).
 void tulip_amy_midi_hook(uint8_t *data, uint16_t len, uint8_t is_sysex);
 
+// AMY's overload failsafe hook, registered in audio_tab5.c. Runs on the render
+// task after AMY has already reset the synth, and only schedules the Python
+// callback set with tulip.amy_overload_callback().
+void tulip_amy_overload_hook(float load);
+
 // AMY's external file-I/O hooks, defined by shared/amy_file_hooks.inc where
 // modtulip_tab5.c includes it and registered into amy_config in audio_tab5.c.
 // They call into MicroPython's VFS, so they may only run on the MP thread.

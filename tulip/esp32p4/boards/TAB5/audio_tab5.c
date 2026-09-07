@@ -206,12 +206,20 @@ void tab5_audio_init(void)
     // because every path that parses a wire message on this board now lands on
     // the MP thread: amy.send() from Python is already there, and sysex is
     // deferred through parse_sysex()'s copy-slot ring (amy_midi.c names TAB5)
-    // into tulip_amy_send_sysex().
+    // into tulip_amy_send_sysex(). The sequencer replays pre-parsed events and
+    // never re-enters the parser. The one hole is cv_trigger.c, which parses
+    // from the render path -- unreachable without amy_external_coef_hook, which
+    // is not installed below, though tulip.amy_set_cv_from_osc() would. Tulip CC
+    // has the same hole; see the board README.
     amy_config.amy_external_fopen_hook = mp_fopen_hook;
     amy_config.amy_external_fseek_hook = mp_fseek_hook;
     amy_config.amy_external_fclose_hook = mp_fclose_hook;
     amy_config.amy_external_fread_hook = mp_fread_hook;
     amy_config.amy_external_fwrite_hook = mp_fwrite_hook;
+    // Tells Python when AMY's CPU overload failsafe trips, so a sketch can react
+    // instead of the audio just cutting out. AMY has already reset the synth by
+    // then; this only reports.
+    amy_config.amy_external_overload_hook = tulip_amy_overload_hook;
     amy_start(amy_config);
 
     BaseType_t task_result = xTaskCreatePinnedToCore(
