@@ -386,8 +386,9 @@ The following APIs are intentionally not exposed yet:
 	`amy_set_external_channel`, `set_cv_synth`. These are the CV routing surface,
 	and it is worth knowing that it is **vestigial on Tulip CC too** -- the DAC
 	write inside `external_cv_render()` is `#ifdef AMYBOARD`, so TULIP4_R11
-	exposes the API and emits nothing. Real CV here would mean an I2C DAC on the
-	Grove port, not porting these.
+	exposes the API and emits nothing. Real CV here would mean an I2C DAC on
+	Port A, not porting these -- `pins.h` has that socket's pins now
+	(`TAB5_PORT_A_SDA`/`_SCL`), though no code drives them yet.
 - No exec or reboot hooks. Their bodies are `AMYBOARD`-only anyway, so they are
 	no-ops on Tulip CC as well.
 
