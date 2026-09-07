@@ -1502,6 +1502,28 @@ pitch = math.degrees(math.atan2(ay, math.sqrt(ax*ax + az*az)))
 IMU にアクセスできない場合（IMU 非搭載のボードなど）、`imu()` は `RuntimeError`
 を送出します。
 
+## Gamma9001 ドラムバンク（Tab5 のみ）
+
+Tab5 のファームウェアには AMY の TR-808 ROM サンプルセットが焼き込まれているため、
+チャンネル 10 の GM ドラムシンセは何もしなくても本物の 808 キットになります。
+それ以外の 136 個の Gamma9001 バンクプリセット（番号 256〜391: 909、LinnDrum、
+CR-78 など）は 3.7 MB の `drums.bin` に入っており、Tab5 はこれを PSRAM に読み込みます。
+
+```python
+frames = tulip.gamma9001_load("/sd/drums.bin")
+amy.send(osc=0, wave=amy.PCM, preset=256, note=60, vel=1)   # 909 のバスドラム
+```
+
+`drums.bin` は [amy](https://github.com/shorepine/amy) リポジトリで
+`python3 -m amy.headers gamma9001` を実行すると `amy/build/` に生成されるので、
+それをボードにコピーしてください。3.56 MB あるので microSD カードが適しています。
+
+この関数を呼ぶまで、プリセット 256 以降はプリセット 0 にフォールバックします。
+メモリも一切消費せず、他の動作にも影響しません。読み込みは 1 回だけで、2 回目の
+呼び出しはバッファを差し替えずに同じフレーム数を返します（そのバッファを参照している
+音がまだ鳴っている可能性があるためです）。ファイルを開けない場合は `OSError`、
+サイズが違う場合は `ValueError`、PSRAM が足りない場合は `MemoryError` を送出します。
+
 # 手伝ってもらえませんか？
 
 私たちが考えている、協力していただけると嬉しいことです。

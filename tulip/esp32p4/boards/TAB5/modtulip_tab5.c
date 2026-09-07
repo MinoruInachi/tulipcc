@@ -2531,6 +2531,77 @@ static mp_obj_t tulip_imu(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(tulip_imu_obj, tulip_imu);
 
+#ifdef GAMMA9001
+/*
+ * gamma9001_load(path): bring up AMY's 136 Gamma9001 drum bank presets
+ * (256..391) by reading drums.bin into PSRAM and handing AMY the pointer.
+ *
+ * The ESP32-S3 gets these by mmapping a 3.7 MB `drums` flash partition. This
+ * board has no such partition and cannot afford one -- taking 0x3a0000 out of
+ * `vfs` would leave /user with about 320 KB -- but it has 32 MB of PSRAM, so it
+ * can simply hold the blob instead. Nothing is spent until this is called, and
+ * a board that never calls it behaves exactly as before: pcm.c guards every
+ * bank lookup on `gamma9001_pcm != NULL`. The baked TR-808 ROM set and its GM
+ * kit (patch 384) are independent of this and need no file.
+ *
+ * Generate drums.bin with `python3 -m amy.headers gamma9001` in the amy repo
+ * (it lands in amy/build/) and put it somewhere this board can read -- the
+ * microSD is the natural home at that size; see machine.SDCard in the README.
+ *
+ * Loads once. A second call is a no-op returning the same count rather than
+ * swapping the buffer: the render task may be part-way through a note that
+ * points into it, and freeing under that would be a use-after-free. Reboot to
+ * change banks.
+ *
+ * Returns the number of int16 frames now resident -- which is also the size
+ * check that passed. The presets it unlocks are 256..391; that count is not
+ * returned because it lives in the generated header this file cannot include.
+ */
+static int16_t *s_gamma9001_pcm = NULL;
+
+static mp_obj_t tulip_gamma9001_load(mp_obj_t path_obj) {
+    const uint32_t frames = amy_gamma9001_bin_frames();
+    if (s_gamma9001_pcm != NULL) {
+        return mp_obj_new_int(frames);
+    }
+    const char *path = mp_obj_str_get_str(path_obj);
+    // A missing or unreadable path raises out of mp_vfs_open() inside
+    // tulip_fopen() -- verified: a bad path comes back as OSError ENOENT, not
+    // this message. The guard is here for a null return that does not raise.
+    mp_obj_t f = tulip_fopen(path, "rb");
+    if (!f) {
+        mp_raise_msg_varg(&mp_type_OSError, MP_ERROR_TEXT("gamma9001_load: cannot open %s"), path);
+    }
+    const size_t want = (size_t)frames * sizeof(int16_t);
+    int16_t *buf = heap_caps_malloc(want, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        tulip_fclose(f);
+        mp_raise_msg_varg(&mp_type_MemoryError,
+                          MP_ERROR_TEXT("gamma9001_load: no PSRAM for %u bytes"), (unsigned)want);
+    }
+    size_t got = 0;
+    while (got < want) {
+        size_t chunk = want - got;
+        if (chunk > 32768) chunk = 32768;
+        uint32_t n = tulip_fread(f, (uint8_t *)buf + got, chunk);
+        if (n == 0) break;  // short file, or a read error the VFS reports as EOF
+        got += n;
+    }
+    tulip_fclose(f);
+    if (got != want) {
+        // Never handed to AMY, so nothing can be reading it.
+        heap_caps_free(buf);
+        mp_raise_msg_varg(&mp_type_ValueError,
+                          MP_ERROR_TEXT("gamma9001_load: %s is %u bytes, need %u"),
+                          path, (unsigned)got, (unsigned)want);
+    }
+    s_gamma9001_pcm = buf;
+    amy_set_gamma9001_pcm(buf);
+    return mp_obj_new_int(frames);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tulip_gamma9001_load_obj, tulip_gamma9001_load);
+#endif
+
 /*
  * amy_overload_callback(fn) / the hook AMY calls when its CPU overload failsafe
  * trips. By the time the hook runs AMY has already reset the synth and played
@@ -2598,6 +2669,9 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_amy_send_sysex), MP_ROM_PTR(&tulip_amy_send_sysex_obj) },
     { MP_ROM_QSTR(MP_QSTR_pcm_load_file), MP_ROM_PTR(&tulip_pcm_load_file_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_overload_callback), MP_ROM_PTR(&tulip_amy_overload_callback_obj) },
+#ifdef GAMMA9001
+    { MP_ROM_QSTR(MP_QSTR_gamma9001_load), MP_ROM_PTR(&tulip_gamma9001_load_obj) },
+#endif
     { MP_ROM_QSTR(MP_QSTR_amy_bleep), MP_ROM_PTR(&tulip_amy_bleep_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_process_single_midi_byte), MP_ROM_PTR(&tulip_amy_process_single_midi_byte_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_set_cv_from_osc), MP_ROM_PTR(&tulip_amy_set_cv_from_osc_obj) },

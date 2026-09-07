@@ -48,6 +48,10 @@ list(APPEND MICROPY_CPP_FLAGS_EXTRA -DLV_CONF_SKIP)
 # compiler, and shared/display.h keys off the ESP_PLATFORM/TAB5 pair to decide
 # between the S3's RGB-panel header and this board's DSI backend.
 list(APPEND MICROPY_CPP_FLAGS_EXTRA -DESP_PLATFORM -DTAB5)
+# GAMMA9001 goes with them for the same reason: modtulip_tab5.c guards its
+# tulip.gamma9001_load() module-table entry on it, and a qstr the extraction
+# pass never sees is a qstr the compiler cannot resolve.
+list(APPEND MICROPY_CPP_FLAGS_EXTRA -DGAMMA9001)
 
 set(SDKCONFIG_DEFAULTS
     boards/TAB5/sdkconfig.board

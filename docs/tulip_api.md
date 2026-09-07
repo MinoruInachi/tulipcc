@@ -1531,6 +1531,28 @@ pitch = math.degrees(math.atan2(ay, math.sqrt(ax*ax + az*az)))
 If the IMU can't be reached (e.g. a board without it populated) `imu()` raises
 `RuntimeError`.
 
+## Gamma9001 drum banks (Tab5 only)
+
+Tab5 firmware bakes in AMY's TR-808 ROM sample set, so the GM drum synth on
+channel 10 is a real 808 kit out of the box and needs nothing extra. The other
+136 Gamma9001 bank presets (numbers 256-391: 909, LinnDrum, CR-78 and so on)
+live in a separate 3.7 MB `drums.bin`, which the Tab5 loads into PSRAM:
+
+```python
+frames = tulip.gamma9001_load("/sd/drums.bin")
+amy.send(osc=0, wave=amy.PCM, preset=256, note=60, vel=1)   # 909 bass drum
+```
+
+Build `drums.bin` with `python3 -m amy.headers gamma9001` in the
+[amy](https://github.com/shorepine/amy) repo -- it appears in `amy/build/` --
+and copy it to the board. At 3.56 MB a microSD card is the natural place for it.
+
+Until you call this, presets 256+ fall back to preset 0; nothing is allocated
+and nothing else changes. The blob loads once -- a second call returns the same
+frame count rather than replacing the buffer, since a note may still be playing
+out of it. Raises `OSError` if the file can't be opened, `ValueError` if it is
+the wrong size, and `MemoryError` if PSRAM can't hold it.
+
 
 See `planet_boing` in `/sys/ex/` for a fleshed out example of using the `Game` and `Sprite` classes.
 

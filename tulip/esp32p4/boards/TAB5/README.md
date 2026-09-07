@@ -60,10 +60,36 @@ has no `drums` partition, so to be explicit: **the two halves of GAMMA9001 are
 independent.** Patch 384 references only ROM presets 0..18, so the default kit is
 complete from the baked bank alone. Only the 136 extra bank presets at 256+ need
 the 3.7 MB `drums.bin` that the S3 mmaps, and `pcm.c` guards every one of those
-lookups on `gamma9001_pcm != NULL` — they fall back to preset 0 here. If those
-banks are ever wanted, the cheaper route on this board is to read `drums.bin`
-into PSRAM (there is 32 MB of it) and call `amy_set_gamma9001_pcm()`, rather than
-taking 3.7 MB out of `vfs` for a partition to mmap.
+lookups on `gamma9001_pcm != NULL` — they fall back to preset 0 until it is set.
+
+### The 136 bank presets: `tulip.gamma9001_load(path)`
+
+Rather than taking 3.7 MB out of `vfs` for a partition to mmap, this board reads
+the blob into PSRAM, of which it has 32 MB:
+
+```python
+tulip.gamma9001_load("/sd/drums.bin")   # returns the frame count it loaded
+amy.send(osc=0, wave=amy.PCM, preset=256, note=60, vel=1)   # 909BD
+```
+
+Build `drums.bin` with `python3 -m amy.headers gamma9001` in the amy repo (it
+lands in `amy/build/`) and put it on a **microSD** — at 3,735,788 bytes it does
+*not* fit in `/user`, which reports about 3.51 MB free on an otherwise empty
+board. Nothing is spent until you call this, and a board that never does behaves
+exactly as before.
+
+Do not try to push it over the serial link: `mpremote ... resume cp` gave up
+part-way through twice on the v2 unit (once at 0 bytes, once at 731 KB) and
+still exited 0 both times, with `SyntaxError: invalid syntax` in its output —
+the raw-REPL paste gets corrupted at that size. Check the file's size on the
+board before trusting a transfer.
+
+It loads once. A second call returns the same count instead of swapping the
+buffer: the render task may be part-way through a note pointing into it, and
+freeing under that would be a use-after-free. Reboot to change banks. The size
+is checked against `amy_gamma9001_bin_frames()` — an accessor added to amy
+because the constant lives in the generated `pcm_gamma9001.h`, which also
+defines `gamma9001_map[]` and so cannot be included twice.
 
 Verified on hardware: ROM presets 11/14/18 render distinct peaks (782/986/627)
 where `pcm_tiny` would clamp all three to preset 0 (1193), and patch 384's
