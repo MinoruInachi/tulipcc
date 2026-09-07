@@ -734,16 +734,23 @@ amy.send(synth=1, note=50, vel=1, client=2) # just a certain client
 **`amy.reset()` and the `amy.examples` demos clear every synth.** `amy.reset()` runs
 AMY's `instruments_reset()`, which destroys every synth `midi.py` set up -- and the
 `amy.examples.example_*` demos begin with `amy.send(reset=amy.RESET_ALL_OSCS)`, so they
-do the same thing. Nothing tells the Python side: `midi.config` keeps reporting the old
-patch and polyphony, and every app built on it (`voices`, `drums`, the MIDI input path)
-goes silent with **no error at all** until a synth is created again. Get them back with:
+do the same thing. AMY has no way to tell Python it happened, and a Python object holding
+a synth number goes on looking perfectly valid while the synth it names is gone, so notes
+sent to it are dropped in silence -- no error, no warning.
+
+Anything in `midi.config` puts itself back: `amy.instrument_generation` counts these
+resets, and a `synth.PatchSynth` that sees it has moved re-creates its synth on the next
+note. What comes back is how the synth was *set up* -- patch, polyphony, flags -- so
+anything you changed afterwards with `update_oscs()` is not replayed. Synths you drive by
+sending `synth=` numbers yourself are not tracked and stay wiped; re-send their setup, or
+start over from:
 
 ```python
 midi.add_default_synths() # Juno on channel 1, drums on 10, bleeper on 0
 ```
 
-or by re-picking a patch in `voices`. To stop the sound *without* losing your synths,
-use `amy.send(reset=amy.RESET_ALL_NOTES)` instead of `amy.reset()`.
+To stop the sound *without* clearing anything, use `amy.send(reset=amy.RESET_ALL_NOTES)`
+instead of `amy.reset()`.
 
 To load your own WAVE files as samples you can play like an instrument, use `amy.load_sample`:
 

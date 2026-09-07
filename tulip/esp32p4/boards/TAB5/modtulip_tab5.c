@@ -2618,10 +2618,42 @@ static mp_obj_t tulip_amy_overload_callback(size_t n_args, const mp_obj_t *args)
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_amy_overload_callback_obj, 0, 1, tulip_amy_overload_callback);
 
-void tulip_amy_overload_hook(float load) {
-    if (s_tab5_amy_overload_cb != MP_OBJ_NULL && s_tab5_amy_overload_cb != mp_const_none) {
-        mp_sched_schedule(s_tab5_amy_overload_cb, MP_OBJ_NEW_SMALL_INT((mp_int_t)(load * 100.0f)));
+// Runs on the MP thread, scheduled by the hook below. Two jobs, in this order.
+static mp_obj_t tab5_amy_overload_notify(mp_obj_t load_pct) {
+    // The failsafe ran instruments_reset(), so every AMY synth is gone. That
+    // happened entirely in C and so never went through amy.send(), which is
+    // what normally moves amy.instrument_generation -- without this, the
+    // PatchSynths in midi.config would keep addressing synths AMY no longer
+    // has and every note would be dropped in silence. Bump it here and they
+    // rebuild themselves on their next send, same as after an amy.reset().
+    // Runtime qstrs rather than MP_QSTR_: same idiom as
+    // tab5_process_python_defers() above, and it keeps the name out of the
+    // build's qstr table.
+    nlr_buf_t nlr;
+    if (nlr_push(&nlr) == 0) {
+        qstr q_module = mp_obj_str_get_qstr(mp_obj_new_str("amy", 3));
+        qstr q_attr = mp_obj_str_get_qstr(mp_obj_new_str("instrument_generation", 21));
+        mp_obj_t amy_mod = mp_import_name(q_module, mp_const_none, MP_OBJ_NEW_SMALL_INT(0));
+        mp_int_t gen = mp_obj_get_int(mp_load_attr(amy_mod, q_attr));
+        mp_store_attr(amy_mod, q_attr, MP_OBJ_NEW_SMALL_INT(gen + 1));
+        nlr_pop();
+    } else {
+        // amy not imported yet, or it is an older copy without the counter.
+        // Not fatal: say so and still tell the sketch about the overload.
+        mp_obj_print_exception(&mp_plat_print, MP_OBJ_FROM_PTR(nlr.ret_val));
     }
+    if (s_tab5_amy_overload_cb != MP_OBJ_NULL && s_tab5_amy_overload_cb != mp_const_none) {
+        mp_call_function_1(s_tab5_amy_overload_cb, load_pct);
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tab5_amy_overload_notify_obj, tab5_amy_overload_notify);
+
+void tulip_amy_overload_hook(float load) {
+    // Always scheduled, with or without a Python callback: the generation bump
+    // above has to happen either way, and it needs the MP thread.
+    mp_sched_schedule(MP_OBJ_FROM_PTR(&tab5_amy_overload_notify_obj),
+                      MP_OBJ_NEW_SMALL_INT((mp_int_t)(load * 100.0f)));
 }
 
 // AMY's file-I/O hooks over MicroPython's VFS, shared with the other targets

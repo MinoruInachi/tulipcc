@@ -57,6 +57,24 @@ class PatchSynth:
         # different (non-MIDI) synth number, let's wait and see if we're allocated
         # to a channel.
         self._initialized = synth_already_initialized
+        # Which generation of AMY's synths we were built against. Anything that
+        # runs instruments_reset() -- amy.reset(), an amy.examples demo, the CPU
+        # overload failsafe -- destroys our synth inside AMY while leaving every
+        # field here looking correct: _initialized stays True, self.patch is
+        # unchanged, midi.config still reports us. Notes then go to a synth that
+        # is not there and are dropped with no error at all, which is how a
+        # working Tulip ends up completely silent. amy_send() watches this.
+        self._generation = amy.instrument_generation
+
+    def _rebuild_after_amy_reset(self):
+        """Re-create this synth inside AMY after something wiped them all."""
+        # Claim the new generation *first*: deferred_init() sends through
+        # amy_send(), which would otherwise see the mismatch and recurse.
+        self._generation = amy.instrument_generation
+        if self.synth is None:
+            return   # released; there is nothing to put back
+        self._initialized = False
+        self.deferred_init()
 
     def deferred_init(self):
         """Finish synth initialization once we can assume all voices are available."""
@@ -89,6 +107,9 @@ class PatchSynth:
 
     # send an AMY message to the voices in this synth
     def amy_send(self, **kwargs):
+        # An int compare per note, against AMY forgetting this synth exists.
+        if self._generation != amy.instrument_generation:
+            self._rebuild_after_amy_reset()
         amy.send(synth=self.synth, **kwargs)
 
     def note_off(self, note, ticks=None):
@@ -136,6 +157,11 @@ class PatchSynth:
 
     def release(self):
         """Called to terminate this synth and release its amy_voice resources."""
+        # Take the current generation first. We are about to tear this synth
+        # down, so if AMY has already dropped it there is nothing to release --
+        # without this, amy_send() below would helpfully rebuild the synth
+        # (allocating its voices and oscs) purely to set num_voices=0 again.
+        self._generation = amy.instrument_generation
         # Release the AMY synth by setting its num_voices to 0.
         self.amy_send(num_voices=0)
         # Mark this object as not usable.

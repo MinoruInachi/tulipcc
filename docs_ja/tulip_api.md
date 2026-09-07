@@ -724,16 +724,21 @@ amy.send(synth=1, note=50, vel=1, client=2) # 特定のクライアントだけ
 **`amy.reset()` と `amy.examples` のデモはシンセを全消去します。** `amy.reset()` は AMY の
 `instruments_reset()` を実行し、`midi.py` が構成したシンセをすべて破棄します。
 `amy.examples.example_*` のデモも冒頭で `amy.send(reset=amy.RESET_ALL_OSCS)` を撃つので同じです。
-これは Python 側にまったく通知されません。`midi.config` は元のパッチとポリフォニーを報告し続け、
-その上に乗っているアプリ（`voices`、`drums`、MIDI 入力）は**エラーも出さずに無音**になり、
-シンセを作り直すまで戻りません。復旧はこちら:
+AMY にはこれを Python へ伝える手段がなく、シンセ番号を保持している Python オブジェクトは、
+指し示す先が消えた後も完全に正常に見えます。そこへ送られた音は**エラーも警告もなく**捨てられます。
+
+`midi.config` が持っているものは自力で復帰します。`amy.instrument_generation` がこの種のリセットを
+数えており、`synth.PatchSynth` はその値が動いたことに気づくと次の音を鳴らす時にシンセを作り直します。
+戻るのはシンセの**構成**（パッチ、ポリフォニー、フラグ）なので、その後 `update_oscs()` で加えた変更は
+再送されません。`synth=` の番号を自分で指定して鳴らしているシンセは追跡対象外で消えたままなので、
+設定を送り直すか、次から始め直してください:
 
 ```python
 midi.add_default_synths() # チャンネル 1 に Juno、10 にドラム、0 にブリープ
 ```
 
-または `voices` でパッチを選び直してください。シンセを失わずに音だけ止めたい場合は、
-`amy.reset()` ではなく `amy.send(reset=amy.RESET_ALL_NOTES)` を使ってください。
+何も消さずに音だけ止めたい場合は、`amy.reset()` ではなく
+`amy.send(reset=amy.RESET_ALL_NOTES)` を使ってください。
 
 自分の WAVE ファイルを楽器のように鳴らせるサンプルとして読み込むには、`amy.load_sample` を使います。
 
