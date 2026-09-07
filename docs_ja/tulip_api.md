@@ -701,9 +701,9 @@ tulip.save_synth_state('my_setup.py')  # 後で execfile() するために別フ
 
 ```python
 
-amy.drums() # テスト曲を鳴らします
-amy.volume(4) # 音量を変更
-amy.reset() # 鳴っている音楽／音をすべて停止
+amy.send(volume=4) # 音量を変更
+amy.send(reset=amy.RESET_ALL_NOTES) # 鳴っている音をすべて停止
+amy.reset() # 音を止め、さらにシンセを全消去します -- 下の注意を参照
 amy.send(synth=1, patch=129, num_voices=1) # シンセ 1 に DX7 のパッチを設定
 amy.send(synth=1, note=45, vel=1) # 音を鳴らします
 amy.send(synth=1, pan=0) # 左チャンネルに設定
@@ -720,6 +720,20 @@ amy.send(synth=1, patch=101, num_voices=1) # メッシュ内のすべての Alle
 amy.send(synth=1, note=50, vel=1) # メッシュ内のすべての Alles スピーカーが反応します
 amy.send(synth=1, note=50, vel=1, client=2) # 特定のクライアントだけ
 ```
+
+**`amy.reset()` と `amy.examples` のデモはシンセを全消去します。** `amy.reset()` は AMY の
+`instruments_reset()` を実行し、`midi.py` が構成したシンセをすべて破棄します。
+`amy.examples.example_*` のデモも冒頭で `amy.send(reset=amy.RESET_ALL_OSCS)` を撃つので同じです。
+これは Python 側にまったく通知されません。`midi.config` は元のパッチとポリフォニーを報告し続け、
+その上に乗っているアプリ（`voices`、`drums`、MIDI 入力）は**エラーも出さずに無音**になり、
+シンセを作り直すまで戻りません。復旧はこちら:
+
+```python
+midi.add_default_synths() # チャンネル 1 に Juno、10 にドラム、0 にブリープ
+```
+
+または `voices` でパッチを選び直してください。シンセを失わずに音だけ止めたい場合は、
+`amy.reset()` ではなく `amy.send(reset=amy.RESET_ALL_NOTES)` を使ってください。
 
 自分の WAVE ファイルを楽器のように鳴らせるサンプルとして読み込むには、`amy.load_sample` を使います。
 

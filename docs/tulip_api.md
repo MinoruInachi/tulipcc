@@ -711,9 +711,9 @@ You can use `amy.py` to control the AMY synthesizer directly.
 
 ```python
 
-amy.drums() # plays a test song
-amy.volume(4) # change volume
-amy.reset() # stops all music / sounds playing
+amy.send(volume=4) # change volume
+amy.send(reset=amy.RESET_ALL_NOTES) # stops everything that is sounding
+amy.reset() # stops the sound AND clears every synth -- see the warning below
 amy.send(synth=1, patch=129, num_voices=1) # set up a DX7 patch on synth 1
 amy.send(synth=1, note=45, vel=1) # plays a tone
 amy.send(synth=1, pan=0) # set to the left channel
@@ -730,6 +730,20 @@ amy.send(synth=1, patch=101, num_voices=1) # load a patch on every Alles speaker
 amy.send(synth=1, note=50, vel=1) # all Alles speakers in a mesh will respond
 amy.send(synth=1, note=50, vel=1, client=2) # just a certain client
 ```
+
+**`amy.reset()` and the `amy.examples` demos clear every synth.** `amy.reset()` runs
+AMY's `instruments_reset()`, which destroys every synth `midi.py` set up -- and the
+`amy.examples.example_*` demos begin with `amy.send(reset=amy.RESET_ALL_OSCS)`, so they
+do the same thing. Nothing tells the Python side: `midi.config` keeps reporting the old
+patch and polyphony, and every app built on it (`voices`, `drums`, the MIDI input path)
+goes silent with **no error at all** until a synth is created again. Get them back with:
+
+```python
+midi.add_default_synths() # Juno on channel 1, drums on 10, bleeper on 0
+```
+
+or by re-picking a patch in `voices`. To stop the sound *without* losing your synths,
+use `amy.send(reset=amy.RESET_ALL_NOTES)` instead of `amy.reset()`.
 
 To load your own WAVE files as samples you can play like an instrument, use `amy.load_sample`:
 
