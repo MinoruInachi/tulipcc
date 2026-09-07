@@ -43,8 +43,31 @@ This is documentation for the first scaffolded Tab5 port. The display helper now
 
 - `audio_tab5.c` owns the BSP I2S and ES8388 speaker setup.
 - AMY runs in-process with its event and synth allocations in PSRAM and a dedicated render task feeding `esp_codec_dev_write()`.
-- `_boot.py` connects the Python `amy` package to native `tulip.amy_send`, initializes the default MIDI synths, and enables the Voices patch selector and touch piano.
+- `_boot.py` initializes the default MIDI synths and enables the Voices patch selector and touch piano. It deliberately does **not** set `amy.override_send`: the Python `amy` package's own `_capi_resolve()` already binds `_send_wire` to `tulip.amy_send`, so overriding it was redundant, and it made `amy._send_transfer_chunk()` read the board as "AMY redirected elsewhere" and send transfer payload off the sysex-marked route (amy #1045), which broke `amy.load_sample_bytes()`.
+- `amy_config.ram_caps_oscs` is set explicitly alongside the other caps. AMY derives it from `ram_caps_events` *inside* `amy_default_config()`, so assigning `ram_caps_events` afterwards does not reach it, and the per-osc `synthinfo` (max_oscs = 250 of them) would stay in internal RAM.
 - LVGL uses a Tab5 allocator that prefers internal RAM and falls back to PSRAM, avoiding the default 64 KiB LVGL heap limit while keeping full-screen rendering responsive.
+
+### PCM sample set: GAMMA9001 without the drums partition
+
+`mpconfigboard.cmake` defines `GAMMA9001`, so AMY bakes `pcm_gamma808.h` (19 ROM
+samples, 188358 frames) rather than the `pcm_tiny.h` default (11 samples, 51053
+frames). That costs ~268 KB of the app partition and makes the GM drum synth on
+channel 10 come up as a real TR-808 kit (patch 384) instead of the tiny drum
+patch 258.
+
+The combination looks contradictory next to `partitions-8MiBplus-ota.csv`, which
+has no `drums` partition, so to be explicit: **the two halves of GAMMA9001 are
+independent.** Patch 384 references only ROM presets 0..18, so the default kit is
+complete from the baked bank alone. Only the 136 extra bank presets at 256+ need
+the 3.7 MB `drums.bin` that the S3 mmaps, and `pcm.c` guards every one of those
+lookups on `gamma9001_pcm != NULL` — they fall back to preset 0 here. If those
+banks are ever wanted, the cheaper route on this board is to read `drums.bin`
+into PSRAM (there is 32 MB of it) and call `amy_set_gamma9001_pcm()`, rather than
+taking 3.7 MB out of `vfs` for a partition to mmap.
+
+Verified on hardware: ROM presets 11/14/18 render distinct peaks (782/986/627)
+where `pcm_tiny` would clamp all three to preset 0 (1193), and patch 384's
+kick/snare/hihat/crash all sound.
 
 ## Storage policy (current)
 

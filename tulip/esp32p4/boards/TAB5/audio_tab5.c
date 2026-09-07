@@ -177,6 +177,13 @@ void tab5_audio_init(void)
     amy_config.ram_caps_delay = MALLOC_CAP_SPIRAM;
     amy_config.ram_caps_sample = MALLOC_CAP_SPIRAM;
     amy_config.ram_caps_sysex = MALLOC_CAP_SPIRAM;
+    // Must be set here too, not just implied by ram_caps_events: AMY derives
+    // ram_caps_oscs from ram_caps_events *inside* amy_default_config() (api.c),
+    // which already ran above, so the assignments here never reach it. Without
+    // this the per-osc synthinfo/mod_synthinfo/breakpoint allocation -- max_oscs
+    // (250) of them -- stays in internal RAM, which the display and USB host
+    // need. The S3 gets PSRAM for it from api.c's TULIP branch.
+    amy_config.ram_caps_oscs = MALLOC_CAP_SPIRAM;
     // Lets Python register callbacks on the sequencer clock (tulip.seq_add_callback,
     // sequencer.TulipSequence). AMY calls this from this task once per tick; the
     // hook itself does nothing until a callback has been registered.

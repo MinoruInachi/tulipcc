@@ -145,7 +145,14 @@ try:
     import midi
 
     amy.AMY_SAMPLE_RATE = 44100
-    amy.override_send = lambda message: tulip.amy_send(message)
+    # Nothing to override: amy's _capi_resolve() already binds _send_wire to
+    # tulip.amy_send and _send_wire_from_sysex to tulip.amy_send_wire_from_sysex,
+    # both of which this board's module table provides. Installing the platform
+    # default in amy.override_send was redundant for amy.send(), and actively
+    # wrong for amy._send_transfer_chunk(), which reads override_send as "the
+    # user pointed AMY at another board" and so sent transfer payload unmarked
+    # instead of down the sysex-flagged path -- that is amy #1045, and it broke
+    # amy.load_sample_bytes() here. override_send stays free for what it is for.
     midi.setup()
 except Exception as e:
     print("TAB5 boot: audio/MIDI init skipped:", e)

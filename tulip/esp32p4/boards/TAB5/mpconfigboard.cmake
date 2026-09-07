@@ -22,6 +22,20 @@ set(BOARD_DEFINITION2 TAB5)
 add_compile_definitions(TAB5)
 add_compile_definitions(STATIC=static)
 add_compile_definitions(MALLOC_CAPS_DEFINED)
+# Bake AMY's TR-808 ROM sample set (amy/src/pcm_gamma808.h) instead of the
+# 11-sample pcm_tiny default, matching the ESP32-S3 tree (its esp32_common.cmake
+# defines GAMMA9001 the same way). Costs ~268 KB of the app partition -- the ROM
+# blob goes from 51053 to 188358 frames -- and takes the built-in PCM set from 11
+# samples to 19, so the GM drum synth on channel 10 comes up as a real 808 kit
+# (patch 384) rather than the tiny drum patch 258.
+#
+# The other half of GAMMA9001 on the S3 -- the 136 extra bank presets at 256+ --
+# streams from a 3.7 MB 'drums' flash partition that TAB5 does not have and
+# cannot afford (see partitions-8MiBplus-ota.csv). That is fine: patch 384 only
+# references ROM presets 0..18, so the default kit is complete without it, and
+# pcm.c guards every bank lookup on `gamma9001_pcm != NULL`. Presets 256+ fall
+# back to preset 0 until something calls amy_set_gamma9001_pcm().
+add_compile_definitions(GAMMA9001)
 list(APPEND MICROPY_CPP_FLAGS_EXTRA -DLV_CONF_SKIP)
 # The qstr extraction pass preprocesses the source list with MICROPY_CPP_FLAGS,
 # which unlike the real compile does not inherit ESP_PLATFORM from the IDF
