@@ -5,7 +5,7 @@ name: Tab5 firmware release
 #
 # This is the fork's port (MinoruInachi/tulipcc); it is NOT built by
 # shorepine/tulipcc and does not participate in the upstream release flow.
-# Modelled on tulip-release.yml, with two deliberate differences:
+# Modelled on tulip-release.yml, with three deliberate differences:
 #
 #  1. The rolling 'tab5' release is kept NOT latest (--latest=false), so it never
 #     displaces the upstream releases/latest semantics this fork inherits. Note
@@ -16,6 +16,11 @@ name: Tab5 firmware release
 #
 #  2. No 'drums' partition, so fs_create.py emits no tulip-drums.bin here. TAB5
 #     does not build amy_connector.c, so nothing mmaps the gamma9001 banks.
+#
+#  3. The 'tab5' tag is force-moved to each released commit. tulip-release.yml
+#     and amyboard-release.yml do not do this, which is why their auto-generated
+#     "Source code" archives still serve the commit that first created those
+#     releases. See the publish step for why it takes the git refs API.
 #
 # tulip.upgrade() on a Tab5 fetches from THIS release: get_latest_release() in
 # tulip/shared/py/tulip.py maps board "TAB5" to the fork repo and the 'tab5' tag.
@@ -188,4 +193,24 @@ jobs:
             grep -n '@[A-Z_]\+@' "${RUNNER_TEMP}/notes.md"
             exit 1
           fi
+          # Move the rolling tag onto the commit we just built. GitHub generates
+          # the "Source code (zip)" / "(tar.gz)" links from this ref rather than
+          # from the uploaded assets, so without this everything else here rolls
+          # forward while the source archives stay pinned to whichever commit
+          # first created the release -- the binaries and the sources on one
+          # release page then describe different trees, which is worse than
+          # either being stale on its own.
+          #
+          # It has to be the git refs API. --target on `gh release create` above
+          # runs once, and target_commitish (so `gh release edit --target` too) is
+          # honoured only while a release is a draft or its tag does not yet
+          # exist; against a published release with a live tag GitHub accepts it
+          # and does nothing.
+          #
+          # Last, after the assets are in place, so the source archives are never
+          # ahead of the binaries next to them. A clone that already fetched the
+          # tag needs `git fetch --tags --force` to follow the move -- inherent to
+          # a rolling tag, and the same deal as the clobbered assets above.
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/tab5" \
+            -f sha="$GITHUB_SHA" -F force=true --silent
           gh release edit tab5 --latest=false --notes-file "${RUNNER_TEMP}/notes.md"
