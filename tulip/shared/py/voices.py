@@ -365,16 +365,28 @@ def hold_notes(app, notes):
 
     held_note remembers which channel each note_on went to, so a note started
     before a channel change is still released on the synth that is playing it.
+
+    Only channel 1 (and the drums on 10) has a synth until a patch is picked for
+    it, so selecting any other channel and touching a key found no synth at all:
+    get_synth() returns None and every touch raised AttributeError. A channel
+    with nothing on it stays silent instead, and a note is only recorded as held
+    once it has actually started, so letting go of it has nothing to release.
+    The note_off side checks too, in case the synth went away while held.
     """
     for note in [n for n in app.held_note if n not in notes]:
-        midi.config.get_synth(app.held_note.pop(note)).note_off(note)
+        synth = midi.config.get_synth(app.held_note.pop(note))
+        if synth is not None:
+            synth.note_off(note)
         #tulip.midi_local((128+app.channels.selected, note, 127))
     if notes:
         channel = int(app.channels.button_texts[app.channels.selected])
+        synth = midi.config.get_synth(channel)
+        if synth is None:
+            return
         for note in notes:
             if note not in app.held_note:
                 app.held_note[note] = channel
-                midi.config.get_synth(channel).note_on(note, 1)
+                synth.note_on(note, 1)
                 #tulip.midi_local((144+app.channels.selected, note, 127))
 
 
