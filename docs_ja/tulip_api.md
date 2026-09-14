@@ -89,6 +89,7 @@ rabbit_game/
  * [`planet_boing`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/planet_boing/planet_boing.py)
  * [`parallax`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/parallax.py)
  * [`starfall`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/starfall.py) - 70 年代後半風の固定画面シューティング。すべて BG プレーンに描画されています
+ * [`geoglyph`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/geoglyph.py) - 80 年代前半風の縦スクロールシューティング。空中と地上の標的を別々の武器で撃ちます。地形は BG プレーンのハードウェアスクロールです
 
 Tulip World BBS は、パッケージを tar ファイルとしてアップロード／ダウンロードできます。`world.upload('package', username)` や `world.download('package')` を使ってください。
 
