@@ -98,6 +98,10 @@ amy.send(synth=1, note=60, vel=1)
 ```
 .. will sound two sine tones a fifth apart, even though the two oscs are not chained and we only issued a single note-one.
 
+Note 3: an `osc` number in a command addressed to a synth is **relative to the voice**, not absolute -- `osc=1` means the second osc of each of that synth's voices, wherever those oscs happen to live. The same goes for a parameter that names another osc: `mod_source`, `chained_osc` and `algo_source` are voice-relative too, so `amy.send(synth=1, osc=0, mod_source=1)` means "modulate osc 0 from osc 1 *of the same voice*".
+
+An osc number that lands outside the voice is refused: AMY prints a message naming the parameter and ignores it, and the rest of the command still applies. There is no useful reading of a reference past the end of a voice -- the oscs beyond it belong to the synth's other voices, or to another synth entirely -- so a synth with one osc per voice cannot modulate itself from a neighbour's oscillator by asking for `mod_source=1`. Commands sent without a `synth` address oscs absolutely and are not bounded this way.
+
 ### Changing a synth's voice count
 
 You can change `num_voices` on a synth that is already running. The synth keeps the sound it has at that moment, including any changes you made since loading its patch:
@@ -222,7 +226,8 @@ You can schedule an event with `amy.send(..., ticks="tick,period,tag")`. All thr
 amy.send(osc=0, wave=amy.SAW_UP, eg0="0,1,500,0,500,0")  # Pluck tone
 amy.send(osc=0, note=50, vel=1, ticks=amy.sequencer_ticks() + 96)   # one-off: fires once, ~1s from now
 amy.send(osc=0, note=38, vel=1, ticks="0,24,7")    # repeating, cancelable via tag 7
-amy.send(osc=0, ticks="0,0,7")                     # cancel tag 7
+amy.send(osc=0, note=45, vel=1, ticks="12,24,7")   # ...adds a second event to tag 7
+amy.send(ticks="0,0,7")                            # clear everything on tag 7
 amy.send(osc=0, note=72, vel=1, ticks="0,24")      # repeating, not individually cancelable
 amy.reset()   # Stop everything
 ```
@@ -233,7 +238,26 @@ You can schedule repeating events (like a step sequencer or drum machine) with `
 
 For pattern sequencers like drum machines, you will also want to use `tick` alongside `period`. If both are given and `period` is nonzero, `tick` is assumed to be an offset on the `period`. For example, for a 16-step drum machine pattern running on eighth notes (PPQ/2), you would use a `period` of `16 * 24 = 384`. The first slot of the drum machine would have a `tick` of 0, the 2nd would have a `tick` offset of 24, and so on.
 
-`tag` is optional. If you give one, you can cancel that event later by sending `ticks="0,0,tag"` with the same `tag`. If you omitted `tag` when setting up the sequence (a 1- or 2-value `ticks=`), the event is still scheduled and still fires, but it isn't addressable by any tag -- there's no way to cancel or replace it individually (only by something like `amy.reset()`, discarding all sequenced events), so only omit `tag` for events you don't need to manage later.
+`tag` is optional. If you give one, events sent to that tag **accumulate**: each `ticks="tick,period,tag"` send adds another scheduled event under that tag, with its own `tick` and `period`, rather than replacing what was already there. So a tag names a *pattern*, not a single event -- a whole drum part, with a different `tick` offset per hit, can live on one tag:
+
+```python
+for step, note in ((0, 36), (12, 42), (24, 38), (36, 42)):
+    amy.send(osc=0, note=note, vel=1, ticks="%d,48,3" % step)   # four events, one tag
+```
+
+You clear a tag by sending it with neither `tick` nor `period` -- `amy.send(ticks="0,0,tag")`, the same cancel spelling as before -- which drops **every** event stored under that tag. There is no way to remove one event from a tag while leaving its siblings, so an edit means clearing the tag and re-sending the events that survive. `ticks=` claims the rest of its message, so the clear has to be its own send:
+
+```python
+amy.send(ticks="0,0,3")                                     # clear the pattern
+for step, note in ((0, 36), (12, 42), (24, 40), (36, 42)):  # ...and rebuild it
+    amy.send(osc=0, note=note, vel=1, ticks="%d,48,3" % step)
+```
+
+Tags are also what ordering is defined on: two events that land on the same tick fire in ascending tag order, and within one tag in the order you added them.
+
+If you omitted `tag` when setting up the sequence (a 1- or 2-value `ticks=`), the event is still scheduled and still fires, but it isn't addressable by any tag -- there's no way to cancel or replace it individually (only by something like `amy.reset()`, discarding all sequenced events), so only omit `tag` for events you don't need to manage later.
+
+The number of tags AMY accepts is `max_sequencer_tags` (default 256), and because events accumulate that same number now caps the total count of tagged events, not just the count of distinct tags. Overflowing it prints a warning and drops the new event; everything already scheduled keeps playing.
 
 If you are including AMY in a program, you can set the [hook `void (*amy_external_sequencer_hook)(uint32_t)`](docs/api.md) to any function. This will be called at every tick with the current tick number as an argument.
 

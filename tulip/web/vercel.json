@@ -1,31 +1,80 @@
 {
+  "redirects": [
+    {
+      "source": "/2",
+      "destination": "/2/",
+      "permanent": false
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/2/admin",
+      "destination": "https://tulip-world-production.up.railway.app/admin"
+    },
+    {
+      "source": "/2/admin/:path(.*)",
+      "destination": "https://tulip-world-production.up.railway.app/admin/:path"
+    },
+    {
+      "source": "/2",
+      "destination": "https://tulip5-web.vercel.app/"
+    },
+    {
+      "source": "/2/:path(.*)",
+      "destination": "https://tulip5-web.vercel.app/:path"
+    }
+  ],
   "headers": [
     {
       "source": "/run",
       "headers": [
-        { "key": "Cross-Origin-Opener-Policy", "value": "same-origin" },
-        { "key": "Cross-Origin-Embedder-Policy", "value": "require-corp" },
-        { "key": "Cross-Origin-Resource-Policy", "value": "cross-origin" }
+        {
+          "key": "Cross-Origin-Opener-Policy",
+          "value": "same-origin"
+        },
+        {
+          "key": "Cross-Origin-Embedder-Policy",
+          "value": "require-corp"
+        },
+        {
+          "key": "Cross-Origin-Resource-Policy",
+          "value": "cross-origin"
+        }
       ]
     },
     {
       "source": "/run/(.*)",
       "headers": [
-        { "key": "Cross-Origin-Opener-Policy", "value": "same-origin" },
-        { "key": "Cross-Origin-Embedder-Policy", "value": "require-corp" },
-        { "key": "Cross-Origin-Resource-Policy", "value": "cross-origin" }
+        {
+          "key": "Cross-Origin-Opener-Policy",
+          "value": "same-origin"
+        },
+        {
+          "key": "Cross-Origin-Embedder-Policy",
+          "value": "require-corp"
+        },
+        {
+          "key": "Cross-Origin-Resource-Policy",
+          "value": "cross-origin"
+        }
       ]
     },
     {
       "source": "/run/(amy|tulipcc)-(.*)",
       "headers": [
-        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
       ]
     },
     {
-      "source": "/((?!run/amy-|run/tulipcc-).*)",
+      "source": "/((?!run/amy-|run/tulipcc-|2$|2/).*)",
       "headers": [
-        { "key": "Cache-Control", "value": "no-cache" }
+        {
+          "key": "Cache-Control",
+          "value": "no-cache"
+        }
       ]
     }
   ]
