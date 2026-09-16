@@ -182,6 +182,14 @@ static int s_ppa_stuck_y = -1, s_ppa_stuck_rows = 0, s_ppa_last_y = -1, s_ppa_la
 static uint32_t s_us_composite = 0;   /* Tulip compositor callbacks */
 static uint32_t s_us_convert = 0;     /* blocked on the PPA: the rotation the pipeline could not hide */
 static uint32_t s_us_rotate = 0;      /* CPU rotation, when the PPA was unavailable or timed out */
+/* The frame in progress accumulates into these, and they are published into the
+ * three above only once it is finished. tulip.tab5_render_stats() reads from
+ * another task, so reading the accumulators directly caught them part-built:
+ * the composite figure swung between 4ms and 39ms for the same workload, which
+ * is useless for deciding what to optimise. */
+static uint32_t s_acc_composite = 0;
+static uint32_t s_acc_convert = 0;
+static uint32_t s_acc_rotate = 0;
 static uint32_t s_us_present = 0;     /* draw_bitmap: cache write-back + fb swap */
 static uint32_t s_us_wait = 0;        /* blocked waiting for the panel */
 static uint32_t s_frames_skipped = 0; /* frames dropped because nothing changed */
@@ -651,7 +659,7 @@ static bool tab5_render_run(void *target_fb, int y0, int y1)
             return false;
         }
         const int64_t t1 = esp_timer_get_time();
-        s_us_composite += (uint32_t)(t1 - t0);
+        s_acc_composite += (uint32_t)(t1 - t0);
 
         /* Collect the strip issued last time round before handing the engine
          * another: the client allows one transaction in flight. This is the
@@ -663,11 +671,11 @@ static bool tab5_render_run(void *target_fb, int y0, int y1)
             tab5_cpu_rotate_chunk((uint16_t *)s_pending_fb, s_pending_src, s_pending_y, s_pending_rows);
         }
         const int64_t t2 = esp_timer_get_time();
-        s_us_convert += (uint32_t)(t2 - t1);
+        s_acc_convert += (uint32_t)(t2 - t1);
 
         if (target_fb != NULL && !tab5_ppa_issue(chunk, target_fb, y, rows)) {
             tab5_cpu_rotate_chunk((uint16_t *)target_fb, chunk, y, rows);
-            s_us_rotate += (uint32_t)(esp_timer_get_time() - t2);
+            s_acc_rotate += (uint32_t)(esp_timer_get_time() - t2);
         } else if (s_chunk565[1] == NULL) {
             /* Nothing to ping-pong with, so there is no overlap to be had: the
              * next strip would be composed over the one the PPA is reading. */
@@ -675,7 +683,7 @@ static bool tab5_render_run(void *target_fb, int y0, int y1)
             if (!tab5_ppa_flush()) {
                 tab5_cpu_rotate_chunk((uint16_t *)s_pending_fb, s_pending_src, s_pending_y, s_pending_rows);
             }
-            s_us_convert += (uint32_t)(esp_timer_get_time() - t3);
+            s_acc_convert += (uint32_t)(esp_timer_get_time() - t3);
         }
 
         if (s_chunk565[1] != NULL) {
@@ -740,9 +748,9 @@ static void tab5_render_bridge_tick_rotated(int band_y0, int band_y1)
      * composed is a few rows more than what was reported damaged. */
     s_band_rows = 0;
 
-    s_us_composite = 0;
-    s_us_convert = 0;
-    s_us_rotate = 0;
+    s_acc_composite = 0;
+    s_acc_convert = 0;
+    s_acc_rotate = 0;
 
     if (tab5_render_run(target_fb, band_y0, band_y1) && prev_y1 > prev_y0) {
         (void)tab5_render_run(target_fb, prev_y0, prev_y1);
@@ -755,7 +763,7 @@ static void tab5_render_bridge_tick_rotated(int band_y0, int band_y1)
     if (!tab5_ppa_flush()) {
         tab5_cpu_rotate_chunk((uint16_t *)s_pending_fb, s_pending_src, s_pending_y, s_pending_rows);
     }
-    s_us_convert += (uint32_t)(esp_timer_get_time() - t_flush);
+    s_acc_convert += (uint32_t)(esp_timer_get_time() - t_flush);
 
     if (target_fb != NULL) {
         /* Hand the finished buffer over at a frame boundary rather than
@@ -776,6 +784,11 @@ static void tab5_render_bridge_tick_rotated(int band_y0, int band_y1)
             s_dsi_fb_next ^= 1u;
         }
     }
+
+    /* Publish the finished frame's figures in one go; see s_acc_*. */
+    s_us_composite = s_acc_composite;
+    s_us_convert = s_acc_convert;
+    s_us_rotate = s_acc_rotate;
 
     s_phase = TAB5_PHASE_FRAME_DONE;
     (void)s_render_frame_done();
