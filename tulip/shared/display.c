@@ -408,8 +408,16 @@ static inline __attribute__((always_inline)) uint8_t px_has_alpha(const tulip_px
 #endif
 }
 
+#ifdef TAB5
+// boards/TAB5/pie_blend_tab5.c. Declared rather than included so this file does
+// not need the board directory on its include path. Tab5 only, because there
+// the compositor runs in a (core-pinned) task: the same code runs in an ISR on
+// the ESP32-S3, and the FreeRTOS port panics if a coprocessor is used there.
+void tab5_pie_blend(uint16_t *dst, const uint16_t *src, uint32_t n, uint16_t key);
+#endif
+
 // Python callback
-extern void tulip_frame_isr(); 
+extern void tulip_frame_isr();
 
 uint8_t spriteno_activated;
 
@@ -520,19 +528,24 @@ bool IRAM_ATTR display_bounce_empty(void *bounce_buf, int pos_px, int len_bytes,
             const tulip_px_t *lv_line = lv_overlay + (uint32_t)y * LV_OVERLAY_STRIDE;
             const uint16_t lv_x0 = lv_overlay_x0[y];
             const uint16_t lv_len = lv_overlay_x1[y] - lv_x0;
-            if(!px_has_alpha(lv_line + lv_x0, lv_len)) {
-                memcpy(b_ptr + lv_x0, lv_line + lv_x0, lv_len*BYTES_PER_PIXEL);
-            } else {
-                for(uint16_t x = lv_x0; x < lv_x0 + lv_len; x++) {
-                    if(lv_line[x] != ALPHA) b_ptr[x] = lv_line[x];
-                }
-            }
+            // One pass on the vector unit rather than two scalar ones (scan for
+            // any alpha, then either copy or test every pixel). It falls back
+            // to the same scalar loop if the startup self-test disagreed with
+            // it, or if this span is not shaped for a vector load.
+            tab5_pie_blend(b_ptr + lv_x0, lv_line + lv_x0, lv_len, ALPHA);
         }
 #endif
         if(tfb_active && bg_tfb != NULL && TFB_pxlen != NULL) {
             uint16_t tfb_y = tfb_ring_row_in(y, tfb_top, tfb_h);
             tulip_px_t *tfb_line = bg_tfb + (tfb_y * H_RES);
             uint16_t tfb_pxlen = TFB_pxlen[tfb_y];
+#ifdef TAB5
+            // The measured hot spot: with the terminal full of text this step
+            // was ~27ms of a frame, four times what memcpy of the same bytes
+            // costs, so most of it was the per-pixel loop rather than the PSRAM
+            // it reads from.
+            tab5_pie_blend(b_ptr, tfb_line, tfb_pxlen, ALPHA);
+#else
             if(!px_has_alpha(tfb_line, tfb_pxlen)) {
                 memcpy(b_ptr, tfb_line, tfb_pxlen*BYTES_PER_PIXEL);
             } else {
@@ -540,6 +553,7 @@ bool IRAM_ATTR display_bounce_empty(void *bounce_buf, int pos_px, int len_bytes,
                     if(tfb_line[x] != ALPHA) b_ptr[x] = tfb_line[x];
                 }
             }
+#endif
         }
     
         if(spriteno_activated && sprite_ids != NULL && sprite_ram != NULL && sprite_x_px != NULL && sprite_y_px != NULL && sprite_w_px != NULL && sprite_h_px != NULL && sprite_vis != NULL && sprite_mem != NULL && collision_bitfield != NULL) {

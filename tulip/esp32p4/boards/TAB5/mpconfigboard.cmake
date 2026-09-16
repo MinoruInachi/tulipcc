@@ -66,6 +66,10 @@ set(MICROPY_SOURCE_BOARD
     ${MICROPY_BOARD_DIR}/modtulip_tab5.c
     ${MICROPY_BOARD_DIR}/tsequencer_tab5.c
     ${MICROPY_BOARD_DIR}/display_tab5.c
+    ${MICROPY_BOARD_DIR}/pie_blend_tab5.c
+    # The PIE (128-bit SIMD) blend enables its own ISA extension with
+    # ".option arch", so it needs no -march of its own here.
+    ${MICROPY_BOARD_DIR}/pie_blend_tab5.S
     ${MICROPY_BOARD_DIR}/lv_mem_tab5.c
     ${MICROPY_BOARD_DIR}/../../../shared/display.c
     ${MICROPY_BOARD_DIR}/../../../shared/lodepng.c

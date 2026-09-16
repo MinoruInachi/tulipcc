@@ -1374,6 +1374,7 @@ static mp_obj_t tulip_tab5_render_stats(void) {
         mp_obj_new_int(st.ppa_stuck_rows),
         mp_obj_new_int(st.ppa_last_y),
         mp_obj_new_int(st.ppa_last_rows),
+        mp_obj_new_bool(st.pie_active),
     };
     return mp_obj_new_tuple(MP_ARRAY_SIZE(values), values);
 }

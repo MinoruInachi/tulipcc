@@ -22,6 +22,7 @@
 #include "lvgl.h"
 
 #include "display_tab5.h"
+#include "pie_blend_tab5.h"
 #include "pins.h"
 #include "tab5_revision.h"
 
@@ -111,13 +112,35 @@ static void tab5_render_bridge_buffers_deinit(void);
 
 static tab5_render_bounce_empty_fn_t s_render_bounce_empty = tab5_scaffold_bounce_empty;
 static tab5_render_frame_done_fn_t s_render_frame_done = tab5_scaffold_frame_done;
-/* One chunk of composed rows, RGB565 -- the compositor's own format now that
- * the BG plane is 16-bit, so nothing is converted between it and the panel. */
-static uint16_t *s_line565 = NULL;
-/* Landscape RGB565 staging image, exactly what Tulip renders (1280x720).
- * The panel is physically portrait, so this gets rotated on the way out. */
-static uint16_t *s_stage565 = NULL;
+/* Composed rows, RGB565 -- the compositor's own format now that the BG plane
+ * is 16-bit, so nothing is converted between it and the panel.
+ *
+ * Two chunks, ping-ponged: the PPA rotates one straight out of internal SRAM
+ * while the compositor fills the other. That is what removed the full-screen
+ * landscape staging image this used to compose into. The staging image existed
+ * only so the PPA had a full-frame source to read a band out of, and it cost
+ * 1.84 MB of PSRAM writes plus the ~28 ms memcpy that made them, every frame.
+ * The PPA is happy to read a 1280xN strip out of internal RAM instead (see
+ * ppa_srm.c: "in_buffer could be anywhere"), and its driver write-backs that
+ * strip for us -- which is necessary rather than merely convenient, because
+ * internal RAM is cached through L1 on this chip
+ * (SOC_CACHE_INTERNAL_MEM_VIA_L1CACHE).
+ *
+ * Two buffers is the minimum that is safe with one transaction in flight: by
+ * the time chunk i is composed into a buffer, the transaction that last used
+ * that buffer (i-2) was already waited for, before i-1 was issued. */
+#define TAB5_CHUNK_BUFFERS 2
+static uint16_t *s_chunk565[TAB5_CHUNK_BUFFERS] = {NULL, NULL};
+static uint8_t s_chunk_next = 0;
 static int s_linebuf_width = 0;
+/* The rotation in flight, if any, and the strip it is reading -- so a timeout
+ * can redo exactly that strip on the CPU, out of the buffer that still holds
+ * it. */
+static bool s_ppa_pending = false;
+static const uint16_t *s_pending_src = NULL;
+static void *s_pending_fb = NULL;
+static int s_pending_y = 0;
+static int s_pending_rows = 0;
 
 /* Hardware rotation. The ESP32-P4 PPA does scale/rotate/mirror in a DMA engine,
  * so the CPU never touches the portrait framebuffer. */
@@ -157,8 +180,8 @@ static int s_ppa_stuck_y = -1, s_ppa_stuck_rows = 0, s_ppa_last_y = -1, s_ppa_la
  * Surfaced through tulip.tab5_render_stats() so the cost of a change can be
  * attributed instead of guessed at. */
 static uint32_t s_us_composite = 0;   /* Tulip compositor callbacks */
-static uint32_t s_us_convert = 0;     /* the composed chunk copied into the staging image */
-static uint32_t s_us_rotate = 0;      /* PPA (or CPU fallback) rotation */
+static uint32_t s_us_convert = 0;     /* blocked on the PPA: the rotation the pipeline could not hide */
+static uint32_t s_us_rotate = 0;      /* CPU rotation, when the PPA was unavailable or timed out */
 static uint32_t s_us_present = 0;     /* draw_bitmap: cache write-back + fb swap */
 static uint32_t s_us_wait = 0;        /* blocked waiting for the panel */
 static uint32_t s_frames_skipped = 0; /* frames dropped because nothing changed */
@@ -173,12 +196,14 @@ static int s_prev_band_y1 = TAB5_SHARED_RENDER_H;
 static SemaphoreHandle_t s_vsync_sem = NULL;
 /* Redraw the panel even when nothing reported a change, so a missed
  * display_mark_dirty() shows up as a stale second rather than a frozen screen --
- * but a slice of it at a time. The display task is serial and a whole 720-row
- * frame costs ~130ms of composite + convert + rotate, so redrawing all of it in
- * one go parked every damage band behind a 130ms stall roughly once a second:
+ * but a slice of it at a time. The display task is serial, so redrawing the
+ * whole screen in one go parks every damage band behind it. That mattered a
+ * great deal when a full frame cost ~130ms of composite + convert + rotate:
  * drums.py's beat LEDs stopped following the sequencer for a third of a step,
- * several times a bar. A slice is ~17ms, and eight of them one every four frames
- * cover the screen in the same ~0.9s for the same rows per second. */
+ * several times a bar. A full frame is ~20ms now that the staging copy is gone
+ * and the rotation runs behind the compositing, so the stall is much smaller,
+ * but slicing still costs nothing and keeps the worst case off the damage
+ * path: eight slices, one every four frames, cover the screen in ~0.9s. */
 #define TAB5_FORCED_SLICE_FRAMES 4
 #define TAB5_FORCED_SLICES 8
 #define TAB5_FORCED_SLICE_ROWS ((TAB5_SHARED_RENDER_H + TAB5_FORCED_SLICES - 1) / TAB5_FORCED_SLICES)
@@ -291,64 +316,49 @@ void tab5_set_render_provider_with_geometry(tab5_render_bounce_empty_fn_t bounce
 
 static bool tab5_render_bridge_buffers_init(void)
 {
-    const bool needs_stage_frame = (s_provider_width != BSP_LCD_H_RES || s_provider_height != BSP_LCD_V_RES);
-    const size_t row_bytes = (size_t)s_provider_width;
-    const size_t chunk_bytes = (size_t)s_provider_width * TAB5_BRIDGE_CHUNK_ROWS;
-    const size_t px_count = row_bytes > chunk_bytes ? row_bytes : chunk_bytes;
+    const size_t chunk_px = (size_t)s_provider_width * TAB5_BRIDGE_CHUNK_ROWS;
 
-    if (s_line565 != NULL) {
-        const bool linebuf_matches = (s_linebuf_width == s_provider_width);
-        const bool framebuf_matches = (!needs_stage_frame || s_stage565 != NULL);
-        if (linebuf_matches && framebuf_matches) {
-            if (!needs_stage_frame) {
-                heap_caps_free(s_stage565);
-                s_stage565 = NULL;
-            }
-            return true;
-        }
-
-        tab5_render_bridge_buffers_deinit();
+    if (s_chunk565[0] != NULL && s_linebuf_width == s_provider_width) {
+        return true;
     }
+    tab5_render_bridge_buffers_deinit();
 
-    /* The scratch chunk is touched per pixel by the compositor; keep it in
-     * internal SRAM so it is not paying PSRAM latency per pixel. */
-    s_line565 = heap_caps_malloc(px_count * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (s_line565 == NULL) {
-        s_line565 = heap_caps_malloc(px_count * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    /* Internal SRAM, because the compositor touches these per pixel and the
+     * PPA then reads them as DMA; cache-line aligned so the driver's write-back
+     * of the strip stays cheap. The second buffer is what lets one strip rotate
+     * while the next is composed, so losing it costs speed but not
+     * correctness -- carry on with one and say so. */
+    for (int i = 0; i < TAB5_CHUNK_BUFFERS; i++) {
+        s_chunk565[i] = heap_caps_aligned_alloc(TAB5_CACHE_LINE_BYTES,
+                                                chunk_px * sizeof(uint16_t),
+                                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     }
-    if (s_line565 == NULL) {
+    if (s_chunk565[0] == NULL) {
+        s_chunk565[0] = heap_caps_aligned_alloc(TAB5_CACHE_LINE_BYTES,
+                                                chunk_px * sizeof(uint16_t),
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (s_chunk565[0] == NULL) {
         s_linebuf_width = 0;
         ESP_LOGE(TAG, "No memory for render bridge buffers");
         return false;
     }
-    s_linebuf_width = s_provider_width;
-
-    if (needs_stage_frame) {
-        const size_t stage_px = (size_t)s_provider_width * s_provider_height;
-        /* Cache-line aligned so the PPA input window sync stays cheap. */
-        s_stage565 = heap_caps_aligned_alloc(TAB5_CACHE_LINE_BYTES,
-                                             stage_px * sizeof(uint16_t),
-                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (s_stage565 == NULL) {
-            ESP_LOGE(TAG, "No memory for %dx%d staging frame buffer",
-                     s_provider_width, s_provider_height);
-            tab5_render_bridge_buffers_deinit();
-            return false;
-        }
-    } else {
-        heap_caps_free(s_stage565);
-        s_stage565 = NULL;
+    if (s_chunk565[1] == NULL) {
+        ESP_LOGW(TAG, "Only one render chunk buffer; rotation will not overlap compositing");
     }
+    s_chunk_next = 0;
+    s_linebuf_width = s_provider_width;
 
     return true;
 }
 
 static void tab5_render_bridge_buffers_deinit(void)
 {
-    heap_caps_free(s_line565);
-    heap_caps_free(s_stage565);
-    s_line565 = NULL;
-    s_stage565 = NULL;
+    for (int i = 0; i < TAB5_CHUNK_BUFFERS; i++) {
+        heap_caps_free(s_chunk565[i]);
+        s_chunk565[i] = NULL;
+    }
+    s_chunk_next = 0;
     s_linebuf_width = 0;
 }
 
@@ -368,16 +378,14 @@ static bool s_display_owned_locally = false;
 static esp_ldo_channel_handle_t s_dsi_phy_pwr_chan = NULL;
 static bsp_lcd_handles_t tab5_lcd_handles;
 
-/* Rotate the landscape staging image onto a portrait panel framebuffer.
+/* Rotate a composed landscape strip onto a portrait panel framebuffer.
  *
  * Tulip's (x, y) maps to panel (y, W-1-x), which is a 90 degree counter-
- * clockwise rotation -- exactly PPA_SRM_ROTATION_ANGLE_90. Returns false if
- * the PPA is unavailable or the transaction failed, so the caller can fall
- * back to the CPU path.
+ * clockwise rotation -- exactly PPA_SRM_ROTATION_ANGLE_90.
  *
- * `y_start`/`rows` select a horizontal band of the staging image. After a
- * 90 CCW rotation that band lands as a vertical column of the panel, at
- * panel x == y_start, so the destination block offset is on x, not y. */
+ * `y_start`/`rows` say where the strip belongs. After a 90 CCW rotation the
+ * strip lands as a vertical column of the panel, at panel x == y_start, so the
+ * destination block offset is on x, not y. */
 static bool IRAM_ATTR tab5_ppa_trans_done(ppa_client_handle_t client, ppa_event_data_t *edata, void *user)
 {
     (void)edata; (void)user;
@@ -417,9 +425,13 @@ static void tab5_ppa_client_open(void)
     s_ppa_srm = client;
 }
 
-static bool tab5_ppa_rotate_to_fb(void *dst_fb, int y_start, int rows)
+/* Hand one composed strip to the PPA and return without waiting for it, so the
+ * caller can compose the next strip while this one rotates. Collect it with
+ * tab5_ppa_flush(). Returns false if the PPA is unavailable or the transaction
+ * was refused, so the caller can fall back to the CPU path. */
+static bool tab5_ppa_issue(const uint16_t *src, void *dst_fb, int y_start, int rows)
 {
-    if (s_ppa_srm == NULL || dst_fb == NULL || s_ppa_done_sem == NULL) {
+    if (s_ppa_srm == NULL || dst_fb == NULL || s_ppa_done_sem == NULL || src == NULL) {
         return false;
     }
     /* A transaction that timed out earlier may have completed since; its
@@ -428,15 +440,18 @@ static bool tab5_ppa_rotate_to_fb(void *dst_fb, int y_start, int rows)
     s_ppa_last_y = y_start;
     s_ppa_last_rows = rows;
 
+    /* The strip is the whole picture as far as the PPA is concerned: it starts
+     * at row 0 of the chunk buffer, and where it belongs on the panel is
+     * carried entirely by out.block_offset_x. */
     const ppa_srm_oper_config_t srm = {
         .in = {
-            .buffer = s_stage565,
+            .buffer = (void *)src,
             .pic_w = (uint32_t)s_provider_width,
-            .pic_h = (uint32_t)s_provider_height,
+            .pic_h = (uint32_t)rows,
             .block_w = (uint32_t)s_provider_width,
             .block_h = (uint32_t)rows,
             .block_offset_x = 0,
-            .block_offset_y = (uint32_t)y_start,
+            .block_offset_y = 0,
             .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
         },
         .out = {
@@ -466,52 +481,69 @@ static bool tab5_ppa_rotate_to_fb(void *dst_fb, int y_start, int rows)
         }
         return false;
     }
-    if (xSemaphoreTake(s_ppa_done_sem, pdMS_TO_TICKS(TAB5_PPA_TIMEOUT_MS)) != pdTRUE) {
-        s_ppa_timeouts++;
-        if (s_ppa_stuck_y < 0) {
-            s_ppa_stuck_y = y_start;
-            s_ppa_stuck_rows = rows;
-        }
-        if (s_ppa_recoveries < TAB5_PPA_MAX_RECOVERIES) {
-            s_ppa_recoveries++;
-            ESP_LOGE(TAG, "PPA rotate did not complete within %d ms (band y=%d rows=%d); "
-                     "opening a new PPA client (%u of %d)", TAB5_PPA_TIMEOUT_MS, y_start, rows,
-                     (unsigned)s_ppa_recoveries, TAB5_PPA_MAX_RECOVERIES);
-            s_ppa_srm = NULL; /* abandoned, see TAB5_PPA_MAX_RECOVERIES */
-            tab5_ppa_client_open();
-        } else {
-            ESP_LOGE(TAG, "PPA rotate did not complete within %d ms again; "
-                     "rotation stays on the CPU from here", TAB5_PPA_TIMEOUT_MS);
-            s_ppa_srm = NULL;
-        }
-        return false;
-    }
+    s_ppa_pending = true;
+    s_pending_src = src;
+    s_pending_fb = dst_fb;
+    s_pending_y = y_start;
+    s_pending_rows = rows;
     return true;
+}
+
+/* Wait for the strip in flight, if there is one. Returns false if it never
+ * arrived, in which case the caller rotates s_pending_* on the CPU -- the
+ * chunk buffer still holds that strip, which is why the pending one is
+ * remembered at all. */
+static bool tab5_ppa_flush(void)
+{
+    if (!s_ppa_pending) {
+        return true;
+    }
+    s_ppa_pending = false;
+    if (xSemaphoreTake(s_ppa_done_sem, pdMS_TO_TICKS(TAB5_PPA_TIMEOUT_MS)) == pdTRUE) {
+        return true;
+    }
+    s_ppa_timeouts++;
+    if (s_ppa_stuck_y < 0) {
+        s_ppa_stuck_y = s_pending_y;
+        s_ppa_stuck_rows = s_pending_rows;
+    }
+    if (s_ppa_recoveries < TAB5_PPA_MAX_RECOVERIES) {
+        s_ppa_recoveries++;
+        ESP_LOGE(TAG, "PPA rotate did not complete within %d ms (band y=%d rows=%d); "
+                 "opening a new PPA client (%u of %d)", TAB5_PPA_TIMEOUT_MS, s_pending_y,
+                 s_pending_rows, (unsigned)s_ppa_recoveries, TAB5_PPA_MAX_RECOVERIES);
+        s_ppa_srm = NULL; /* abandoned, see TAB5_PPA_MAX_RECOVERIES */
+        tab5_ppa_client_open();
+    } else {
+        ESP_LOGE(TAG, "PPA rotate did not complete within %d ms again; "
+                 "rotation stays on the CPU from here", TAB5_PPA_TIMEOUT_MS);
+        s_ppa_srm = NULL;
+    }
+    return false;
 }
 
 /* CPU fallback for the rotation: the PPA could not be registered, or one of
  * its transactions never completed (see TAB5_PPA_TIMEOUT_MS). */
-/* Rotate staging rows [y0, y1) onto the panel, 32x32 blocks at a time so that
- * both the reads (one staging row segment per x) and the writes (32
- * consecutive panel pixels, one cache line) stay in cache. The pixel-at-a-time
- * version this replaces wrote every pixel to a different cache line and took
- * 100 ms for a full frame; this does a full frame in a third of that and a
- * typical band in less. Still the fallback: the PPA does the same in 40 ms
- * without touching the CPU. */
-static void tab5_cpu_rotate_band(uint16_t *dst_fb, int y0, int y1)
+/* Rotate one composed strip onto the panel, 32 source columns at a time so
+ * that both the reads (one strip row segment per x) and the writes (a run of
+ * consecutive panel pixels) stay in cache. The pixel-at-a-time version this
+ * replaces wrote every pixel to a different cache line and took 100 ms for a
+ * full frame; this does a full frame in a third of that. Still the fallback:
+ * the PPA does the same without touching the CPU. */
+static void tab5_cpu_rotate_chunk(uint16_t *dst_fb, const uint16_t *src, int y_start, int rows)
 {
+    if (dst_fb == NULL || src == NULL) {
+        return;
+    }
     const int W = s_provider_width;
-    for (int by = y0; by < y1; by += 32) {
-        const int ye = (by + 32 < y1) ? by + 32 : y1;
-        for (int bx = 0; bx < W; bx += 32) {
-            const int xe = (bx + 32 < W) ? bx + 32 : W;
-            for (int x = bx; x < xe; x++) {
-                uint16_t *drow = dst_fb + (size_t)(W - 1 - x) * BSP_LCD_H_RES + by;
-                const uint16_t *src = s_stage565 + (size_t)by * W + x;
-                for (int y = by; y < ye; y++) {
-                    *drow++ = *src;
-                    src += W;
-                }
+    for (int bx = 0; bx < W; bx += 32) {
+        const int xe = (bx + 32 < W) ? bx + 32 : W;
+        for (int x = bx; x < xe; x++) {
+            uint16_t *drow = dst_fb + (size_t)(W - 1 - x) * BSP_LCD_H_RES + y_start;
+            const uint16_t *s = src + x;
+            for (int r = 0; r < rows; r++) {
+                *drow++ = *s;
+                s += W;
             }
         }
     }
@@ -526,7 +558,7 @@ static void tab5_render_bridge_tick_native(void)
     for (int y = 0; y < BSP_LCD_V_RES; y += TAB5_BRIDGE_CHUNK_ROWS) {
         const int rows = (y + TAB5_BRIDGE_CHUNK_ROWS <= BSP_LCD_V_RES) ? TAB5_BRIDGE_CHUNK_ROWS : (BSP_LCD_V_RES - y);
         const int pixels = BSP_LCD_H_RES * rows;
-        if (!s_render_bounce_empty(s_line565, y * BSP_LCD_H_RES, pixels * (int)sizeof(uint16_t), NULL)) {
+        if (!s_render_bounce_empty(s_chunk565[0], y * BSP_LCD_H_RES, pixels * (int)sizeof(uint16_t), NULL)) {
             ESP_LOGW(TAG, "render bounce callback returned false at y=%d", y);
             s_native_callback_failures++;
             if (s_shared_provider_active) {
@@ -535,21 +567,127 @@ static void tab5_render_bridge_tick_native(void)
             break;
         }
 
-        esp_lcd_panel_draw_bitmap(tab5_lcd_handles.panel, 0, y, BSP_LCD_H_RES, y + rows, s_line565);
+        esp_lcd_panel_draw_bitmap(tab5_lcd_handles.panel, 0, y, BSP_LCD_H_RES, y + rows, s_chunk565[0]);
     }
 
     (void)s_render_frame_done();
     s_bridge_frames++;
 }
 
+/* Compose [y0, y1) a strip at a time, handing each strip to the PPA as soon as
+ * it is composed and collecting the previous one just before the next is
+ * issued -- so strip i is composed while strip i-1 is still rotating.
+ * Compositing a strip costs a fraction of rotating one, so it disappears into
+ * the rotation almost entirely: what used to be a serial composite, then copy,
+ * then rotate is now paced by the rotation alone.
+ *
+ * Returns false if the compositor gave up. Whatever is in flight still has to
+ * be collected by the caller in that case. */
+/* Set when a frame actually handed a buffer to the panel, so the loop knows
+ * whether it has already paced itself. */
+static bool s_presented_this_frame = false;
+
+/* Block until the panel begins its next refresh.
+ *
+ * The DSI driver switches framebuffers by assigning cur_fb_index and doing
+ * nothing else -- see the "draw buffer is in frame buffer memory range" path in
+ * esp_lcd_panel_dpi.c, which write-backs the cache and then just sets the
+ * index. There is no wait, and no deferral to the blanking interval. So a
+ * present issued at an arbitrary moment splits the screen between the two
+ * buffers at whatever line the scan-out had reached, and with a scrolling plane
+ * the half still coming from the other buffer is a frame of scroll out of
+ * place: a band of stale content, in a different place every frame. That was
+ * always true here, but at ~10 fps it happened ten times a second and at nearly
+ * 30 it is constant, which is how it turned into a visible fault.
+ *
+ * The semaphore is drained before waiting because it is binary: a refresh that
+ * completed while we were compositing would otherwise satisfy this
+ * immediately, which is precisely the unsynchronised case again. The timeout
+ * is the usual insurance -- a panel that stops interrupting must not take the
+ * display task with it. */
+static uint32_t tab5_wait_vsync(void)
+{
+    if (s_vsync_sem == NULL) {
+        vTaskDelay(pdMS_TO_TICKS(16));
+        return 0;
+    }
+    const int64_t t0 = esp_timer_get_time();
+    s_phase = TAB5_PHASE_WAIT_VSYNC;
+    xSemaphoreTake(s_vsync_sem, 0);                  /* drop a stale edge */
+    xSemaphoreTake(s_vsync_sem, pdMS_TO_TICKS(100)); /* wait for a real one */
+    return (uint32_t)(esp_timer_get_time() - t0);
+}
+
+static bool tab5_render_run(void *target_fb, int y0, int y1)
+{
+    /* Whole strips only. A run that starts or ends mid-strip issues a short
+     * rotation, and a short strip leaves the PPA writing a very narrow column
+     * of the panel -- a 6-row strip is 6 pixels wide, 12 bytes per output row.
+     * Those are the transactions that were seen to never signal completion:
+     * the first rotation to time out was stuck_rows=6, in a frame whose other
+     * strips were all 12 rows. Rounding the run out to strip boundaries costs
+     * a few rows of compositing and makes every transaction the same shape.
+     * V_RES is a multiple of the strip height, so this makes every strip
+     * exactly TAB5_BRIDGE_CHUNK_ROWS tall. */
+    y0 -= y0 % TAB5_BRIDGE_CHUNK_ROWS;
+    y1 = ((y1 + TAB5_BRIDGE_CHUNK_ROWS - 1) / TAB5_BRIDGE_CHUNK_ROWS) * TAB5_BRIDGE_CHUNK_ROWS;
+    if (y0 < 0) y0 = 0;
+    if (y1 > s_provider_height) y1 = s_provider_height;
+    s_band_rows += (uint32_t)(y1 - y0);
+
+    for (int y = y0; y < y1; y += TAB5_BRIDGE_CHUNK_ROWS) {
+        const int rows = (y + TAB5_BRIDGE_CHUNK_ROWS <= y1) ? TAB5_BRIDGE_CHUNK_ROWS : (y1 - y);
+        const int pixels = s_provider_width * rows;
+        uint16_t *chunk = s_chunk565[s_chunk_next];
+
+        const int64_t t0 = esp_timer_get_time();
+        s_phase = TAB5_PHASE_COMPOSITE;
+        if (!s_render_bounce_empty(chunk, y * s_provider_width, pixels * (int)sizeof(uint16_t), NULL)) {
+            ESP_LOGW(TAG, "render bounce callback returned false at src y=%d", y);
+            s_rotated_callback_failures++;
+            if (s_shared_provider_active) {
+                tab5_use_scaffold_provider("rotated callback returned false");
+            }
+            return false;
+        }
+        const int64_t t1 = esp_timer_get_time();
+        s_us_composite += (uint32_t)(t1 - t0);
+
+        /* Collect the strip issued last time round before handing the engine
+         * another: the client allows one transaction in flight. This is the
+         * only place a frame blocks, and only for whatever is left of the
+         * previous rotation once this strip's compositing has been paid out of
+         * it. */
+        s_phase = TAB5_PHASE_ROTATE;
+        if (!tab5_ppa_flush()) {
+            tab5_cpu_rotate_chunk((uint16_t *)s_pending_fb, s_pending_src, s_pending_y, s_pending_rows);
+        }
+        const int64_t t2 = esp_timer_get_time();
+        s_us_convert += (uint32_t)(t2 - t1);
+
+        if (target_fb != NULL && !tab5_ppa_issue(chunk, target_fb, y, rows)) {
+            tab5_cpu_rotate_chunk((uint16_t *)target_fb, chunk, y, rows);
+            s_us_rotate += (uint32_t)(esp_timer_get_time() - t2);
+        } else if (s_chunk565[1] == NULL) {
+            /* Nothing to ping-pong with, so there is no overlap to be had: the
+             * next strip would be composed over the one the PPA is reading. */
+            const int64_t t3 = esp_timer_get_time();
+            if (!tab5_ppa_flush()) {
+                tab5_cpu_rotate_chunk((uint16_t *)s_pending_fb, s_pending_src, s_pending_y, s_pending_rows);
+            }
+            s_us_convert += (uint32_t)(esp_timer_get_time() - t3);
+        }
+
+        if (s_chunk565[1] != NULL) {
+            s_chunk_next ^= 1u;
+        }
+    }
+    return true;
+}
+
 static void tab5_render_bridge_tick_rotated(int band_y0, int band_y1)
 {
     if (!tab5_render_bridge_buffers_init()) {
-        return;
-    }
-
-    if (s_stage565 == NULL) {
-        ESP_LOGE(TAG, "Rotated path requires a staging frame buffer");
         return;
     }
     s_phase = TAB5_PHASE_COMPOSITE;
@@ -575,12 +713,13 @@ static void tab5_render_bridge_tick_rotated(int band_y0, int band_y1)
 
     /* The framebuffer that is not on screen is a frame behind, so it also needs
      * the rows the previous frame changed, or a partial update resurrects stale
-     * pixels every time the two alternate. Only the rotate has to be repeated:
-     * the stage buffer is a persistent full-screen image, and nothing has
-     * touched those rows in it since they were composed. Keeping the two runs
-     * apart rather than unioning them is the point -- a safety slice at the top
+     * pixels every time the two alternate. Those rows are composed again rather
+     * than re-read from a staging image, because there is no staging image any
+     * more; compositing a row costs a fraction of rotating it, and the rotation
+     * was always the real price of the catch-up. Keeping the two runs apart
+     * rather than unioning them is still the point -- a safety slice at the top
      * of the screen and a beat LED at the bottom used to redraw everything in
-     * between, 130ms of work for 130 rows of it. */
+     * between. */
     int prev_y0 = 0;
     int prev_y1 = 0;
     if (s_dsi_fb_count > 1) {
@@ -590,67 +729,49 @@ static void tab5_render_bridge_tick_rotated(int band_y0, int band_y1)
         s_prev_band_y1 = band_y1;
         if (prev_y0 < 0) prev_y0 = 0;
         if (prev_y1 > s_provider_height) prev_y1 = s_provider_height;
-        /* Touching or overlapping runs cost less as one rotate than two. */
+        /* Touching or overlapping runs cost less as one run than two. */
         if (prev_y1 > prev_y0 && prev_y0 <= band_y1 && prev_y1 >= band_y0) {
             if (prev_y0 < band_y0) band_y0 = prev_y0;
             if (prev_y1 > band_y1) band_y1 = prev_y1;
             prev_y0 = prev_y1 = 0;
         }
     }
-    s_band_rows = (uint32_t)(band_y1 - band_y0);
+    /* Accumulated by the runs below, which round out to whole strips: what got
+     * composed is a few rows more than what was reported damaged. */
+    s_band_rows = 0;
 
-    uint32_t composite_us = 0;
-    uint32_t convert_us = 0;
-    int64_t t0 = esp_timer_get_time();
+    s_us_composite = 0;
+    s_us_convert = 0;
+    s_us_rotate = 0;
 
-    /* Work a band of rows at a time. Composing in chunks amortises the
-     * per-call overhead of the Tulip compositor, and composing into an
-     * internal-RAM chunk before one bulk copy keeps its per-pixel overlay
-     * stores off PSRAM -- a per-pixel store straight to PSRAM stalls on the
-     * cache line fetch and was the single most expensive phase of the frame. */
-    for (int y = band_y0; y < band_y1; y += TAB5_BRIDGE_CHUNK_ROWS) {
-        const int rows = (y + TAB5_BRIDGE_CHUNK_ROWS <= band_y1)
-                             ? TAB5_BRIDGE_CHUNK_ROWS
-                             : (band_y1 - y);
-        const int pixels = s_provider_width * rows;
-
-        if (!s_render_bounce_empty(s_line565, y * s_provider_width, pixels * (int)sizeof(uint16_t), NULL)) {
-            ESP_LOGW(TAG, "render bounce callback returned false at src y=%d", y);
-            s_rotated_callback_failures++;
-            if (s_shared_provider_active) {
-                tab5_use_scaffold_provider("rotated callback returned false");
-            }
-            break;
-        }
-        const int64_t t1 = esp_timer_get_time();
-
-        memcpy(s_stage565 + (size_t)y * s_provider_width, s_line565,
-               (size_t)pixels * sizeof(uint16_t));
-        const int64_t t2 = esp_timer_get_time();
-
-        composite_us += (uint32_t)(t1 - t0);
-        convert_us += (uint32_t)(t2 - t1);
-        t0 = t2;
+    if (tab5_render_run(target_fb, band_y0, band_y1) && prev_y1 > prev_y0) {
+        (void)tab5_render_run(target_fb, prev_y0, prev_y1);
     }
-    s_us_composite = composite_us;
-    s_us_convert = convert_us;
+
+    /* Nothing may present, or reuse a chunk buffer, while a rotation is still
+     * reading one. */
+    const int64_t t_flush = esp_timer_get_time();
+    s_phase = TAB5_PHASE_ROTATE;
+    if (!tab5_ppa_flush()) {
+        tab5_cpu_rotate_chunk((uint16_t *)s_pending_fb, s_pending_src, s_pending_y, s_pending_rows);
+    }
+    s_us_convert += (uint32_t)(esp_timer_get_time() - t_flush);
 
     if (target_fb != NULL) {
-        const int64_t t_rot = esp_timer_get_time();
-        s_phase = TAB5_PHASE_ROTATE;
-        if (!tab5_ppa_rotate_to_fb(target_fb, band_y0, band_y1 - band_y0)) {
-            tab5_cpu_rotate_band((uint16_t *)target_fb, band_y0, band_y1);
-        }
-        if (prev_y1 > prev_y0 && !tab5_ppa_rotate_to_fb(target_fb, prev_y0, prev_y1 - prev_y0)) {
-            tab5_cpu_rotate_band((uint16_t *)target_fb, prev_y0, prev_y1);
+        /* Hand the finished buffer over at a frame boundary rather than
+         * mid-scan; see tab5_wait_vsync. With a single framebuffer there is no
+         * swap to time -- the rotation wrote the buffer the panel is already
+         * showing -- so waiting would cost a refresh and buy nothing. */
+        if (s_dsi_fb_count > 1) {
+            s_us_wait = tab5_wait_vsync();
         }
         const int64_t t_pres = esp_timer_get_time();
         s_phase = TAB5_PHASE_PRESENT;
         /* The buffer already lives inside the panel's framebuffer set, so this
          * is a cache write-back plus a framebuffer index switch -- no copy. */
         esp_lcd_panel_draw_bitmap(tab5_lcd_handles.panel, 0, 0, BSP_LCD_H_RES, BSP_LCD_V_RES, target_fb);
-        s_us_rotate = (uint32_t)(t_pres - t_rot);
         s_us_present = (uint32_t)(esp_timer_get_time() - t_pres);
+        s_presented_this_frame = true;
         if (s_dsi_fb_count > 1) {
             s_dsi_fb_next ^= 1u;
         }
@@ -957,6 +1078,11 @@ void run_tab5_display(void *arg)
         return;
     }
 
+    /* Has to happen on this task: the PIE registers are saved per pinned task,
+     * so the self-test must run where the blending will. */
+    tab5_pie_init();
+    ESP_LOGI(TAG, "PIE vector blend %s", tab5_pie_ok() ? "enabled" : "DISABLED (self-test failed)");
+
     if (!s_tulip_shared_renderer_initialized) {
         display_init();
         display_tfb_set_default_bg_color(TAB5_REPL_TRANSPARENT_BG);
@@ -1000,6 +1126,7 @@ void run_tab5_display(void *arg)
     int forced_slice = 0;
     while (1) {
         const int64_t busy_start_us = esp_timer_get_time();
+        s_presented_this_frame = false;
 
         /* Recompose only when something said it changed. At the REPL nothing
          * does, and skipping frees the memory bandwidth that audio needs. */
@@ -1049,17 +1176,23 @@ void run_tab5_display(void *arg)
             vTaskDelay(1);
         }
 
-        /* Pace to the panel. Waiting on the refresh-done interrupt keeps the
-         * loop aligned to the display instead of adding a fixed delay on top
-         * of however long the frame took. */
-        const int64_t wait_start_us = esp_timer_get_time();
-        s_phase = TAB5_PHASE_WAIT_VSYNC;
-        if (s_vsync_sem != NULL) {
-            xSemaphoreTake(s_vsync_sem, pdMS_TO_TICKS(100));
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(33));
+        /* Pace to the panel. A frame that presented already waited for a
+         * refresh boundary immediately before handing the buffer over, so
+         * waiting again here would park it for a second refresh and halve the
+         * rate; only a frame that drew nothing still needs pacing. The flag is
+         * what says which, rather than "did we have damage": the tick can
+         * return without presenting (unsupported geometry, an empty band), and
+         * spinning on those would be a busy loop. */
+        if (!s_presented_this_frame) {
+            const int64_t wait_start_us = esp_timer_get_time();
+            s_phase = TAB5_PHASE_WAIT_VSYNC;
+            if (s_vsync_sem != NULL) {
+                xSemaphoreTake(s_vsync_sem, pdMS_TO_TICKS(100));
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(33));
+            }
+            s_us_wait = (uint32_t)(esp_timer_get_time() - wait_start_us);
         }
-        s_us_wait = (uint32_t)(esp_timer_get_time() - wait_start_us);
     }
 }
 
@@ -1097,4 +1230,5 @@ void tab5_display_render_stats(tab5_render_stats_t *out)
     out->dsi_fb_count = s_dsi_fb_count;
     out->ppa_active = (s_ppa_srm != NULL);
     out->vsync_paced = (s_vsync_sem != NULL);
+    out->pie_active = tab5_pie_ok();
 }

@@ -14,9 +14,9 @@ void tab5_set_render_provider_with_geometry(tab5_render_bounce_empty_fn_t bounce
 											int provider_height);
 
 typedef struct {
-	uint32_t composite_us;
-	uint32_t convert_us;
-	uint32_t rotate_us;
+	uint32_t composite_us;  /* CPU time spent compositing strips */
+	uint32_t convert_us;    /* blocked on the PPA: the rotation the pipeline could not hide */
+	uint32_t rotate_us;     /* CPU time spent rotating, when the PPA was unavailable or timed out */
 	uint32_t present_us;
 	uint32_t wait_us;
 	uint32_t frames_skipped;
@@ -33,6 +33,7 @@ typedef struct {
 	int ppa_stuck_rows;
 	int ppa_last_y;         /* band of the most recent rotation */
 	int ppa_last_rows;
+	bool pie_active;        /* the SIMD blend passed its self-test and is in use */
 } tab5_render_stats_t;
 
 /* Where the display task is. Read through tulip.tab5_render_stats() -- if the
