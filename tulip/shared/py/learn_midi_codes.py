@@ -21,6 +21,18 @@ def midi_callback(m):
   #print(['%x' % x for x in m])
 
 
+def key_held():
+  """True while any key is down -- that's how you skip a control.
+
+  tulip.key() is the built-in keyboard of a Tulip CC. Boards that take a USB
+  keyboard instead (the Tab5) have only tulip.keys(), which reports the held
+  scan codes: (modifiers, scan0, ... scan5), 0 where nothing is held.
+  """
+  if hasattr(tulip, 'key'):
+    return tulip.key() != -1
+  return tulip.keys()[1] != 0
+
+
 def get_midi_control_codes(num_codes, seen_codes_set, name="code"):
   global LAST_MIDI_MSG
   print("Activate %d %ss in order (space to skip)" % (num_codes, name))
@@ -28,7 +40,7 @@ def get_midi_control_codes(num_codes, seen_codes_set, name="code"):
   for code_num in range(num_codes):
     print("Capturing", name, code_num)
     while True:
-      if LAST_MIDI_MSG or tulip.key() != -1:
+      if LAST_MIDI_MSG or key_held():
         if LAST_MIDI_MSG:
           if (LAST_MIDI_MSG[0] & 0xf0) == 0xb0:  # Accept codes on any channel.
             control_code = LAST_MIDI_MSG[1]
@@ -39,7 +51,7 @@ def get_midi_control_codes(num_codes, seen_codes_set, name="code"):
               break
           LAST_MIDI_MSG = None
         else:
-          # Must have been tulip.key(), skip this one
+          # Must have been a key press, skip this one
           print("..skipping")
           codes.append(None)
           break
