@@ -18,6 +18,7 @@
 // tulip_amy_sequencer_hook() -- fans a sequencer tick out to Python callbacks.
 #include "tsequencer_tab5.h"
 #include "usb_host_tab5.h"  // send_usb_midi_out(), AMY's MIDI output hook
+#include "mic_tab5.h"       // the mic block AMY renders as wave=AUDIO_EXT0/1
 #ifdef TULIP_USER_C_DSP
 #include "../../../shared/user_c_dsp.h"  // the user C DSP render/bus hooks
 #endif
@@ -44,6 +45,40 @@ static volatile tab5_audio_stats_t s_audio_stats;
 #define TAB5_AUDIO_TASK_CORE 0
 #define TAB5_SPEAKER_VOLUME 100
 
+// The two mics are the two channels of AMY's external input block, so the
+// interleaved frames the ring holds are exactly the layout AMY wants.
+_Static_assert(AMY_NCHANS == TAB5_MIC_CHANNELS,
+               "the mic feed assumes AMY renders as many channels as the mic captures");
+
+// Hand AMY the newest block of microphone audio, once per render block, so an
+// oscillator with wave=AUDIO_EXT0 (left mic) or AUDIO_EXT1 (right) plays what
+// the mics hear -- the Tab5's answer to the audio-in the S3 boards get from
+// AMY's own I2S capture, which this board cannot use because it renders with
+// AMY_AUDIO_IS_NONE and drives the codec itself.
+//
+// It follows tab5_mic_start()/stop() rather than a switch of its own: nothing
+// is audible until a sketch asks for an AUDIO_EXT oscillator, and peeking does
+// not consume the ring, so tulip.mic_read() still sees every frame.
+static void tab5_feed_mic_to_amy(void)
+{
+    static int16_t block[AMY_BLOCK_SIZE * AMY_NCHANS];
+    static bool amy_holds_audio;  // AMY's external block starts out zeroed
+
+    if (!tab5_mic_running()) {
+        // Stopping the mic must not leave the last block looping in AMY.
+        if (amy_holds_audio) {
+            memset(block, 0, sizeof(block));
+            amy_set_external_input_buffer(block);
+            amy_holds_audio = false;
+        }
+        return;
+    }
+    if (tab5_mic_peek_newest(block, AMY_BLOCK_SIZE) == AMY_BLOCK_SIZE) {
+        amy_set_external_input_buffer(block);
+        amy_holds_audio = true;
+    }
+}
+
 static void tab5_audio_task(void *ignored)
 {
     (void)ignored;
@@ -62,6 +97,7 @@ static void tab5_audio_task(void *ignored)
         }
         previous_block_start = block_start;
 
+        tab5_feed_mic_to_amy();
         amy_execute_deltas();
         const int64_t deltas_done = esp_timer_get_time();
         int16_t *samples = amy_render_audio();

@@ -1492,6 +1492,31 @@ tulip.mic_stop()
 The rate is fixed, so for a lower-rate file (voice memos, speech recognition)
 decimate a copy in Python -- e.g. take every third frame for ~14.7 kHz.
 
+### Playing the mics through AMY
+
+While the mic is running, AMY also gets the newest block of it, so an
+oscillator with `wave=amy.AUDIO_EXT0` (left mic) or `amy.AUDIO_EXT1` (right)
+plays what that mic hears -- through AMY's envelopes, filters and effects like
+any other oscillator, and at the level `amp`/`vel` ask for, same as any other
+oscillator. (This is the Tab5's version of the audio-in the ESP32-S3 boards get
+from AMY's own I2S capture; the Tab5 renders audio itself, so the samples are
+handed over instead.)
+
+Nothing reaches the speaker until you ask for such an oscillator, and it costs
+the recording nothing: `mic_read()` and `mic_record()` still get every frame.
+
+```python
+tulip.mic_start()
+amy.send(osc=200, wave=amy.AUDIO_EXT0, vel=1)   # live, left mic
+amy.send(osc=200, filter_freq=800, resonance=4, filter_type=amy.FILTER_LPF)
+amy.send(osc=200, vel=0)                        # stop passing it through
+tulip.mic_stop()                                # the oscillator goes silent
+```
+
+**Watch out for feedback**: the speaker sits a few centimetres from the mics, so
+a loud pass-through howls. Keep `amp` low, or wear headphones -- measured on a
+Tab5, `amp=16` was already enough to take off.
+
 Errors come back as `RuntimeError` (`microphone is not running`, or the ESP-IDF
 error name for a failure to start) and `ValueError` for a bad `frames`,
 `seconds` or filename extension.

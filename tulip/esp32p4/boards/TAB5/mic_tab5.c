@@ -276,6 +276,29 @@ size_t tab5_mic_read(int16_t *dst, size_t max_frames, uint32_t timeout_ms) {
     }
 }
 
+size_t tab5_mic_peek_newest(int16_t *dst, size_t frames) {
+    if (dst == NULL || frames == 0 || frames > MIC_RING_FRAMES) return 0;
+    if (!s_running || s_lock == NULL || s_ring == NULL) return 0;
+    // Called once per block from the audio render task: take the lock only if
+    // it is free. A block missed here is a block of input AMY renders twice,
+    // which is 5.8 ms of repeated audio; waiting would be a late block of
+    // *output*, which is a click.
+    if (xSemaphoreTake(s_lock, 0) != pdTRUE) return 0;
+    size_t n = 0;
+    if (s_count >= frames) {
+        // The newest `frames` frames end at s_head (the next write slot).
+        uint32_t i = (s_head + MIC_RING_FRAMES - (uint32_t)frames) % MIC_RING_FRAMES;
+        for (size_t f = 0; f < frames; f++) {
+            dst[f * TAB5_MIC_CHANNELS + 0] = s_ring[i * TAB5_MIC_CHANNELS + 0];
+            dst[f * TAB5_MIC_CHANNELS + 1] = s_ring[i * TAB5_MIC_CHANNELS + 1];
+            i = (i + 1) % MIC_RING_FRAMES;
+        }
+        n = frames;
+    }
+    xSemaphoreGive(s_lock);
+    return n;
+}
+
 size_t tab5_mic_available_frames(void) {
     if (s_lock == NULL) {
         return 0;

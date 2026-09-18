@@ -68,6 +68,14 @@ void tab5_mic_info(tab5_mic_info_t *out);
 // (0 returns immediately). Returns the number of frames written.
 size_t tab5_mic_read(int16_t *dst, size_t max_frames, uint32_t timeout_ms);
 
+// Copy the newest `frames` interleaved stereo frames into `dst` *without*
+// consuming them, so a live listener and a recorder can both have the same
+// audio: this is how AMY is fed for wave=AUDIO_EXT0/1 while tab5_mic_read()
+// still hands Python every frame. Never blocks -- it is called from the audio
+// render task, which cannot wait behind the capture task -- and returns 0,
+// writing nothing, if the ring is busy or holds fewer than `frames` frames.
+size_t tab5_mic_peek_newest(int16_t *dst, size_t frames);
+
 // Frames currently available to read without blocking.
 size_t tab5_mic_available_frames(void);
 
