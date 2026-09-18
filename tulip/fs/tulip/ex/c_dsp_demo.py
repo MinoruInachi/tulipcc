@@ -83,7 +83,10 @@ CZ = """
     }
 """
 
-def run():
+# Not called run(): run('c_dsp_demo') treats a module with a run() as an app
+# with a screen and calls run(screen) after importing it. This is a plain
+# script that plays at import, so it goes by another name.
+def demo():
     tulip.install_c_process('crush', CRUSH)
     tulip.install_c_process('dist', DIST)
     tulip.install_c_osc('cz', CZ)
@@ -118,4 +121,4 @@ def run():
     tulip.c_osc('cz', 200, False)
     print("done. try editing CZ's dcw or DIST's drive and re-running -- reinstalls hot-swap.")
 
-run()
+demo()
