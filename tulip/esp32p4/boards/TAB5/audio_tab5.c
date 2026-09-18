@@ -18,6 +18,9 @@
 // tulip_amy_sequencer_hook() -- fans a sequencer tick out to Python callbacks.
 #include "tsequencer_tab5.h"
 #include "usb_host_tab5.h"  // send_usb_midi_out(), AMY's MIDI output hook
+#ifdef TULIP_USER_C_DSP
+#include "../../../shared/user_c_dsp.h"  // the user C DSP render/bus hooks
+#endif
 
 static const char *TAG = "TAB5-AUDIO";
 static esp_codec_dev_handle_t s_speaker;
@@ -220,6 +223,15 @@ void tab5_audio_init(void)
     // instead of the audio just cutting out. AMY has already reset the synth by
     // then; this only reports.
     amy_config.amy_external_overload_hook = tulip_amy_overload_hook;
+#ifdef TULIP_USER_C_DSP
+    // User C DSP (tulip.install_c_process / install_c_osc): installed effects
+    // run on a bus after its FX chain, installed oscillators replace a bound
+    // osc's waveform. Both run here on the render task, and both do nothing
+    // until something is installed. The render hook needs no chaining with CV
+    // output the way the S3's does -- this board installs no other render hook.
+    amy_config.amy_external_bus_postprocess_hook = tulip_bus_postprocess_hook;
+    amy_config.amy_external_render_hook = tulip_user_render_hook;
+#endif
     amy_start(amy_config);
 
     BaseType_t task_result = xTaskCreatePinnedToCore(

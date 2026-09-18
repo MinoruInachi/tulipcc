@@ -7,6 +7,7 @@ Tulip と AMYboard では、**C で書いたオーディオ DSP を、Python か
 | プラットフォーム | 内部で使うコンパイラ |
 | -------- | ------------------- |
 | Tulip CC / AMYboard（ESP32-S3） | `xcc700`、オンデバイスの小さな C コンパイラ |
+| M5Stack Tab5（ESP32-P4） | `rcc700`、`xcc700` の RISC-V 移植版 |
 | Tulip Desktop（macOS） | `libtcc` によるインメモリ JIT |
 | Tulip Web / AMYboard Web | 同じく `xcc700`。AMY の AudioWorklet に WebAssembly を出力 |
 
@@ -112,7 +113,7 @@ static int16_t delayline[22050];       // 16 ビットモノラルで 0.5 秒分
 
 ## 書ける C の範囲
 
-Tulip Desktop ではコンパイラはフル機能の C の JIT（`libtcc`）で、include も float も struct も何でも使えます。Tulip CC、AMYboard、ウェブビルドでは意図的に小さくした C である `xcc700` です。
+Tulip Desktop ではコンパイラはフル機能の C の JIT（`libtcc`）で、include も float も struct も何でも使えます。Tulip CC、AMYboard、ウェブビルドでは意図的に小さくした C である `xcc700` で、Tab5 ではその RISC-V 版の `rcc700` が同じ C を受け付けます。
 
 - `int` と `int16_t`、およびそれらのポインタと配列。`enum`、`static`
 - `while`、`if`/`else`、`return`。関数（`process`/`render` の上にヘルパーを定義して呼び出せます）

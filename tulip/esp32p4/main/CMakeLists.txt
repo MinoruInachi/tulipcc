@@ -18,6 +18,8 @@ list(APPEND IDF_COMPONENTS
     espressif__esp_lcd_touch
     espressif__esp_lcd_touch_gt911
     espressif__esp_lcd_touch_st7123)
+# User C DSP (shared/user_c_dsp.c) loads the code it compiles with elf_loader.
+list(APPEND IDF_COMPONENTS espressif__elf_loader)
 
 include(../esp32_common.cmake)
 
@@ -86,6 +88,22 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
 	# sources reaches it through lv_global.h.
 	idf_component_get_property(TAB5_LVGL_LIB lvgl__lvgl COMPONENT_LIB)
 	target_include_directories(${TAB5_LVGL_LIB} PUBLIC ${MICROPY_BOARD_DIR})
+
+	# User C DSP: the runtime and its on-device RISC-V compiler. Added here
+	# rather than to MICROPY_SOURCE_BOARD so they stay out of the qstr pass --
+	# neither defines a qstr -- and so AMY's and the compiler's headers can go
+	# on these two files' include path alone. amy/src has a sequencer.h, a
+	# delay.h and a usb.h; on main's include path they would be in reach of
+	# every other source here.
+	get_filename_component(TAB5_SHARED_DIR ${CMAKE_CURRENT_LIST_DIR}/../../shared ABSOLUTE)
+	get_filename_component(TAB5_AMY_SRC_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../amy/src ABSOLUTE)
+	target_sources(${MICROPY_TARGET} PRIVATE
+		${TAB5_SHARED_DIR}/user_c_dsp.c
+		${TAB5_SHARED_DIR}/3rdparty/rcc700/rcc700t.c
+	)
+	set_source_files_properties(${TAB5_SHARED_DIR}/user_c_dsp.c
+		PROPERTIES INCLUDE_DIRECTORIES "${TAB5_AMY_SRC_DIR};${TAB5_SHARED_DIR}/3rdparty/rcc700"
+	)
 
 	# The camera stack is control-plane code -- ioctl plumbing, sensor register
 	# tables, the ISP statistics loop -- with the per-pixel work done by the

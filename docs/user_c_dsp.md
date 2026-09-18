@@ -11,6 +11,7 @@ This works everywhere Tulip runs:
 | Platform | Compiler underneath |
 | -------- | ------------------- |
 | Tulip CC / AMYboard (ESP32-S3) | `xcc700`, a tiny on-device C compiler |
+| M5Stack Tab5 (ESP32-P4) | `rcc700`, the RISC-V port of `xcc700` |
 | Tulip Desktop (macOS) | `libtcc` in-memory JIT |
 | Tulip Web / AMYboard Web | `xcc700` again, emitting WebAssembly into AMY's AudioWorklet |
 
@@ -142,7 +143,8 @@ Everything starts at zero on (re)install.
 
 On Tulip Desktop the compiler is a full C JIT (`libtcc`) — includes, floats,
 structs, the lot. On Tulip CC, AMYboard and the web builds it's `xcc700`, a
-deliberately small C:
+deliberately small C, and on the Tab5 its RISC-V twin `rcc700`, which takes
+the same C:
 
 - `int` and `int16_t`, pointers and arrays of both; `enum`; `static`
 - `while`, `if`/`else`, `return`; functions (you can define helpers above

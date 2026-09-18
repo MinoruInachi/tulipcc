@@ -14,9 +14,9 @@
 // to_int16(s)/from_int16(v) conversions for people who think in 16-bit PCM.
 // Users may pass just the function *body*; we wrap it in the signature and
 // helper prototypes. State between calls = statics in the body.
-// Compiler backends: libtcc JIT (desktop), xcc700t + esp-idf elf_loader
-// (ESP32, code loaded into PSRAM), xcc700w + AudioWorklet-side instantiation
-// (web). See docs/user_c_dsp_design.md.
+// Compiler backends: libtcc JIT (desktop), xcc700t (Xtensa: ESP32-S3) or
+// rcc700t (RISC-V: ESP32-P4) + esp-idf elf_loader (code loaded into PSRAM),
+// xcc700w + AudioWorklet-side instantiation (web). See docs/user_c_dsp_design.md.
 
 #ifdef TULIP_USER_C_DSP
 
@@ -418,12 +418,15 @@ static void backend_free(void *state) {
 }
 
 #elif defined(ESP_PLATFORM)
-// ---------------------------------------------------------------- ESP32-S3:
+// ---------------------------------------------------------------- ESP32:
 // xcc700t (vendored mini C compiler, small-C subset: while/if, int + int16_t
 // pointers/arrays, enum, static; no preprocessor/floats/structs) emits an
 // Xtensa REL ELF that esp-idf's elf_loader relocates into PSRAM. e_entry is
 // the user function, so elf->entry is directly callable. Calls to the
 // exported helpers resolve through the loader's registered symbol table.
+// On RISC-V (the ESP32-P4 in a Tab5) the compiler is rcc700t instead: the same
+// front end and the same Tulip changes, emitting an RV32 ELF (one PT_LOAD at
+// vaddr 0) that the same loader relocates the same way.
 
 // esp_elf.h lives in a managed component whose include path isn't visible to
 // micropython's qstr preprocess pass; that pass defines NO_QSTR and only needs
@@ -431,7 +434,13 @@ static void backend_free(void *state) {
 #ifndef NO_QSTR
 #include "esp_elf.h"
 #endif
+#if defined(__riscv)
+#include "rcc700t.h"
+#define udsp_compile rcc700_compile
+#else
 #include "xcc700t.h"
+#define udsp_compile xcc700_compile
+#endif
 
 // Bare bodies get the helper prototypes + signature (xcc700 has no
 // preprocessor). Keeping the body on the same line as the opening brace
@@ -463,7 +472,7 @@ static int backend_compile(const char *src, uint8_t kind, void **fn_out, void **
     char *wrapped = wrap_source(src, kind);
     uint8_t *elf_img = NULL;
     uint32_t elf_size = 0;
-    int r = xcc700_compile(wrapped ? wrapped : src, kind_symbol(kind), &elf_img, &elf_size, err, errlen);
+    int r = udsp_compile(wrapped ? wrapped : src, kind_symbol(kind), &elf_img, &elf_size, err, errlen);
     free(wrapped);
     if (r != 0) return -1;
     esp_elf_t *elf = calloc(1, sizeof(esp_elf_t));

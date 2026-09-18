@@ -52,6 +52,12 @@ list(APPEND MICROPY_CPP_FLAGS_EXTRA -DESP_PLATFORM -DTAB5)
 # tulip.gamma9001_load() module-table entry on it, and a qstr the extraction
 # pass never sees is a qstr the compiler cannot resolve.
 list(APPEND MICROPY_CPP_FLAGS_EXTRA -DGAMMA9001)
+# tulip.install_c_process() and friends: user DSP in C, compiled on the device
+# by shared/3rdparty/rcc700 and loaded by elf_loader. The sources themselves are
+# added in main/CMakeLists.txt; the define goes to the qstr pass too, for the
+# same reason GAMMA9001 does.
+add_compile_definitions(TULIP_USER_C_DSP)
+list(APPEND MICROPY_CPP_FLAGS_EXTRA -DTULIP_USER_C_DSP)
 
 set(SDKCONFIG_DEFAULTS
     boards/TAB5/sdkconfig.board
