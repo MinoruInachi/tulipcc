@@ -370,9 +370,16 @@ it. Measured here: 3.7x on a note-on, 13x on a six-keyword message.
 
 The following APIs are intentionally not exposed yet:
 
-- `keys`, `key_wait`, `key`, `key_scan`, and `key_remap`: the Tab5 keyboard's
-	character-event mode reports characters but not HID release events or held
-	scan-code state. `keyboard_callback` remains available.
+- `key` and `key_scan` only. Both keyboards run in HID mode, so `keys()`,
+	`key_wait`, `key_remap`, `key_send` and `keyboard_callback` all work: `keys()`
+	returns the held scan codes (modifier + six rollover slots) from `last_scan[]`,
+	and `joyk()` reads the joystick out of it. A USB HID keyboard fills that array
+	from its full boot report, so every press and release is exact. The built-in
+	keyboard's STM32 sends a release as keycode 0 without saying which key came
+	up; `keyboard_tab5.c` drops the most recently pressed one, which is right for
+	the usual tap-while-holding order and self-corrects once every key is up.
+	`keyboard_callback` still delivers presses and auto-repeat only -- poll
+	`keys()` for releases.
 - `cpu`: the current ESP32-P4 FreeRTOS build does not enable runtime task stats.
 - `display_clock`, `display_start`, `display_stop`, and `display_restart`: the
 	MIPI display task does not yet support safe runtime teardown and recreation.
