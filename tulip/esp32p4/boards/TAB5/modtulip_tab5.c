@@ -89,6 +89,8 @@ static mp_obj_t tab5_lv_task_handler(mp_obj_t ignored) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(tab5_lv_task_handler_obj, tab5_lv_task_handler);
 
+static void tab5_touch_cb_kick(void);
+
 void tulip_frame_isr(void) {
     s_tab5_frame_callbacks++;
     if (s_tab5_lvgl_running &&
@@ -99,6 +101,9 @@ void tulip_frame_isr(void) {
         mp_sched_schedule(s_tab5_frame_cb, s_tab5_frame_arg)) {
         mp_hal_wake_main_task();
     }
+    // A touch transition whose schedule failed on a full queue is retried
+    // here every frame (see tab5_schedule_touch_callback).
+    tab5_touch_cb_kick();
     // The IME drains its key queue from here rather than being called once per
     // key: mp_sched_schedule() fails silently when its queue is full, and this way
     // that costs a frame of latency instead of a keystroke. It has its own slot
@@ -109,11 +114,82 @@ void tulip_frame_isr(void) {
     }
 }
 
-void tab5_schedule_touch_callback(uint8_t up) {
-    if (s_tab5_touch_cb != MP_OBJ_NULL && s_tab5_touch_cb != mp_const_none &&
-        mp_sched_schedule(s_tab5_touch_cb, mp_obj_new_int(up))) {
-        mp_hal_wake_main_task();
+// Touch events reach Python through one queued trampoline instead of one
+// mp_sched_schedule() per sample. The touch task samples every 8 ms while a
+// finger is down and the scheduler queue holds 8 entries, so a ~60 ms stall
+// on the main thread (an LVGL redraw, a GC pass) used to fill it, and the
+// single release event then failed to schedule and was gone: the app kept
+// the pad "held" until the next tap's release, so every other quick tap was
+// swallowed. Now a down, a hold and an up are each remembered as pending
+// until delivered, in that order, and the trampoline is scheduled at most
+// once at a time. Held samples coalesce; a transition is never lost.
+static volatile uint8_t s_tab5_touch_pending_down = 0;
+static volatile uint8_t s_tab5_touch_pending_hold = 0;
+static volatile uint8_t s_tab5_touch_pending_up = 0;
+static volatile uint8_t s_tab5_touch_state_up = 1;   // last reported direction
+static volatile uint8_t s_tab5_touch_cb_queued = 0;
+static uint32_t s_tab5_touch_cb_retries = 0;
+
+static mp_obj_t tab5_touch_cb_trampoline(mp_obj_t ignored) {
+    (void)ignored;
+    // Clear the queued flag before reading the pending ones, so an event
+    // that lands in between schedules a fresh run rather than being missed.
+    s_tab5_touch_cb_queued = 0;
+    mp_obj_t cb = s_tab5_touch_cb;
+    if (cb == MP_OBJ_NULL || cb == mp_const_none) {
+        s_tab5_touch_pending_down = s_tab5_touch_pending_hold = s_tab5_touch_pending_up = 0;
+        return mp_const_none;
     }
+    if (s_tab5_touch_pending_down) {
+        s_tab5_touch_pending_down = 0;
+        mp_call_function_1_protected(cb, MP_OBJ_NEW_SMALL_INT(0));
+    }
+    if (s_tab5_touch_pending_hold) {
+        s_tab5_touch_pending_hold = 0;
+        mp_call_function_1_protected(cb, MP_OBJ_NEW_SMALL_INT(0));
+    }
+    if (s_tab5_touch_pending_up) {
+        s_tab5_touch_pending_up = 0;
+        mp_call_function_1_protected(cb, MP_OBJ_NEW_SMALL_INT(1));
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(tab5_touch_cb_trampoline_obj, tab5_touch_cb_trampoline);
+
+// Queue the trampoline if anything is pending and it is not queued already.
+// Called from the touch task and, as a retry, from every frame interrupt.
+static void tab5_touch_cb_kick(void) {
+    if (s_tab5_touch_cb_queued) return;
+    if (!(s_tab5_touch_pending_down || s_tab5_touch_pending_hold || s_tab5_touch_pending_up)) return;
+    if (s_tab5_touch_cb == MP_OBJ_NULL || s_tab5_touch_cb == mp_const_none) return;
+    if (mp_sched_schedule(MP_OBJ_FROM_PTR(&tab5_touch_cb_trampoline_obj), mp_const_none)) {
+        s_tab5_touch_cb_queued = 1;
+        mp_hal_wake_main_task();
+    } else {
+        s_tab5_touch_cb_retries++;
+    }
+}
+
+void tab5_schedule_touch_callback(uint8_t up) {
+    if (s_tab5_touch_cb == MP_OBJ_NULL || s_tab5_touch_cb == mp_const_none) {
+        s_tab5_touch_state_up = up;
+        return;
+    }
+    if (up != s_tab5_touch_state_up) {
+        s_tab5_touch_state_up = up;
+        if (up) {
+            s_tab5_touch_pending_up = 1;
+        } else {
+            s_tab5_touch_pending_down = 1;
+        }
+    } else if (!up) {
+        s_tab5_touch_pending_hold = 1;
+    }
+    tab5_touch_cb_kick();
+}
+
+uint32_t tab5_touch_cb_retry_count(void) {
+    return s_tab5_touch_cb_retries;
 }
 
 static mp_obj_t tulip_board(void) {
