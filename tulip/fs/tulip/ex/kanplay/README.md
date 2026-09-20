@@ -53,10 +53,11 @@ recent press (see `kp_input.py`). A USB keyboard has no such limit.
 (`incbin/preset/song_genre/`, MIT, see `songs/LICENSE_InstaChord.txt`):
 Simple Piano / Guitar / Guitar x2, ten Pop styles (Basic 1-2, Bright, Indie,
 Soft, Modern, Acoustic, Shuffle, 6/8, Waltz) and three Rock styles (Basic,
-Hard, Pop Rock). Song +/- steps through them in file-name order. The
-repository's `incbin/preset/song_song/` folder has arrangements of well-known
-songs in the same format; they are not bundled here, but any of them (or your
-own `*.json`) dropped into `/user/kanplay/` shows up after the bundled ones.
+Hard, Pop Rock). Pick one from the Song dropdown on the right; `<` and `>` on
+the keyboard step through them in file-name order. The repository's
+`incbin/preset/song_song/` folder has arrangements of well-known songs in the
+same format; they are not bundled here, but any of them (or your own `*.json`)
+dropped into `/user/kanplay/` shows up after the bundled ones, marked "(user)".
 The format is documented in KANTAN Play Core's
 `docs/development/core/song-format.md`; `kp_song.py` reads versions 1..3
 including `copy` references and defaults.

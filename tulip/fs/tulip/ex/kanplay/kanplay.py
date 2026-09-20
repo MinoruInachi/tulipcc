@@ -133,6 +133,43 @@ class PartCell(UIElement):
         self.toggle.set_style_bg_color(pal_to_lv(c), lv.PART.MAIN)
 
 
+class SongPicker(UIElement):
+    """The song list as an LVGL dropdown. Its list opens over the button
+    column, clear of the pads, so the app's own pad hit-testing never sees
+    a tap meant for it."""
+
+    def __init__(self, app, w, h, font, list_h):
+        super().__init__()
+        self.group.set_style_pad_all(0, lv.PART.MAIN)
+        self.group.set_size(w, h)
+        self.dropdown = lv.dropdown(self.group)
+        # Fonts before sizing: a dropdown measures itself against its font,
+        # and the list is what a fingertip then has to hit. The arrow is a
+        # symbol glyph the Tulip fonts do not have, so it keeps a Montserrat.
+        self.dropdown.set_style_text_font(font, 0)
+        self.dropdown.set_style_text_font(font, lv.PART.SELECTED)
+        self.dropdown.set_style_text_font(lv.font_montserrat_18, lv.PART.INDICATOR)
+        lst = self.dropdown.get_list()
+        lst.set_style_text_font(font, 0)
+        lst.set_style_max_height(list_h, 0)     # the theme's 260 px shows six songs
+        self.dropdown.set_size(w, h)
+        self.dropdown.align(lv.ALIGN.TOP_LEFT, 0, 0)
+        self.dropdown.set_dir(lv.DIR.BOTTOM)
+        self.dropdown.add_event_cb(lambda e: app.on_song_picked(self.dropdown.get_selected()),
+                                   lv.EVENT.VALUE_CHANGED, None)
+        self.shown = None
+
+    def set_songs(self, names):
+        self.dropdown.set_options("\n".join(names) if names else "(no songs)")
+        self.shown = None
+
+    def select(self, index):
+        # set_selected redraws the box, so only when it changed.
+        if index != self.shown:
+            self.shown = index
+            self.dropdown.set_selected(index)
+
+
 class KanPlay:
     def __init__(self, screen):
         self.screen = screen
@@ -169,6 +206,18 @@ class KanPlay:
                 continue
             out += [d + "/" + n for n in names if n.endswith(".json")]
         return out
+
+    def _song_names(self):
+        """Dropdown entries: the file names, user songs marked (user) since
+        Save writes them under the same name as the bundled one."""
+        names = []
+        for path in self.songs:
+            d, n = path.rsplit("/", 1)
+            n = n[:-5]
+            if d == USER_DIR:        # not APP_DIR/songs, which is under it when run from /user
+                n += " (user)"
+            names.append(n)
+        return names
 
     def _load_song(self, index):
         if not self.songs:
@@ -222,15 +271,15 @@ class KanPlay:
         s.add(self.chord_label, x=rx, y=y0)
         self.key_label = UILabel("Key C", w=lw, font=font_ui, fg_color=COL_TEXT)
         s.add(self.key_label, x=rx, y=y0 + 48)
-        self.song_label = UILabel("Song", w=lw, font=font_ui, fg_color=COL_TEXT)
-        s.add(self.song_label, x=rx, y=y0 + 72)
+        self.song_picker = SongPicker(self, lw, bh, font_ui, H - (y0 + 76 + bh) - 16)
+        s.add(self.song_picker, x=rx, y=y0 + 76)
+        self.song_picker.set_songs(self._song_names())
         self.slot_label = self.key_label          # slot is shown on the key line
         rows = [
             (("Key -", "key-"), ("Key +", "key+"), ("Stop", "stop")),
             (("Slot -", "slot-"), ("Slot +", "slot+"), ("Reset", "reset")),
-            (("Song -", "song-"), ("Song +", "song+"), ("Save", "save")),
         ]
-        by = y0 + 104
+        by = y0 + 76 + bh + 12
         for row in rows:
             for k, (text, name) in enumerate(row):
                 bg = 0xe0 if name == "stop" else None
@@ -242,12 +291,14 @@ class KanPlay:
         s.add(self.mode_button, x=rx, y=by)
         self.offbeat_button = UIButton("Fill: off", w=bw, h=bh, font=font_ui, callback=lambda e: self.on_button("offbeat", True))
         s.add(self.offbeat_button, x=rx + bw + 8, y=by)
+        s.add(UIButton("Save", w=bw, h=bh, font=font_ui, callback=lambda e: self.on_button("save", True)),
+              x=rx + 2 * (bw + 8), y=by)
         by += bh + 20
         self.tempo_label = UILabel("120 BPM", w=lw, font=font_ui, fg_color=COL_TEXT)
         s.add(self.tempo_label, x=rx, y=by + 4)
         self.title = UILabel("kanplay", w=W - 2 * x0, font=font_ui, fg_color=COL_TEXT)
         s.add(self.title, x=x0, y=y0 - 34)
-        for l in (self.chord_label, self.key_label, self.song_label, self.tempo_label, self.title):
+        for l in (self.chord_label, self.key_label, self.tempo_label, self.title):
             l.label.set_style_text_align(lv.TEXT_ALIGN.LEFT, 0)
 
         # Part panel under the pads: six cells and Save.
@@ -283,7 +334,7 @@ class KanPlay:
         self._set_text(self.chord_label.label, chord.name() if chord else "--")
         self._set_text(self.key_label.label, "Key %s / %s     Slot %d/%d" % (
             kp_chords.KEY_NAMES[p.key], kp_chords.MINOR_KEY_NAMES[p.key], p.slot_index + 1, len(p.song.slots)))
-        self._set_text(self.song_label.label, p.song.name[:30])
+        self.song_picker.select(self.song_index)
         bpm = tulip.seq_bpm()
         tempo = "%d BPM" % bpm
         if p.mode == kp_engine.MANUAL and p.onbeat_cycle:
@@ -362,6 +413,10 @@ class KanPlay:
         elif b == "save":
             self._save_song()
 
+    def on_song_picked(self, index):
+        if index != self.song_index:
+            self._load_song(index)
+
     def _save_song(self):
         try:
             os.mkdir(USER_DIR)
@@ -373,6 +428,7 @@ class KanPlay:
             self.status = "saved"
             if path not in self.songs:
                 self.songs.append(path)
+                self.song_picker.set_songs(self._song_names())
         except OSError as e:
             self.status = "save failed: %s" % e
         self.dirty = True
