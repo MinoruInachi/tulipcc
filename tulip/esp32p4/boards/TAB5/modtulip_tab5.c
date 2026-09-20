@@ -162,10 +162,17 @@ static void tab5_touch_cb_kick(void) {
     if (s_tab5_touch_cb_queued) return;
     if (!(s_tab5_touch_pending_down || s_tab5_touch_pending_hold || s_tab5_touch_pending_up)) return;
     if (s_tab5_touch_cb == MP_OBJ_NULL || s_tab5_touch_cb == mp_const_none) return;
+    // Mark it queued *before* scheduling: the main task runs on the other
+    // core and, when idle, picks the trampoline up within microseconds of
+    // mp_sched_schedule(). It then cleared the flag first, this task set it
+    // afterwards, and with the flag stuck at 1 and nothing scheduled every
+    // later kick returned early -- the release never arrived and no touch
+    // reached Python again until the app was restarted.
+    s_tab5_touch_cb_queued = 1;
     if (mp_sched_schedule(MP_OBJ_FROM_PTR(&tab5_touch_cb_trampoline_obj), mp_const_none)) {
-        s_tab5_touch_cb_queued = 1;
         mp_hal_wake_main_task();
     } else {
+        s_tab5_touch_cb_queued = 0;
         s_tab5_touch_cb_retries++;
     }
 }
