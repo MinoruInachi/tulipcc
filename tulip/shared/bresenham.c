@@ -58,11 +58,31 @@ tulip_px_t getPixel(int cx, int cy) {
     return display_get_bg_pixel_px(cx,cy);
 }
 
+// Rows [y0,y1) x columns [x0,x1) of the BG plane, clipped to it and written
+// directly. Filled shapes used to reach the plane one drawPixel() at a time --
+// a Bresenham step, a bounds check and a dirty-row mark per pixel -- which the
+// Tab5 measured at ~0.35 us a pixel: 280 ms to fill most of its 1280x720 plane,
+// against 55 ms for bg_clear()'s plain loop over all of it.
+static void fill_bg_span(int x0, int y0, int x1, int y1, tulip_px_t color) {
+    const int stride = H_RES + OFFSCREEN_X_PX;
+    if(x0 < 0) x0 = 0;
+    if(y0 < 0) y0 = 0;
+    if(x1 > stride) x1 = stride;
+    if(y1 > V_RES + OFFSCREEN_Y_PX) y1 = V_RES + OFFSCREEN_Y_PX;
+    if(x1 <= x0 || y1 <= y0) return;
+    for(int y = y0; y < y1; y++) {
+        tulip_px_t *p = bg + (size_t)y * stride + x0;
+        for(int n = x1 - x0; n > 0; n--) *p++ = color;
+    }
+    display_mark_dirty_rows(y0, y1);
+}
+
 void drawFastHLine(int16_t x, int16_t y, int16_t w, tulip_px_t color) {
-    drawLine(x, y, x + w - 1, y, color);
+    fill_bg_span(x, y, (int)x + w, (int)y + 1, color);
 }
 void drawFastVLine(short x0, short y0, short h, tulip_px_t color) {
-    drawLine(x0, y0, x0, y0+h-1, color);
+    // The corners of every filled round rect and circle are built from these.
+    fill_bg_span(x0, y0, (int)x0 + 1, (int)y0 + h, color);
 }
 
 uint16_t draw_new_char(const char c, uint16_t x, uint16_t y, tulip_px_t fg, uint8_t font_no) {
@@ -190,14 +210,7 @@ void fill(int16_t x, int16_t y, tulip_px_t color) {
 }
 
 void fillRect(int16_t x, int16_t y, int16_t w, int16_t h,  tulip_px_t color) {
-    // do this H line by line instead
-
-    for(int16_t i = y; i < y+h; i++) {
-        drawFastHLine(x, i, w, color);
-    }
-    //for (int16_t i = x; i < x + w; i++) {
-    //    drawFastVLine(i, y, h, color);
-    //}
+    fill_bg_span(x, y, (int)x + w, (int)y + h, color);
 }
 
 void drawCircle(short x0, short y0, short r, tulip_px_t color) {
