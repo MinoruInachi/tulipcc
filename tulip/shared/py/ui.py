@@ -621,6 +621,22 @@ def _close_launcher():
     lv_launcher = None
     _repaint_repl_background()
 
+# Apps that ship as a folder in tulip/fs/tulip/ex rather than frozen into the
+# firmware: launcher label -> folder (and module) name.
+_launcher_ex_apps = {"Loopstudio": "loopstudio", "Kanplay": "kanplay"}
+
+def _run_ex_app(name):
+    """Run a folder app from /user (a copy being worked on) or /sys/ex.
+
+    tulip.run(name) alone finds a folder app only in the current directory or
+    /sys/ex, so from the launcher it would depend on where the REPL was last
+    cd'd to. A path to the module file is unambiguous."""
+    for base in (tulip.root_dir() + "user/", tulip.root_dir() + "sys/ex/"):
+        if tulip.exists(base + name + "/" + name + ".py"):
+            tulip.run(base + name + "/" + name)
+            return
+    tulip.run(name)
+
 def launcher_cb(e):
     global lv_launcher
     if(e.get_code() == lv.EVENT.CLICKED):
@@ -631,6 +647,8 @@ def launcher_cb(e):
             tulip.run('juno6')
         if(text=="Drums"):
             tulip.run('drums')
+        if(text in _launcher_ex_apps):
+            _run_ex_app(_launcher_ex_apps[text])
         if(text=='Voices'):
             tulip.run('voices')
         if(text=='Tulip World'):
@@ -676,6 +694,11 @@ def launcher(ignore=True):
     b_juno.add_event_cb(launcher_cb, lv.EVENT.CLICKED, None)
     b_drums = lv_launcher.add_button(lv.SYMBOL.NEXT, "Drums")
     b_drums.add_event_cb(launcher_cb, lv.EVENT.CLICKED, None)
+    if tulip.board() == "TAB5":
+        # Both are laid out for a touch screen; loopstudio needs all 1280 px.
+        for text in ("Loopstudio", "Kanplay"):
+            b_ex = lv_launcher.add_button(lv.SYMBOL.AUDIO, text)
+            b_ex.add_event_cb(launcher_cb, lv.EVENT.CLICKED, None)
     b_editor = lv_launcher.add_button(lv.SYMBOL.FILE, "Editor")
     b_editor.add_event_cb(launcher_cb, lv.EVENT.CLICKED, None)
     b_keyboard = lv_launcher.add_button(lv.SYMBOL.KEYBOARD, "Keyboard")
@@ -694,7 +717,11 @@ def launcher(ignore=True):
         for i in range(lv_launcher.get_child_count()):
             lv_launcher.get_child(i).set_style_pad_ver(10, lv.PART.MAIN)
         lv_launcher.update_layout()
-        last_visible_button = lv_launcher.get_child(min(11, lv_launcher.get_child_count()) - 1)
+        # Every entry, as long as the list still fits on the screen (rows are
+        # 42 px; this was a fixed 11 before the list grew past that).
+        row_h = max(1, lv_launcher.get_child(0).get_height())
+        fits = max(1, (tulip.screen_size()[1] - 40) // row_h)
+        last_visible_button = lv_launcher.get_child(min(fits, lv_launcher.get_child_count()) - 1)
         lv_launcher.set_height(last_visible_button.get_y() + last_visible_button.get_height())
     lv_launcher.set_parent(repl_screen.group)
     lv_launcher.set_align(lv.ALIGN.BOTTOM_RIGHT)
