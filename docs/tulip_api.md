@@ -615,6 +615,49 @@ not leave a remote shell sitting on the REPL's screen -- and switching to
 another app mid-session swaps the two, so the REPL is not looking at the session
 either. The session's screen is still there when you switch back to it.
 
+`sftp` moves files over the same kind of connection. It speaks to the server's
+SFTP subsystem rather than to `scp`, whose wire protocol OpenSSH has been
+walking away from since 9.0, so it needs nothing on the far end that an OpenSSH
+server does not already ship.
+
+```python
+import sftp
+
+# One file each way, and a listing. Each call is its own connection.
+sftp.get("192.168.1.10", "me", "/etc/hostname", "/user/hostname", password="secret")
+sftp.put("192.168.1.10", "me", "/user/song.wav", "music/", key="/user/id_rsa")
+print(sftp.listdir("192.168.1.10", "me", "/var/log", key="/user/id_rsa"))
+
+# Or hold one open, which is what you want for more than one file
+s = sftp.connect("192.168.1.10", "me", key="/user/id_rsa")
+print(s.realpath("."))                    # where relative paths start
+for name, longname, attrs in s.ls("."):   # longname is the server's own ls -l line
+    print(longname)
+s.get("notes.txt")                        # keeps the name, lands in the cwd
+s.get("notes.txt", "/user/")              # a directory: the name is kept
+s.write_file("hello.txt", "from tulip\n")
+print(s.read_file("hello.txt"))
+print(s.stat("hello.txt"))                # {'size': 11, 'mode': 33188, ...}
+s.mkdir("new"); s.rename("hello.txt", "new/hi.txt")
+s.remove("new/hi.txt"); s.rmdir("new")
+s.close()
+```
+
+`get()` and `put()` return the number of bytes moved and take a
+`progress(done, total)` callback, called once per 16KB chunk, with `total` set
+to `None` if the server did not say how big the file was. Anything the server
+refuses raises `sftp.SFTPError` -- an `ssh.SSHError` carrying the server's own
+message and its status code in `.code`, so `except sftp.SFTPError as e: if
+e.code == sftp.FX_NO_SUCH_FILE` is the way to tell a missing file from a
+refused one.
+
+Measured on a Tab5 over wifi: a 120KB file moves in one to two seconds each
+way. Fetching sits at about 62 KB/s; sending ran between 65 and 105 KB/s from
+one run to the next, which is the air rather than the code. For anything small
+the connection costs more than the file does -- about two seconds of handshake
+when authenticating with a key -- which is why `connect()` is there next to the
+one-shot calls.
+
 There is an app version of all this, `SSH` in the launcher (or `run('sshterm')`).
 It puts up a form for the host, user, password or key file and port, remembers
 everything but the password in `/user/sshterm.conf`, and then hands the console
@@ -629,6 +672,16 @@ out in two columns so that the keyboard, which takes the bottom half of the
 screen, does not cover the fields or the Connect button. Enter in any field
 connects, as well as the Connect button -- the on-screen keyboard's return key
 included, so you never have to reach past it to submit.
+
+The Files button turns the form into a transfer page: a remote path, a local
+one, and Get, Put and List. List puts the remote directory in the box on the
+right, with a `/` after the names that are directories, so the name you are
+about to type is in front of you. A transfer opens its own connection with the
+host, user and credentials from the form -- a typed password is kept in RAM for
+as long as the app runs, and still never written to `sshterm.conf`, so a
+transfer works after connecting has cleared the field. Both paths are
+remembered in the config file along with the host. The page is part of the
+form, so it is where you are before a shell session or after one.
 
 ## Async
 

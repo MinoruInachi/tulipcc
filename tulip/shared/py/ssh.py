@@ -28,7 +28,10 @@
 # Usage:
 #     import ssh
 #     ssh.shell('192.168.1.10', 'user', 'password')   # interactive, on the TFB
-#     print(ssh.run('192.168.1.10', 'user', 'password', 'uname -a'))
+#     print(ssh.run('192.168.1.10', 'user', 'uname -a', password='password'))
+#
+# Files go over the same connection, through the server's SFTP subsystem --
+# that is sftp.py, which builds on this.
 
 import socket
 import os
@@ -143,6 +146,11 @@ class _Reader:
         i = self.i
         self.i = i + 4
         return int.from_bytes(self.d[i:i + 4], 'big')
+
+    def u64(self):
+        i = self.i
+        self.i = i + 8
+        return int.from_bytes(self.d[i:i + 8], 'big')
 
     def string(self):
         n = self.u32()
@@ -483,6 +491,15 @@ class SSHClient:
         self.in_window = 0
         self.closed = False
         self.exit_status = None
+        # Channel data that arrived while we were doing something else -- see
+        # write(). read() hands it back before going to the socket again.
+        self.inbuf = []
+        # A shell wants the remote's stderr in with its stdout, on the screen.
+        # A protocol running over the channel does not: sftp.py turns this off
+        # so that a warning from the far end's shell profile cannot be parsed
+        # as part of an SFTP packet.
+        self.merge_stderr = True
+        self.stderr = b''
 
     # -- connection setup
 
@@ -736,6 +753,12 @@ class SSHClient:
         if not self._channel_request(b'exec', _string(cmd)):
             raise SSHError('server refused to run the command')
 
+    def start_subsystem(self, name):
+        """Hand the channel to one of the server's subsystems, e.g. sftp."""
+        if not self._channel_request(b'subsystem', _string(name)):
+            raise SSHError('server refused the %s subsystem'
+                           % (name.decode() if isinstance(name, bytes) else name))
+
     def _handle_channel(self, p):
         """Returns any channel data in the packet, or b''."""
         t = p[0]
@@ -747,7 +770,15 @@ class SSHClient:
             r = _Reader(p[1:])
             r.u32()
             r.u32()
-            return self._consume(r.string())
+            data = self._consume(r.string())
+            if self.merge_stderr:
+                return data
+            # Kept for the error message, and only the first few KB of it: a
+            # remote that has decided to talk on stderr can talk for a long
+            # time, and none of it is worth a growing buffer on this board.
+            if len(self.stderr) < 4096:
+                self.stderr += data[:4096 - len(self.stderr)]
+            return b''
         if t == MSG_CHANNEL_WINDOW_ADJUST:
             r = _Reader(p[1:])
             r.u32()
@@ -778,8 +809,14 @@ class SSHClient:
             self.in_window += add
         return data
 
+    def pending(self):
+        """True if read() would return data without touching the socket."""
+        return bool(self.inbuf)
+
     def read(self):
         """One packet's worth of channel data. Blocks. b'' if there was none."""
+        if self.inbuf:
+            return self.inbuf.pop(0)
         if self.closed:
             return b''
         return self._handle_channel(self.t.recv())
@@ -789,8 +826,12 @@ class SSHClient:
             n = min(len(data), self.max_packet, self.out_window)
             if n <= 0:
                 # Out of window: the only thing that opens it again is a
-                # WINDOW_ADJUST, so read until one turns up.
-                self._handle_channel(self.t.recv())
+                # WINDOW_ADJUST, so read until one turns up. Anything else that
+                # arrives in the meantime is the remote answering, and is the
+                # caller's -- keep it rather than dropping it on the floor.
+                got = self._handle_channel(self.t.recv())
+                if got:
+                    self.inbuf.append(got)
                 continue
             self.t.send(bytes((MSG_CHANNEL_DATA,)) + _u32(self.remote_chan) +
                         _string(data[:n]))
@@ -951,7 +992,8 @@ def shell(host, user, password=None, key=None, port=22, accept_new=True,
         tail = b''
         while not c.closed:
             data = b''
-            while len(data) < 4096 and poller.poll(0) and not c.closed:
+            while len(data) < 4096 and not c.closed and (
+                    c.pending() or poller.poll(0)):
                 data += c.read()
             if data:
                 text, tail = utf8_split(tail + data)
