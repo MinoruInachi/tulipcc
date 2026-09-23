@@ -23,6 +23,12 @@ It opens on a demo song. Press **PLAY**.
 The line under it shows the song name, messages, and AMY's render load. Past
 0.9 mute a channel: at 0.98 AMY's overload failsafe silences everything.
 
+Playback carries on while another app is in front (the task bar's switch
+button, or the launcher): the clock runs in the sequencer, not in the screen.
+Only **STOP** or quitting loopstudio stops the song. An app that resets AMY
+on start (kanplay does) silences the synths for a step; loopstudio notices
+and rebuilds them.
+
 ## RACK -- the channel rack
 
 Eight channels: four drum sounds of one kit and four synths. Tap a step to

@@ -354,8 +354,11 @@ class LoopStudio:
         tulip.frame_callback(self.frame, None)
 
     def deactivate(self):
+        # Another app comes to the front. The clock lives in the sequencer,
+        # not in the frame callback, so the song plays on underneath it (as a
+        # DAW's transport does); only Quit stops it.
         self.active = False
-        self.engine.stop()
+        self.held = None
         tulip.frame_callback()
         tulip.touch_callback()
         tulip.keyboard_callback()

@@ -32,6 +32,7 @@ class _Amy(types.ModuleType):
         self.sent = []
         self.fx = []
         self.ticks = 1000
+        self.instrument_generation = 0   # bumped by an AMY reset
 
     def send(self, **kw):
         self.sent.append(kw)
@@ -57,10 +58,14 @@ class _Synth:
         self.inited = False
         self.released = False
         self.offs = 0
+        self.rebuilt = 0
         _Synth.made.append(self)
 
     def deferred_init(self):
         self.inited = True
+
+    def _rebuild_after_amy_reset(self):
+        self.rebuilt += 1
 
     def all_notes_off(self):
         self.offs += 1
@@ -375,6 +380,23 @@ class EngineTest(unittest.TestCase):
         self.run_clock(8)
         self.assertEqual(amy.sent, [])
 
+    def test_another_apps_amy_reset_is_recovered(self):
+        # kanplay's start calls synth.PatchSynth.reset() while we play on.
+        self.song.reverb = 0.3
+        self.engine.apply_fx()
+        self.song.patterns[0].add(0, 0, 36)
+        self.engine.play()
+        amy.fx.clear()
+        amy.sent.clear()
+        amy.instrument_generation += 1
+        self.run_clock(ls_model.STEPS_PER_BAR)
+        alive = [s for s in _Synth.made if not s.released]
+        self.assertTrue(alive)
+        # Rebuilt once, on the first clock after the reset, not every step.
+        self.assertEqual([s.rebuilt for s in alive], [1] * len(alive))
+        self.assertIn(("reverb", 0.3), amy.fx)
+        self.assertTrue([m for m in amy.sent if m.get("note") == 36 and m.get("vel")])
+
     def test_song_mode_plays_the_arrangement(self):
         self.song.patterns[0].add(0, 0, 36)
         self.song.patterns[1].add(1, 0, 38)
@@ -588,6 +610,27 @@ class AppTest(unittest.TestCase):
         self.app.frame(None)
         self.assertEqual(self.app.view.head, -1)
         self.assert_draws_on_screen()
+
+    def test_switching_apps_keeps_playing(self):
+        self.app.song.patterns[0].add(0, 0, 36)
+        self.app.toggle_play()
+        self.app.deactivate()
+        self.assertTrue(self.app.engine.playing)
+        self.assertIsNone(tulip.state["frame_cb"])
+        amy.sent.clear()
+        for _ in range(ls_model.STEPS_PER_BAR):
+            amy.ticks += ls_engine.STEP_TICKS
+            self.app.engine._on_clock(amy.ticks)
+        self.assertTrue([m for m in amy.sent if m.get("note") == 36 and m.get("vel")])
+        self.assertNotIn({"ticks": "0,0,%d" % ls_engine.TAG}, amy.sent)
+        tulip.state["draws"].clear()
+        self.app.activate()
+        self.app.frame(None)
+        self.assertTrue(self.app.engine.playing)
+        self.assertGreaterEqual(self.app.view.head, 0)
+        self.assert_draws_on_screen()
+        self.app.quit()
+        self.assertFalse(self.app.engine.playing)
 
     def test_song_mode_with_an_empty_playlist_does_not_start(self):
         self.app.song.clips = [[] for _ in range(8)]

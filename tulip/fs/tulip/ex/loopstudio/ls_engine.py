@@ -47,6 +47,7 @@ class Engine:
         self._next_tick = 0            # its tick, before swing
         self._origin = 0               # tick of the loop's step 0
         self._fx = None
+        self._amy_gen = None           # amy.instrument_generation we built for
         self.set_song(song)
 
     # --- synths ------------------------------------------------------------
@@ -87,6 +88,19 @@ class Engine:
                 self.synths[i] = self._build(lambda: synth.PatchSynth(
                     num_voices=c.voices, channel=SYNTH_BASE + 1 + i, patch=c.patch))
             self._built[i] = want
+        self._amy_gen = getattr(amy, "instrument_generation", None)
+
+    def _recover(self):
+        """Another app reset AMY underneath us (kanplay's start does, and
+        the song keeps playing while it is in front): the synths on our
+        numbers are gone and the effects are off. Put them back."""
+        self._amy_gen = getattr(amy, "instrument_generation", None)
+        for s in [self.drums] + self.synths:
+            rebuild = getattr(s, "_rebuild_after_amy_reset", None)
+            if rebuild:
+                rebuild()
+        self._fx = None
+        self.apply_fx()
 
     def _silence(self, s):
         """All notes off, as a velocity 0 with *no* note. Not
@@ -201,6 +215,8 @@ class Engine:
     def _on_clock(self, tick):
         if not self.playing:
             return
+        if self._amy_gen != getattr(amy, "instrument_generation", None):
+            self._recover()
         horizon = tick + HORIZON_TICKS
         # A stalled main thread (a long redraw, a file save) can leave us
         # behind; skip to the present rather than fire a burst of late notes.
