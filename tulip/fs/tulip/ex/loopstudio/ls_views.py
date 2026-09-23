@@ -251,6 +251,7 @@ class RackView(View):
         root = self.song.channels[row].root
         if phase == DOWN:
             on = self.pattern.toggle_step(row, s, root)
+            self.app.engine.changed(row)
             self.paint = (row, on, s)
             if on and not self.app.engine.playing:
                 self.app.engine.audition(row, root)
@@ -261,6 +262,7 @@ class RackView(View):
             on = self.paint[1]
             if bool(self.pattern.starts_at(row, s)) != on:
                 self.pattern.toggle_step(row, s, root)
+                self.app.engine.changed(row)
                 self.draw_step(row, s)
             self.paint = (row, on, s)
 
@@ -268,11 +270,14 @@ class RackView(View):
         c = self.song.channels[row]
         if dx < 46:
             c.mute = not c.mute
+            self.app.engine.changed()
         elif dx < 94:
             c.solo = not c.solo
+            self.app.engine.changed()
         elif dx < 138 or dx >= 322:
             self.song.change_sound(row, -1 if dx < 138 else 1)
             self.app.engine.apply_sounds()
+            self.app.engine.changed(row)        # a drum channel's steps follow the sound
             self.app.engine.audition(row, c.root)
             self.app.select_channel(row)
         else:
@@ -356,6 +361,7 @@ class RollView(View):
 
     def _clear(self):
         self.pattern.clear_channel(self.app.channel)
+        self.app.engine.changed(self.app.channel)
         self.draw_content()
 
     # drawing
@@ -418,6 +424,7 @@ class RollView(View):
                 # A tap on an existing note that never moved: delete it.
                 self.draw_note(d[0], erase=True)
                 p.remove(ch, d[0])
+                self.app.engine.changed(ch)
             return
         if y < self.gy:
             return
@@ -445,6 +452,7 @@ class RollView(View):
             self.drag = [note, True, False]
             if not self.app.engine.playing:
                 self.app.engine.audition(ch, pitch)
+            self.app.engine.changed(ch)
             self._redraw_pitch(pitch)
         elif self.drag:
             # Dragging right or left of the note's start sets its length.
@@ -453,6 +461,7 @@ class RollView(View):
             if want != note[1]:
                 self.draw_note(note, erase=True)
                 p.resize(ch, note, want)
+                self.app.engine.changed(ch)
                 self.draw_note(note)
                 self.drag[2] = True
                 self.length = note[1]
@@ -555,6 +564,8 @@ class PlaylistView(View):
         b = (x - self.gx) // self.cw
         if 0 <= b < self.PAGE_BARS:
             self.song.toggle_clip(p, self.page * self.PAGE_BARS + b)
+            if self.app.engine.mode == "song":
+                self.app.engine.restart_queue()     # the song's length may have changed
             self.draw_row(p)            # cells and clips repaint over themselves
             self.draw_hint()
 
@@ -660,6 +671,7 @@ class MixerView(View):
                     c.mute = not c.mute
                 else:
                     c.solo = not c.solo
+                self.app.engine.changed()
                 self.draw_strip(i)
                 return
         if not self.drag:
@@ -667,6 +679,10 @@ class MixerView(View):
         i, what = self.drag
         if what == "vol":
             self._set(i, 1.0 - (y - self.fy - 14) / (self.fh - 28))
+            if i < ls_model.NUM_CHANNELS:
+                self.app.engine.changed(i)          # levels are baked into the queue
+            elif i == ls_model.NUM_CHANNELS:
+                self.app.engine.changed()           # master
             self.draw_fader(i)
         else:
             sx = self.x + i * self.sw + 8
@@ -674,4 +690,5 @@ class MixerView(View):
             if abs(pan - 0.5) < 0.06:
                 pan = 0.5                       # a detent at centre
             self.song.channels[i].pan = pan
+            self.app.engine.changed(i)
             self.draw_pan(i)

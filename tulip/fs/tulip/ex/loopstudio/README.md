@@ -81,10 +81,16 @@ saved songs; tap one to load it. Songs are JSON in `/user/loopstudio/`.
   under CPython.
 - `ls_engine.py` -- one AMY synth per channel on fixed synth numbers (48..56),
   and a 16th-note `sequencer.TulipSequence` clock that sends each step to AMY
-  a little ahead of time as absolute sequencer ticks under one tag, as
-  kanplay's auto mode does. AMY plays them sample-tight whatever the UI is
-  doing; Stop cancels the tag. Nothing is stored inside AMY's sequencer, so
-  every edit, mute and pattern switch is heard on the next step.
+  ahead of time as absolute sequencer ticks, as kanplay's auto mode does. AMY
+  plays them sample-tight whatever the UI is doing. The clock only runs while
+  Python does, and an app switch blocks Python for close to a second on the
+  Tab5, so the queue runs about 1.2 s ahead (3.5 s across a switch). Each
+  channel queues under its own AMY tag: an edit, a mute, a fader move or a
+  new sound cancels that channel's tag and queues it again from now, a note
+  already sounding keeping its note-off, so every edit is still heard on the
+  next step. A change of pattern, length or swing requeues everything from
+  the next step; Stop cancels the lot. Nothing is stored inside AMY's
+  sequencer for longer than that.
 - `ls_views.py` -- the views, drawn on the BG plane with `bg_rect` / `bg_str`
   and hit-tested by hand rather than built from LVGL widgets: a view repaints
   only the cell that changed, where LVGL would invalidate and redraw areas.

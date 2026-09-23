@@ -1,14 +1,19 @@
 """Playback for loopstudio: AMY synths for the channels and a 16th-note clock
-that queues each step a little ahead of time.
+that queues each step ahead of time.
 
 Timing follows kanplay's engine: a sequencer.TulipSequence callback runs every
-16th and sends the notes of the steps inside a short horizon to AMY as
-*absolute* sequencer ticks under one AMY tag, so AMY plays them sample-tight
-whatever the UI is doing, and Stop can cancel what is still queued
-(ticks="0,0,<tag>"). Note-offs are queued with their note-ons.
+16th and sends the notes of the steps inside a lookahead window to AMY as
+*absolute* sequencer ticks, so AMY plays them sample-tight whatever the UI is
+doing. Note-offs are queued with their note-ons.
 
-Python never holds a whole pattern inside AMY, so edits, mutes, pattern
-switches and the playlist all take effect on the next step.
+The clock reaches Python through mp_sched_schedule, so it stops whenever the
+main thread does -- an app switch blocks it for about 0.8 s on the Tab5, an
+app launch for seconds. The window is therefore sized in time (LOOKAHEAD_MS)
+rather than in steps, and the app widens it before a switch. Edits still take
+effect on the next step: every channel queues under its own AMY tag, and an
+edit cancels that tag and queues the channel again from now (`changed`), a
+note already sounding keeping its note-off. Python never holds a whole
+pattern inside AMY.
 """
 import amy
 import sequencer
@@ -19,9 +24,19 @@ import ls_model
 
 PPQ = amy.AMY_SEQUENCER_PPQ
 STEP_TICKS = PPQ // 4                 # a 16th
-HORIZON_TICKS = STEP_TICKS + 2        # queue this far ahead of the clock
 CLOCK_DIVIDER = 16
-TAG = 230                             # AMY sequencer tag (kanplay has 240..245)
+# How far ahead to queue: enough to ride out a stalled main thread. Edits
+# replace what is queued, so this is not an edit latency.
+LOOKAHEAD_MS = 1200
+SWITCH_LOOKAHEAD_MS = 3500            # before an app switch (kanplay takes 3 s to launch)
+# AMY holds 256 tagged events for everyone (amy_config.max_sequencer_tags);
+# leave the rest to the other apps.
+MAX_PENDING = 160
+# AMY sequencer tags: one per channel, so an edit cancels one channel's
+# queue. kanplay has 240..245.
+TAG_BASE = 230
+AUDITION_TAG = TAG_BASE + ls_model.NUM_CHANNELS
+TAGS = range(TAG_BASE, AUDITION_TAG + 1)
 # Fixed AMY synth numbers: PatchSynth's own allocator never reuses a number
 # and AMY has 64, so an app that rebuilds synths must not draw from it.
 # 48 is the drum kit, 49.. the channels; clear of MIDI (1..16), drums.py (20+)
@@ -38,6 +53,7 @@ class Engine:
         self.mode = PATTERN
         self.pattern_index = 0
         self.playing = False
+        self.lookahead_ms = LOOKAHEAD_MS
         self.drums = None
         self.synths = [None] * ls_model.NUM_CHANNELS
         self._built = [None] * ls_model.NUM_CHANNELS     # (patch, voices) per synth
@@ -46,6 +62,8 @@ class Engine:
         self._pos = 0                  # next step to queue, within the loop
         self._next_tick = 0            # its tick, before swing
         self._origin = 0               # tick of the loop's step 0
+        self._steps = []               # [pos, base tick, notes sent] per queued step
+        self._sent = []                # (ch, pitch, on, off) per queued synth note
         self._fx = None
         self._amy_gen = None           # amy.instrument_generation we built for
         self.set_song(song)
@@ -91,7 +109,7 @@ class Engine:
         self._amy_gen = getattr(amy, "instrument_generation", None)
 
     def _recover(self):
-        """Another app reset AMY underneath us (kanplay's start does, and
+        """Another app reset AMY underneath us (technopop's start does, and
         the song keeps playing while it is in front): the synths on our
         numbers are gone and the effects are off. Put them back."""
         self._amy_gen = getattr(amy, "instrument_generation", None)
@@ -136,6 +154,7 @@ class Engine:
         self._fx = fx
 
     def set_bpm(self, bpm):
+        # Queued ticks are musical time, so nothing needs requeueing.
         self.song.bpm = max(40, min(240, int(bpm)))
         tulip.seq_bpm(self.song.bpm)
         if self.song.echo > 0 and self._fx:
@@ -159,16 +178,25 @@ class Engine:
             amy.send(synth=number, note=note, vel=vel, ticks=ticks, pan=pan)
 
     def _play(self, ch, note, on_tick, off_tick):
+        """Queue a note-on and (for a synth) its note-off. True if sent."""
         c, number = self._target(ch)
         if number is None:
-            return
+            return False
         vel = self._gain(c, note[3])
         if vel <= 0:
-            return
+            return False
         pan = None if abs(c.pan - 0.5) < 0.02 else round(c.pan, 2)
-        self._send(number, note[2], vel, "%d,0,%d" % (on_tick, TAG), pan)
+        tag = TAG_BASE + ch
+        self._send(number, note[2], vel, "%d,0,%d" % (on_tick, tag), pan)
         if not c.is_drum:
-            self._send(number, note[2], 0, "%d,0,%d" % (off_tick, TAG), None)
+            self._send(number, note[2], 0, "%d,0,%d" % (off_tick, tag), None)
+            self._sent.append((ch, note[2], on_tick, off_tick))
+        return True
+
+    def _off(self, ch, pitch, off_tick):
+        c, number = self._target(ch)
+        if number is not None and not c.is_drum:
+            self._send(number, pitch, 0, "%d,0,%d" % (off_tick, TAG_BASE + ch), None)
 
     def audition(self, ch, pitch, vel=ls_model.DEFAULT_VEL):
         """Sound a note now (a tap in the rack or the piano roll)."""
@@ -179,7 +207,7 @@ class Engine:
         pan = None if abs(c.pan - 0.5) < 0.02 else round(c.pan, 2)
         self._send(number, pitch, self._gain(c, vel), None, pan)
         if not c.is_drum:
-            self._send(number, pitch, 0, "%d,0,%d" % (now + STEP_TICKS * 2, TAG), None)
+            self._send(number, pitch, 0, "%d,0,%d" % (now + STEP_TICKS * 2, AUDITION_TAG), None)
 
     # --- the clock ---------------------------------------------------------
 
@@ -187,6 +215,9 @@ class Engine:
         if self.mode == SONG:
             return max(1, self.song.song_bars()) * ls_model.STEPS_PER_BAR
         return self.song.patterns[self.pattern_index].steps
+
+    def lookahead_ticks(self):
+        return max(STEP_TICKS + 2, self.song.bpm * PPQ * self.lookahead_ms // 60000)
 
     def _swing(self, step):
         """Ticks the step is played late: the off 16ths, up to half a step."""
@@ -197,48 +228,124 @@ class Engine:
     def _tick_of(self, base_tick, base_step, step):
         return base_tick + (step - base_step) * STEP_TICKS + self._swing(step)
 
-    def _queue_step(self, pos, tick):
-        song = self.song
+    def _events(self, pos):
         if self.mode == SONG:
-            events = song.events_at_song_step(pos)
-        else:
-            events = song.patterns[self.pattern_index].events_at(pos)
+            return self.song.events_at_song_step(pos)
+        return self.song.patterns[self.pattern_index].events_at(pos)
+
+    def _queue_step(self, pos, tick, chans=None):
+        """Send the notes starting at loop step `pos` (base tick `tick`),
+        or only those of the channels in `chans`. Returns the count sent
+        per channel."""
+        counts = [0] * ls_model.NUM_CHANNELS
+        events = self._events(pos)
         if not events:
-            return
-        audible = song.audible()
+            return counts
+        audible = self.song.audible()
         on = tick + self._swing(pos)
         for ch, note in events:
-            if audible[ch]:
+            if audible[ch] and (chans is None or ch in chans):
                 off = self._tick_of(tick, pos, pos + note[1]) - 1
-                self._play(ch, note, on, max(on + 1, off))
+                if self._play(ch, note, on, max(on + 1, off)):
+                    counts[ch] += 1
+        return counts
+
+    def _trim(self, now):
+        """Forget queued steps and notes that are over."""
+        longest = ls_model.MAX_PATTERN_BARS * ls_model.STEPS_PER_BAR * STEP_TICKS
+        self._steps = [s for s in self._steps if s[1] + longest > now]
+        self._sent = [x for x in self._sent if x[3] > now]
+
+    def _pending(self, now):
+        """Notes queued for later, against AMY's tag budget."""
+        return sum(sum(s[2]) for s in self._steps if s[1] > now)
 
     def _on_clock(self, tick):
         if not self.playing:
             return
         if self._amy_gen != getattr(amy, "instrument_generation", None):
             self._recover()
-        horizon = tick + HORIZON_TICKS
-        # A stalled main thread (a long redraw, a file save) can leave us
-        # behind; skip to the present rather than fire a burst of late notes.
-        behind = (tick - self._next_tick) // STEP_TICKS
+        # `tick` is when this callback was scheduled; after a stall a burst
+        # of stale ones arrives at once, so read the clock instead.
+        now = amy.sequencer_ticks()
+        self._trim(now)
+        horizon = now + self.lookahead_ticks()
+        # A stalled main thread (an app switch longer than the lookahead) can
+        # leave us behind; skip to the present rather than fire a burst of
+        # late notes.
+        behind = (now - self._next_tick) // STEP_TICKS
         if behind > 1:
             self._pos += behind
             self._next_tick += behind * STEP_TICKS
-        while self._next_tick <= horizon:
+        pending = self._pending(now)
+        while self._next_tick <= horizon and pending < MAX_PENDING:
             n = self.loop_steps()
             if self._pos >= n:
                 self._pos %= n
             if self._pos == 0:
                 self._origin = self._next_tick
-            self._queue_step(self._pos, self._next_tick)
+            sent = self._queue_step(self._pos, self._next_tick)
+            self._steps.append([self._pos, self._next_tick, sent])
+            pending += sum(sent)
             self._pos += 1
             self._next_tick += STEP_TICKS
+
+    def fill(self):
+        """Queue up to the lookahead now (before something slow)."""
+        if self.playing:
+            self._on_clock(amy.sequencer_ticks())
+
+    def _cancel(self, tags):
+        for t in tags:
+            amy.send(ticks="0,0,%d" % t)
+
+    def changed(self, ch=None):
+        """The pattern, a mute, a level or a sound changed: replace what is
+        queued for channel `ch` (every channel if None) from now on. A note
+        that is already sounding keeps its note-off."""
+        if not self.playing:
+            return
+        chans = range(ls_model.NUM_CHANNELS) if ch is None else (ch,)
+        now = amy.sequencer_ticks()
+        self._cancel(TAG_BASE + c for c in chans)
+        kept = []
+        for x in self._sent:
+            if x[0] not in chans:
+                kept.append(x)
+            elif x[2] <= now < x[3]:
+                self._off(x[0], x[1], x[3])
+                kept.append(x)
+        self._sent = kept
+        for s in self._steps:
+            if s[1] + self._swing(s[0]) > now:
+                new = self._queue_step(s[0], s[1], chans)
+                for c in chans:
+                    s[2][c] = new[c]
+
+    def restart_queue(self):
+        """The loop itself changed (its length, the pattern, the swing):
+        drop the queue and start again from the next step."""
+        if not self.playing:
+            return
+        now = amy.sequencer_ticks()
+        self._cancel(TAG_BASE + c for c in range(ls_model.NUM_CHANNELS))
+        for x in self._sent:
+            if x[2] <= now < x[3]:
+                self._off(x[0], x[1], x[3])
+        self._sent = [x for x in self._sent if x[2] <= now < x[3]]
+        self._steps = []
+        k = (now - self._origin) // STEP_TICKS + 1
+        self._next_tick = self._origin + k * STEP_TICKS
+        self._pos = k % self.loop_steps()
+        self._on_clock(now)
 
     def play(self, from_step=0):
         if self.playing:
             return
         self.apply_sounds()
         self.playing = True
+        self._steps = []
+        self._sent = []
         self._pos = from_step % self.loop_steps()
         self._next_tick = amy.sequencer_ticks() + 2
         self._origin = self._next_tick - self._pos * STEP_TICKS
@@ -250,8 +357,10 @@ class Engine:
         was = self.playing
         self.playing = False
         if was:
-            # The queued note-offs go with the tag, so silence what is sounding.
-            amy.send(ticks="0,0,%d" % TAG)
+            # The queued note-offs go with the tags, so silence what is sounding.
+            self._cancel(TAGS)
+            self._steps = []
+            self._sent = []
             for s in self.synths:
                 self._silence(s)
 
@@ -270,7 +379,11 @@ class Engine:
                 self.play()
 
     def set_pattern(self, index):
-        self.pattern_index = index % ls_model.NUM_PATTERNS
+        index %= ls_model.NUM_PATTERNS
+        if index != self.pattern_index:
+            self.pattern_index = index
+            if self.mode == PATTERN:
+                self.restart_queue()
 
     def position(self):
         """The step sounding now (not the one last queued), or -1."""

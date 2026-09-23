@@ -325,7 +325,7 @@ class EngineTest(unittest.TestCase):
         self.assertGreaterEqual(len(ticks), 5)
         gaps = [b - a for a, b in zip(ticks, ticks[1:])]
         self.assertEqual(set(gaps), {4 * 12, 12 * 12})
-        self.assertTrue(all(m["ticks"].endswith(",0,%d" % ls_engine.TAG) for m in notes_sent()))
+        self.assertTrue(all(m["ticks"].endswith(",0,%d" % ls_engine.TAG_BASE) for m in notes_sent()))
 
     def test_nothing_is_queued_in_the_past(self):
         self.song.patterns[0].add(0, 0, 36)
@@ -371,7 +371,8 @@ class EngineTest(unittest.TestCase):
         self.song.patterns[0].add(4, 0, 40, 8)
         self.engine.play()
         self.engine.stop()
-        self.assertIn({"ticks": "0,0,%d" % ls_engine.TAG}, amy.sent)
+        for t in ls_engine.TAGS:
+            self.assertIn({"ticks": "0,0,%d" % t}, amy.sent)
         # All-notes-off is vel=0 with no note; note=0 leaves AMY's voices ringing.
         self.assertIn({"synth": 53, "vel": 0}, amy.sent)
         self.assertFalse([m for m in amy.sent if m.get("note") == 0])
@@ -418,19 +419,122 @@ class EngineTest(unittest.TestCase):
         self.run_clock(16)
         self.assertEqual(self.engine.position(), (amy.ticks - start - 2) // 12 % 16)
 
-    def test_a_stall_skips_rather_than_bursts(self):
+    def test_a_stall_inside_the_lookahead_loses_nothing(self):
+        self.song.bpm = 120                                   # lookahead 115 ticks
+        p = self.song.patterns[0]
+        for s in range(16):
+            p.add(0, s, 36)
+        self.engine.play()
+        self.run_clock(2)
+        amy.ticks += 8 * 12                                   # an app switch (0.8 s)
+        self.engine._on_clock(amy.ticks)
+        self.run_clock(4)
+        ticks = [tick_of(m) for m in notes_sent()]
+        self.assertEqual(set(b - a for a, b in zip(ticks, ticks[1:])), {12})
+        self.assertGreater(len(ticks), 14)
+
+    def test_a_stall_past_the_lookahead_skips_rather_than_bursts(self):
+        self.song.bpm = 120
         p = self.song.patterns[0]
         for s in range(16):
             p.add(0, s, 36)
         self.engine.play()
         self.run_clock(2)
         amy.sent.clear()
-        amy.ticks += 10 * 12                                  # the main thread hung
+        amy.ticks += 30 * 12                                  # the main thread hung
         self.engine._on_clock(amy.ticks)
-        # At most the step just missed (better late than dropped) and the
-        # ones inside the horizon -- not the ten that went by.
-        self.assertLessEqual(len(notes_sent()), 3)
+        # At most the step just missed (better late than dropped), then the
+        # ones inside the lookahead -- not the twenty that went by.
         self.assertTrue(all(tick_of(m) > amy.ticks - 2 * ls_engine.STEP_TICKS for m in notes_sent()))
+        self.assertLessEqual(len(notes_sent()), 12)
+
+    def test_edit_replaces_the_queued_channel(self):
+        self.song.bpm = 120
+        p = self.song.patterns[0]
+        p.add(0, 0, 36)
+        p.add(1, 2, 38)
+        self.engine.play()
+        origin = self.engine._origin
+        self.assertGreaterEqual(len(self.engine._steps), 9)   # queued well ahead
+        amy.sent.clear()
+        p.add(0, 4, 36)                                       # inside the queued window
+        self.engine.changed(0)
+        self.assertIn({"ticks": "0,0,%d" % ls_engine.TAG_BASE}, amy.sent)
+        self.assertNotIn({"ticks": "0,0,%d" % (ls_engine.TAG_BASE + 1)}, amy.sent)
+        sent = notes_sent()
+        self.assertEqual([m["synth"] for m in sent], [48, 48])   # channel 1 untouched
+        # Step 0 (2 ticks ahead) is still to come, so it is queued again too.
+        self.assertEqual([tick_of(m) for m in sent], [origin, origin + 4 * 12])
+        self.assertEqual(self.engine._steps[4][2][0], 1)
+
+    def test_edit_keeps_the_sounding_notes_off(self):
+        self.song.bpm = 120
+        p = self.song.patterns[0]
+        p.add(4, 0, 40, 8)
+        self.engine.play()
+        origin = self.engine._origin
+        self.run_clock(3)                                     # note 40 is sounding
+        amy.sent.clear()
+        p.add(4, 6, 45, 1)
+        self.engine.changed(4)
+        sent = notes_sent()
+        self.assertEqual([(m["note"], m["vel"] > 0) for m in sent],
+                         [(40, False), (45, True), (45, False)])
+        self.assertEqual(tick_of(sent[0]), origin + 8 * 12 - 1)
+        self.assertEqual(tick_of(sent[1]), origin + 6 * 12)
+
+    def test_mute_takes_effect_on_the_next_step(self):
+        p = self.song.patterns[0]
+        for s in range(16):
+            p.add(0, s, 36)
+        self.engine.play()
+        self.run_clock(2)
+        amy.sent.clear()
+        self.song.channels[0].mute = True
+        self.engine.changed()
+        self.run_clock(4)
+        self.assertFalse([m for m in notes_sent() if m["vel"] > 0])
+        self.song.channels[0].mute = False
+        self.engine.changed()
+        self.assertTrue([m for m in notes_sent() if m["vel"] > 0])
+
+    def test_pattern_switch_restarts_from_the_next_step(self):
+        self.song.bpm = 120
+        self.song.patterns[0].add(0, 0, 36)
+        self.song.patterns[0].add(0, 6, 36)
+        self.song.patterns[1].add(1, 6, 38)
+        self.engine.play()
+        self.run_clock(3)
+        origin = self.engine._origin
+        amy.sent.clear()
+        self.engine.set_pattern(1)
+        for c in range(ls_model.NUM_CHANNELS):
+            self.assertIn({"ticks": "0,0,%d" % (ls_engine.TAG_BASE + c)}, amy.sent)
+        sent = notes_sent()
+        self.assertTrue(sent)
+        self.assertEqual(set(m["note"] for m in sent), {38})
+        self.assertTrue(all(tick_of(m) > amy.ticks for m in sent))
+        k = (amy.ticks - origin) // 12 + 1
+        self.assertEqual(self.engine._steps[0][:2], [k % 16, origin + k * 12])
+        self.assertEqual(tick_of(sent[0]), origin + 6 * 12)
+
+    def test_switch_lookahead_queues_further_within_the_budget(self):
+        self.song.bpm = 120
+        p = self.song.patterns[0]
+        for ch in range(ls_model.NUM_CHANNELS):
+            for s in range(16):
+                p.add(ch, s, 36 + ch)
+        self.engine.play()
+        before = len(self.engine._steps)
+        self.engine.lookahead_ms = ls_engine.SWITCH_LOOKAHEAD_MS
+        self.engine.fill()
+        self.assertGreater(len(self.engine._steps), before)
+        self.assertLessEqual(self.engine._pending(amy.ticks), ls_engine.MAX_PENDING)
+        self.assertLess(len(self.engine._steps), 28)          # 3.5 s would be 28 steps
+        # Nothing is lost: the queue catches up as the budget frees.
+        self.run_clock(30)
+        ticks = sorted(set(tick_of(m) for m in notes_sent()))
+        self.assertEqual(set(b - a for a, b in zip(ticks, ticks[1:])), {1, 11})
 
     def test_fx_sent_only_when_changed(self):
         self.assertEqual(amy.fx, [])
@@ -622,7 +726,7 @@ class AppTest(unittest.TestCase):
             amy.ticks += ls_engine.STEP_TICKS
             self.app.engine._on_clock(amy.ticks)
         self.assertTrue([m for m in amy.sent if m.get("note") == 36 and m.get("vel")])
-        self.assertNotIn({"ticks": "0,0,%d" % ls_engine.TAG}, amy.sent)
+        self.assertFalse([m for m in amy.sent if m.get("ticks", "").startswith("0,0,")])
         tulip.state["draws"].clear()
         self.app.activate()
         self.app.frame(None)
@@ -631,6 +735,15 @@ class AppTest(unittest.TestCase):
         self.assert_draws_on_screen()
         self.app.quit()
         self.assertFalse(self.app.engine.playing)
+
+    def test_switching_apps_widens_the_lookahead_first(self):
+        self.app.toggle_play()
+        before = len(self.app.engine._steps)
+        self.app.deactivate()
+        self.assertEqual(self.app.engine.lookahead_ms, ls_engine.SWITCH_LOOKAHEAD_MS)
+        self.assertGreater(len(self.app.engine._steps), before)
+        self.app.activate()
+        self.assertEqual(self.app.engine.lookahead_ms, ls_engine.LOOKAHEAD_MS)
 
     def test_song_mode_with_an_empty_playlist_does_not_start(self):
         self.app.song.clips = [[] for _ in range(8)]

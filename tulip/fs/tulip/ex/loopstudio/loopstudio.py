@@ -189,6 +189,7 @@ class LoopStudio:
 
     def next_swing(self):
         self.song.swing = (self.song.swing // 15 * 15 + 15) % 75
+        self.engine.restart_queue()
 
     def select_pattern(self, index):
         self.engine.set_pattern(index)
@@ -204,6 +205,7 @@ class LoopStudio:
         pat = self.song.patterns[p]
         pat.set_bars(1 if pat.bars >= ls_model.MAX_PATTERN_BARS else pat.bars + 1)
         self.song.fix_clips(p)
+        self.engine.restart_queue()
         self.draw_all()
 
     def select_channel(self, ch):
@@ -348,6 +350,7 @@ class LoopStudio:
             return
         self.active = True
         self.touching = False
+        self.engine.lookahead_ms = ls_engine.LOOKAHEAD_MS
         self.draw_all()
         tulip.touch_callback(self._touch)
         tulip.keyboard_callback(self._key)
@@ -359,6 +362,10 @@ class LoopStudio:
         # DAW's transport does); only Quit stops it.
         self.active = False
         self.held = None
+        # The switch blocks the main thread (and so the clock) for ~0.8 s on
+        # the Tab5, an app launch for seconds: queue well past that first.
+        self.engine.lookahead_ms = ls_engine.SWITCH_LOOKAHEAD_MS
+        self.engine.fill()
         tulip.frame_callback()
         tulip.touch_callback()
         tulip.keyboard_callback()
