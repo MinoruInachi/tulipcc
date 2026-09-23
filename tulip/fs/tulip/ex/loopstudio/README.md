@@ -25,9 +25,11 @@ The line under it shows the song name, messages, and AMY's render load. Past
 
 Playback carries on while another app is in front (the task bar's switch
 button, or the launcher): the clock runs in the sequencer, not in the screen.
-Only **STOP** or quitting loopstudio stops the song. An app that resets AMY
-on start (kanplay does) silences the synths for a step; loopstudio notices
-and rebuilds them.
+Only **STOP** or quitting loopstudio stops the song. loopstudio does not
+reset AMY when it starts, so drums or kanplay keep sounding next to it
+(they share the tempo and the effect levels); and if another app does reset
+AMY (technopop does, so does the overload failsafe) loopstudio notices on
+the next step and rebuilds its synths.
 
 ## RACK -- the channel rack
 

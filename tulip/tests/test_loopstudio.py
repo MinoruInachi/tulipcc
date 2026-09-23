@@ -381,7 +381,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(amy.sent, [])
 
     def test_another_apps_amy_reset_is_recovered(self):
-        # kanplay's start calls synth.PatchSynth.reset() while we play on.
+        # Another app (technopop's start, or the overload failsafe) resets AMY while we play on.
         self.song.reverb = 0.3
         self.engine.apply_fx()
         self.song.patterns[0].add(0, 0, 36)

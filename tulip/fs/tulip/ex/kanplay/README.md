@@ -87,8 +87,9 @@ Tests (CPython, no hardware): `python3 tulip/tests/test_kanplay.py`.
 
 - **AMY render load on the Tab5.** AMY renders on one core there, and a
   block that misses its deadline is heard as noise; at 0.98 AMY's failsafe
-  resets every synth (and, as of AMY 1.2.108, stays mute until reset, which
-  is why the app resets AMY when it starts). `kp_tones.fit_voices()` trims
+  resets every synth by itself. The app does not reset AMY when it starts
+  (that would silence drums or loopstudio running alongside); its parts sit
+  on fixed synth numbers from 58 up. `kp_tones.fit_voices()` trims
   each part's voices so the modelled cost stays under `RENDER_BUDGET`; the
   part panel shows "2/4v" when a part was trimmed. Six parts of Simple_Piano
   peak at about 0.75 with this. Each part gets only as many voices as its

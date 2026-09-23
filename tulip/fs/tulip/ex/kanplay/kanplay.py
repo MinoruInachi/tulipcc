@@ -173,11 +173,11 @@ class SongPicker(UIElement):
 class KanPlay:
     def __init__(self, screen):
         self.screen = screen
-        # Start from a clean AMY, as technopop does: after an overload failsafe
-        # AMY stays mute until it is reset, and this also returns whatever
-        # synth numbers earlier apps left allocated.
-        import synth
-        synth.PatchSynth.reset()
+        # No synth.PatchSynth.reset() here (technopop does one): its
+        # amy.reset() would also wipe the synths and sequences of whatever
+        # else is running, such as drums. The parts build their own synths on
+        # fixed numbers (kp_tones.SYNTH_BASE), and the overload failsafe
+        # resets AMY by itself, so nothing needs a clean slate.
         self.player = kp_engine.Player()
         self.player.on_change = self._mark_dirty
         self.inputs = kp_input.Inputs(listener=self.on_button)

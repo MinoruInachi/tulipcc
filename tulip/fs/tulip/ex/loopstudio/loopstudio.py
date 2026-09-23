@@ -77,10 +77,10 @@ class FileView(ls_views.View):
 class LoopStudio:
     def __init__(self, screen):
         self.screen = screen
-        # Start from a clean AMY, as kanplay does: after an overload failsafe
-        # AMY stays mute until it is reset.
-        import synth
-        synth.PatchSynth.reset()
+        # No synth.PatchSynth.reset() here: its amy.reset() would also wipe
+        # the synths and sequences of whatever else is running (drums). The
+        # engine builds its own synths on fixed numbers, and the overload
+        # failsafe resets AMY by itself, so nothing needs a clean slate.
         self.song = ls_model.demo()
         self.engine = ls_engine.Engine(self.song)
         self.channel = 4
