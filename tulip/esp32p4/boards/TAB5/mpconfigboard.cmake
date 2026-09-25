@@ -127,6 +127,7 @@ set(MICROPY_SOURCE_BOARD
     ${AMY_DIR}/src/parse.c
     ${AMY_DIR}/src/instrument.c
     ${AMY_DIR}/src/midi_mappings.c
+    ${AMY_DIR}/src/note_output.c
     ${AMY_DIR}/src/cv_trigger.c
 )
 
