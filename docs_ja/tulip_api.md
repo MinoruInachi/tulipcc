@@ -88,8 +88,8 @@ rabbit_game/
  * [`bunny_bounce`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/bunny_bounce/bunny_bounce.py)
  * [`planet_boing`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/planet_boing/planet_boing.py)
  * [`parallax`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/parallax.py)
- * [`starfall`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/starfall.py) - 70 年代後半風の固定画面シューティング。すべて BG プレーンに描画されています
- * [`geoglyph`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/geoglyph.py) - 80 年代前半風の縦スクロールシューティング。空中と地上の標的を別々の武器で撃ちます。地形は BG プレーンのハードウェアスクロールです
+ * [`starfall`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/starfall.py) - 70 年代後半風の固定画面シューティング。すべて BG プレーンに描画されています
+ * [`geoglyph`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/geoglyph.py) - 80 年代前半風の縦スクロールシューティング。空中と地上の標的を別々の武器で撃ちます。地形は BG プレーンのハードウェアスクロールです
 
 Tulip World BBS は、パッケージを tar ファイルとしてアップロード／ダウンロードできます。`world.upload('package', username)` や `world.download('package')` を使ってください。
 
@@ -245,6 +245,8 @@ Tulip の `UIScreen` アプリは、ループで待ったり `sleep` を呼ん�
  * [`juno6`](https://github.com/shorepine/tulipcc/blob/main/tulip/shared/py/juno6.py)
  * [`drums`](https://github.com/shorepine/tulipcc/blob/main/tulip/shared/py/drums.py)
  * [`voices`](https://github.com/shorepine/tulipcc/blob/main/tulip/shared/py/voices.py)
+ * [`loopstudio`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/loopstudio/loopstudio.py) - FL Studio Mobile 風のパターン型ワークステーション。Tab5 向けに作られています
+ * [`kanplay`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/kanplay/kanplay.py) - KANTAN Play にならった、指 1 本で弾けるコード楽器
 
 これらを Tulip 上で編集したい場合は、`/sys/ex/my_drums.py` のように `/sys/ex/my_X.py` にある編集可能版を使ってください。
 

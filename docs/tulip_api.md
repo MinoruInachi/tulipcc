@@ -88,8 +88,8 @@ We ship a couple of game-like examples, check them out:
  * [`bunny_bounce`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/bunny_bounce/bunny_bounce.py)
  * [`planet_boing`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/planet_boing/planet_boing.py)
  * [`parallax`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/parallax.py)
- * [`starfall`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/starfall.py) - a late-70s style fixed shooter, drawn entirely on the BG plane
- * [`geoglyph`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/geoglyph.py) - an early-80s style vertical scroller with separate air and ground targets, on a hardware-scrolled BG plane
+ * [`starfall`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/starfall.py) - a late-70s style fixed shooter, drawn entirely on the BG plane
+ * [`geoglyph`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/geoglyph.py) - an early-80s style vertical scroller with separate air and ground targets, on a hardware-scrolled BG plane
 
 The Tulip World BBS supports uploading and downloading packages as tar files: just `world.upload('package', username)` or `world.download('package')`. 
 
@@ -244,6 +244,8 @@ See some examples of more complex UIs using `UIScreen`:
  * [`juno6`](https://github.com/shorepine/tulipcc/blob/main/tulip/shared/py/juno6.py)
  * [`drums`](https://github.com/shorepine/tulipcc/blob/main/tulip/shared/py/drums.py)
  * [`voices`](https://github.com/shorepine/tulipcc/blob/main/tulip/shared/py/voices.py)
+ * [`loopstudio`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/loopstudio/loopstudio.py) - an FL Studio Mobile style pattern workstation, built for the Tab5
+ * [`kanplay`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/kanplay/kanplay.py) - a one-finger chord instrument after KANTAN Play
 
 If you want to edit these programs on Tulip, find editable versions in `/sys/ex/my_X.py`, like `/sys/ex/my_drums.py`. 
 
