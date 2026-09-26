@@ -37,10 +37,25 @@ offers the firmware and `/sys` separately.
 
 ## Known limitations
 
-- **No `drums` partition**, so AMY's gamma9001 banks are not on flash.
-- Storage helpers (SPIFFS, microSD) are not mounted — see
+- **No `drums` partition**, so AMY's gamma9001 banks are not on flash. Put
+  `drums.bin` on a microSD card and read it into PSRAM instead:
+
+  ```python
+  tulip.sd_mount()                        # mounts the card at /sd
+  tulip.gamma9001_load("/sd/drums.bin")   # returns the frame count it loaded
+  ```
+
+  Build `drums.bin` with `python3 -m amy.headers gamma9001` in the `amy` repo.
+  At 3,735,788 bytes it does not fit in `/user`, and the serial link corrupts a
+  copy that size, so the card is the way in. It loads once per boot — a second
+  call returns the same count rather than swapping the buffer. Without it,
+  presets 256..391 fall back to preset 0; the default TR-808 kit (patch 384)
+  uses ROM presets only and sounds either way.
+- Storage helpers (SPIFFS, microSD) are not mounted at boot — see
   `tulip/esp32p4/boards/TAB5/README.md` for why (ESP-IDF FATFS conflicts with
-  MicroPython's `oofatfs`).
+  MicroPython's `oofatfs`). The card slot itself works: `tulip.sd_mount()`
+  brings it up at `/sd` through MicroPython's own `machine.SDCard` block
+  device, with `sd_unmount()`, `sd_mounted()` and `sd_info()` alongside it.
 - Built against forked `amy` and `micropython` branches, not their upstreams.
 
 ## Build provenance
