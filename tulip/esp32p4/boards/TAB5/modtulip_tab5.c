@@ -51,6 +51,8 @@ MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_midi_cb);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_ime_cb);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_keyboard_cb);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_amy_overload_cb);
+MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_ui_quit_cb);
+MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_ui_switch_cb);
 
 #define s_tab5_process_defers_cb MP_STATE_PORT(tab5_process_defers_cb)
 #define s_tab5_frame_cb MP_STATE_PORT(tab5_frame_cb)
@@ -60,6 +62,8 @@ MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_amy_overload_cb);
 #define s_tab5_ime_cb MP_STATE_PORT(tab5_ime_cb)
 #define _tab5_keyboard_cb MP_STATE_PORT(tab5_keyboard_cb)
 #define s_tab5_amy_overload_cb MP_STATE_PORT(tab5_amy_overload_cb)
+#define s_tab5_ui_quit_cb MP_STATE_PORT(tab5_ui_quit_cb)
+#define s_tab5_ui_switch_cb MP_STATE_PORT(tab5_ui_switch_cb)
 
 static void tab5_process_python_defers(void) {
     nlr_buf_t nlr;
@@ -90,6 +94,7 @@ static mp_obj_t tab5_lv_task_handler(mp_obj_t ignored) {
 static MP_DEFINE_CONST_FUN_OBJ_1(tab5_lv_task_handler_obj, tab5_lv_task_handler);
 
 static void tab5_touch_cb_kick(void);
+static void tab5_ui_hotkey_kick(void);
 
 void tulip_frame_isr(void) {
     s_tab5_frame_callbacks++;
@@ -104,6 +109,8 @@ void tulip_frame_isr(void) {
     // A touch transition whose schedule failed on a full queue is retried
     // here every frame (see tab5_schedule_touch_callback).
     tab5_touch_cb_kick();
+    // Likewise a ctrl-Q / ctrl-Tab that has not been scheduled yet.
+    tab5_ui_hotkey_kick();
     // The IME drains its key queue from here rather than being called once per
     // key: mp_sched_schedule() fails silently when its queue is full, and this way
     // that costs a frame of latency instead of a keystroke. It has its own slot
@@ -1655,6 +1662,53 @@ static mp_obj_t tulip_keyboard_callback(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_keyboard_callback_obj, 0, 1, tulip_keyboard_callback);
 
+// The two global hotkeys, ctrl-Q (quit the app) and ctrl-Tab (switch apps).
+// ui.py's UIScreen registers its handlers here once an app is up, guarded by
+// hasattr(), so without these the hotkeys were silently dead on this board.
+static mp_obj_t tulip_ui_quit_callback(size_t n_args, const mp_obj_t *args) {
+    s_tab5_ui_quit_cb = (n_args > 0) ? args[0] : mp_const_none;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_ui_quit_callback_obj, 0, 1, tulip_ui_quit_callback);
+
+static mp_obj_t tulip_ui_switch_callback(size_t n_args, const mp_obj_t *args) {
+    s_tab5_ui_switch_cb = (n_args > 0) ? args[0] : mp_const_none;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_ui_switch_callback_obj, 0, 1, tulip_ui_switch_callback);
+
+static bool tab5_callback_set(mp_obj_t cb) {
+    return cb != MP_OBJ_NULL && cb != mp_const_none;
+}
+
+// A hotkey is only flagged when it is pressed; tulip_frame_isr() schedules it.
+// Scheduling it straight from the key path lost it whenever the scheduler queue
+// (4 deep) was full, which with LVGL, the frame callback, the sequencer and the
+// IME's drain all queueing is most of the time inside a music app -- and always
+// when the IME forwards the key from inside its own scheduled drain. Retrying
+// each frame costs at most a frame of latency instead of the keystroke.
+static volatile bool s_tab5_ui_quit_pending = false;
+static volatile bool s_tab5_ui_switch_pending = false;
+
+static void tab5_ui_hotkey_kick(void) {
+    if (s_tab5_ui_quit_pending) {
+        if (!tab5_callback_set(s_tab5_ui_quit_cb)) {
+            s_tab5_ui_quit_pending = false;
+        } else if (mp_sched_schedule(s_tab5_ui_quit_cb, mp_const_none)) {
+            s_tab5_ui_quit_pending = false;
+            mp_hal_wake_main_task();
+        }
+    }
+    if (s_tab5_ui_switch_pending) {
+        if (!tab5_callback_set(s_tab5_ui_switch_cb)) {
+            s_tab5_ui_switch_pending = false;
+        } else if (mp_sched_schedule(s_tab5_ui_switch_cb, mp_const_none)) {
+            s_tab5_ui_switch_pending = false;
+            mp_hal_wake_main_task();
+        }
+    }
+}
+
 extern int mp_interrupt_char;
 
 // allow_ime is false for keys the IME itself is forwarding on to the app. Without
@@ -1681,7 +1735,22 @@ static bool tab5_deliver_key(uint16_t key, bool allow_ime) {
             return true;
         }
     }
-    bool callback_consumed = _tab5_keyboard_cb != MP_OBJ_NULL && _tab5_keyboard_cb != mp_const_none;
+    // The global hotkeys come next, as in shared/keyscan.c: they never reach the
+    // keyboard callback, the REPL or LVGL, whether or not a handler is set.
+    if (key == 17) { // ctrl-Q
+        if (tab5_callback_set(s_tab5_ui_quit_cb)) {
+            s_tab5_ui_quit_pending = true;
+        }
+        return true;
+    }
+    if (key == 263) { // ctrl-Tab
+        if (tab5_callback_set(s_tab5_ui_switch_cb)) {
+            s_tab5_ui_switch_pending = true;
+        }
+        return true;
+    }
+
+    bool callback_consumed = tab5_callback_set(_tab5_keyboard_cb);
     if (callback_consumed) {
         mp_sched_schedule(_tab5_keyboard_cb, mp_obj_new_int(key));
     }
@@ -2952,6 +3021,8 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_key_editor), MP_ROM_PTR(&tulip_key_editor_obj) },
     { MP_ROM_QSTR(MP_QSTR_deinit_editor), MP_ROM_PTR(&tulip_deinit_editor_obj) },
     { MP_ROM_QSTR(MP_QSTR_keyboard_callback), MP_ROM_PTR(&tulip_keyboard_callback_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ui_quit_callback), MP_ROM_PTR(&tulip_ui_quit_callback_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ui_switch_callback), MP_ROM_PTR(&tulip_ui_switch_callback_obj) },
     { MP_ROM_QSTR(MP_QSTR_keyboard_brightness), MP_ROM_PTR(&tulip_keyboard_brightness_obj) },
     { MP_ROM_QSTR(MP_QSTR_key_send), MP_ROM_PTR(&tulip_key_send_obj) },
     { MP_ROM_QSTR(MP_QSTR_key_remap), MP_ROM_PTR(&tulip_key_remap_obj) },
