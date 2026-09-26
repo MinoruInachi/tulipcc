@@ -4,7 +4,7 @@ Here you can see the API [Tulip](../README.md) currently ships with.
 
 # Current API
 
-**NOTE**: This page represents the APIs in the latest commit of our _main_ branch. Builds for the Tulip hardware (`tulip.upgrade()`) and the macOS build of Tulip Desktop may lag behind these changes. [Tulip Web](https://tulip.computer/run) should always be up to date with our _main_ branch.
+**NOTE**: This page represents the APIs in the latest commit of our _main_ branch. Builds for the Tulip hardware (`tulip.upgrade()`) and the macOS build of Tulip Desktop may lag behind these changes. [Tulip Web](https://tulip.computer/run) should always be up to date with our _main_ branch. For the M5Stack Tab5, this page represents the latest commit of the _dev_tab5_ branch instead.
 
 ![Tulip](https://raw.githubusercontent.com/shorepine/tulipcc/main/docs/pics/tulip4.png)
 

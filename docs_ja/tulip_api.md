@@ -4,7 +4,7 @@
 
 # 現在の API
 
-**注意**: このページは、_main_ ブランチの最新コミット時点の API を表しています。Tulip ハードウェア向けのビルド（`tulip.upgrade()`）や macOS 版 Tulip Desktop のビルドは、これらの変更に追いついていない場合があります。[Tulip Web](https://tulip.computer/run) は常に _main_ ブランチと同期しているはずです。
+**注意**: このページは、_main_ ブランチの最新コミット時点の API を表しています。Tulip ハードウェア向けのビルド（`tulip.upgrade()`）や macOS 版 Tulip Desktop のビルドは、これらの変更に追いついていない場合があります。[Tulip Web](https://tulip.computer/run) は常に _main_ ブランチと同期しているはずです。なお、M5Stack Tab5 については、このページは _dev_tab5_ ブランチの最新コミット時点のものです。
 
 ![Tulip](https://raw.githubusercontent.com/shorepine/tulipcc/main/docs/pics/tulip4.png)
 
