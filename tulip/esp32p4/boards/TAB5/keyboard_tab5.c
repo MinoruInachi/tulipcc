@@ -1,5 +1,6 @@
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -22,6 +23,7 @@
 #define TAB5_KEYBOARD_I2C_HZ 400000
 #define TAB5_KEYBOARD_RING_SIZE 64
 #define TAB5_KEYBOARD_TASK_STACK_WORDS (3 * 1024 / sizeof(StackType_t))
+#define TAB5_KEYBOARD_TASK_CORE (0)
 
 #define TAB5_KEYBOARD_REG_INT_CFG 0x00
 #define TAB5_KEYBOARD_REG_INT_STATUS 0x01
@@ -336,6 +338,9 @@ static void run_tab5_keyboard(void *params)
 
 void tab5_keyboard_start(void)
 {
+    fprintf(stderr, "Starting keyboard on core %d\n", TAB5_KEYBOARD_TASK_CORE);
+    fflush(stderr);
+
     const i2c_master_bus_config_t bus_config = {
         .i2c_port = TAB5_KEYBOARD_I2C_PORT,
         .sda_io_num = TAB5_KEYBOARD_I2C_SDA,
@@ -361,7 +366,7 @@ void tab5_keyboard_start(void)
 
     if (xTaskCreatePinnedToCore(run_tab5_keyboard, "keyboard_task",
                                 TAB5_KEYBOARD_TASK_STACK_WORDS, NULL,
-                                tskIDLE_PRIORITY + 1, NULL, 0) != pdPASS) {
+                                tskIDLE_PRIORITY + 1, NULL, TAB5_KEYBOARD_TASK_CORE) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create keyboard task");
     }
 }

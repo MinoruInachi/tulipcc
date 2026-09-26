@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -153,6 +154,9 @@ static void tab5_audio_task(void *ignored)
 
 void tab5_audio_init(void)
 {
+    fprintf(stderr, "Starting AMY on core %d\n", TAB5_AUDIO_TASK_CORE);
+    fflush(stderr);
+
     const i2s_std_config_t i2s_config = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AMY_SAMPLE_RATE),
         .slot_cfg = I2S_STD_PHILIP_SLOT_DEFAULT_CONFIG(

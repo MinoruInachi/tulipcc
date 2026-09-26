@@ -1,5 +1,6 @@
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -1217,6 +1218,9 @@ static void run_tab5_usb(void *params)
 
 void tab5_usb_host_start(void)
 {
+    fprintf(stderr, "Starting USB host on core %d\n", TAB5_USB_TASK_CORE);
+    fflush(stderr);
+
     if (s_midi_out_done == NULL) {
         s_midi_out_done = xSemaphoreCreateBinary();
         if (s_midi_out_done == NULL) {

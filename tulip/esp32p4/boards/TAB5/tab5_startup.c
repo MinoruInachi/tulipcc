@@ -1,8 +1,11 @@
+#include <stdio.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_hosted.h"
 #include "py/mpconfig.h"
+#include "py/mphal.h"      // MP_TASK_COREID
 
 #include "display_tab5.h"
 #include "audio_tab5.h"
@@ -57,6 +60,8 @@ void tab5_board_startup(void)
     const tab5_board_revision_t rev = tab5_detect_board_revision();
     ESP_LOGI(TAG, "Board is %s", tab5_board_revision_name(rev));
 
+    fprintf(stderr, "Starting display on core %d\n", TAB5_DISPLAY_TASK_CORE);
+    fflush(stderr);
     BaseType_t display_task_ok = xTaskCreatePinnedToCore(run_tab5_display,
                                                           TAB5_DISPLAY_TASK_NAME,
                                                           TAB5_DISPLAY_TASK_STACK_WORDS,
@@ -68,6 +73,8 @@ void tab5_board_startup(void)
         ESP_LOGE(TAG, "Failed to create display task");
     }
 
+    fprintf(stderr, "Starting touchscreen on core %d\n", TAB5_TOUCH_TASK_CORE);
+    fflush(stderr);
     BaseType_t touch_task_ok = xTaskCreatePinnedToCore(run_tab5_touch,
                                                         TAB5_TOUCH_TASK_NAME,
                                                         TAB5_TOUCH_TASK_STACK_WORDS,
@@ -80,4 +87,8 @@ void tab5_board_startup(void)
     }
 
     ESP_LOGI(TAG, "Tab5 board scaffold startup sequence complete");
+
+    // micropython/ports/esp32/main.c creates mp_task right after this returns.
+    fprintf(stderr, "Starting MicroPython on core %d\n", MP_TASK_COREID);
+    fflush(stderr);
 }
