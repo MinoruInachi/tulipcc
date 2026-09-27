@@ -5,6 +5,8 @@
 
 import tulip
 editor = None
+# True while edit() is still constructing the Editor. See activate_editor_cb.
+_starting = False
 
 
 def draw(screen):
@@ -42,6 +44,17 @@ class Editor(tulip.UIScreen):
         tulip.deinit_editor()
 
     def activate_editor_cb(self,screen):
+        # When edit() is typed at the REPL, the REPL prints its >>> prompt as soon
+        # as edit() returns, onto whatever the TFB shows by then. present() only
+        # defers this callback, but the defer queue is drained by scheduled
+        # callbacks, and MicroPython runs those between bytecodes -- so when
+        # LVGL's render of the new screen is slow (about 0.4s on Tab5) this whole
+        # activation, paint included, ran inside edit(), and the prompt then
+        # landed on the editor's first line. Wait until edit() has returned, so
+        # the prompt is already out and tfb_save() keeps it for the way back.
+        if _starting:
+            tulip.defer(self.activate_editor_cb, screen, 50)
+            return
         # Only load in the file on first run
         tulip.tfb_save()
         if(self.first_run):
@@ -60,9 +73,13 @@ class Editor(tulip.UIScreen):
 
 # Launch the tulip editor as a UIScreen
 def edit(filename=None):
-    global editor
+    global editor, _starting
     if 'edit' in tulip.running_apps:
         print("Editor already running.")
         return
     else:
-        editor = Editor(filename)
+        _starting = True
+        try:
+            editor = Editor(filename)
+        finally:
+            _starting = False
