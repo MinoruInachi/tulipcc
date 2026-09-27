@@ -14,3 +14,8 @@ void tab5_power_enable_usb_host(void);
 bool tab5_power_set_usb_host(bool on);
 bool tab5_power_get_usb_host(bool *on);
 void tab5_power_enable_wifi(void);
+
+// The 5V rail on Port A, the Grove socket (EXT5V_EN, P2 of IO expander 0x43).
+// The BSP has no feature for it and it is off out of reset, so a Grove unit
+// that runs from 5V -- the CardKB, most M5 units -- is unpowered without this.
+void tab5_power_enable_ext5v(void);

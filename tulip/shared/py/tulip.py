@@ -42,6 +42,17 @@ def _process_defers():
 def sys():
     return root_dir()+"sys/"
 
+# The I2C bus on the Grove socket, which the m5*.py accessory drivers use.
+# Everywhere but the Tab5 that is hardware I2C 0. The Tab5 has none to spare --
+# 0 is its keyboard, 1 its internal bus, and machine.I2C() on either aborts the
+# chip -- so its Port A (G53 SDA / G54 SCL) is driven with SoftI2C.
+def grove_i2c(freq=400000):
+    if board() == 'TAB5':
+        from machine import SoftI2C, Pin
+        return SoftI2C(scl=Pin(54), sda=Pin(53), freq=freq)
+    from machine import I2C
+    return I2C(0, freq=freq)
+
 import midi
 
 # prompt for y/n and return true if Y

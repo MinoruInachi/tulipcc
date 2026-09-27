@@ -14,7 +14,7 @@
 // Board-level power and reset control signals exposed through the PI4IOE5V6408.
 #define TAB5_LCD_RST            (-1)
 #define TAB5_TOUCH_RST          (-1)
-#define TAB5_EXT5V_EN           (-1)
+#define TAB5_EXT5V_EN           (-1)   // not a GPIO: see TAB5_EXT5V_EN_PIN
 #define TAB5_WLAN_PWR_EN        (-1)
 #define TAB5_USB5V_EN           (-1)
 #define TAB5_PWROFF_PULSE       (-1)
@@ -32,14 +32,17 @@
 // with BSP_I2C_SDA/BSP_I2C_SCL above -- note that means a device hung off
 // M5-Bus I2C lands on the *internal* bus, not this one.
 //
-// Nothing in the port drives these yet. They are recorded so that whatever
-// attaches first -- the CV DAC the board README sketches out, an ADC, any Grove
-// unit -- takes the numbers from one place. Bringing the bus up needs its own
-// i2c_master bus handle; bsp_i2c_get_handle() returns the internal bus and must
-// not be repointed here. Unverified on hardware: whether the socket's 5V rail
-// needs TAB5_EXT5V_EN asserted through the expander first.
+// Both hardware I2C controllers are taken -- 0 by the keyboard (GPIO 0/1), 1 by
+// the internal bus -- so Python reaches this socket with machine.SoftI2C on
+// these pins (tulip.grove_i2c()). machine.I2C(0) or (1) aborts the chip: the
+// port's i2c_new_master_bus() fails on the busy controller inside
+// ESP_ERROR_CHECK. bsp_i2c_get_handle() returns the internal bus and must not
+// be repointed here.
 #define TAB5_PORT_A_SDA         (53)
 #define TAB5_PORT_A_SCL         (54)
+// The socket's 5V rail, switched by P2 of IO expander 0x43 (not a GPIO); off
+// out of reset. tab5_power_enable_ext5v() turns it on at boot.
+#define TAB5_EXT5V_EN_PIN       (IO_EXPANDER_PIN_NUM_2)
 
 // Audio and storage are intentionally left unassigned here until the board
 // implementation is wired to the schematic and verified on hardware.

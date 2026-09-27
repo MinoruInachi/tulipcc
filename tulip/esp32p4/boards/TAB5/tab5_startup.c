@@ -37,6 +37,7 @@ void tab5_board_startup(void)
 
     tab5_power_init();
     tab5_power_enable_wifi();
+    tab5_power_enable_ext5v();
 
     esp_err_t hosted_err = esp_hosted_init();
     if (hosted_err != ESP_OK) {

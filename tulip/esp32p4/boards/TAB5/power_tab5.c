@@ -50,6 +50,23 @@ bool tab5_power_get_usb_host(bool *on)
     return true;
 }
 
+void tab5_power_enable_ext5v(void)
+{
+    // Same expander the BSP drives the speaker, LCD, touch and camera enables
+    // through (P1, P4, P5, P6); M5Stack's pinmap gives its P2 as EXT5V_EN.
+    esp_io_expander_handle_t io_expander = bsp_io_expander_init();
+    esp_err_t ret = ESP_FAIL;
+    if (io_expander != NULL) {
+        ret = esp_io_expander_set_dir(io_expander, TAB5_EXT5V_EN_PIN, IO_EXPANDER_OUTPUT);
+        ret |= esp_io_expander_set_level(io_expander, TAB5_EXT5V_EN_PIN, 1);
+        ret |= esp_io_expander_set_output_mode(io_expander, TAB5_EXT5V_EN_PIN,
+                                               IO_EXPANDER_OUTPUT_MODE_PUSH_PULL);
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Port A 5V enable failed: %s", esp_err_to_name(ret));
+    }
+}
+
 void tab5_power_enable_wifi(void)
 {
     esp_err_t ret = bsp_feature_enable(BSP_FEATURE_WIFI, true);

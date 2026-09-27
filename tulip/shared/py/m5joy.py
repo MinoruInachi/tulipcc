@@ -1,9 +1,10 @@
 # m5joy.py - support for the m5stack joystick
 # returns 0-1 for x, y and 0/1 for button press
 
-from machine import Pin, I2C
+from machine import Pin
+import tulip
 
-i2c = I2C(0, freq=400000)
+i2c = tulip.grove_i2c()
 
 def get():
     i2c.writeto(0x52, bytes([3]))

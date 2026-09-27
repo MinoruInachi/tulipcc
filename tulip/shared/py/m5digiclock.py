@@ -1,6 +1,7 @@
 # control an m5stack digi-clock 
-from machine import Pin, I2C
-i2c = I2C(0, freq=400000)
+from machine import Pin
+import tulip
+i2c = tulip.grove_i2c()
 
 # Set with a 4 character string
 def set(s):

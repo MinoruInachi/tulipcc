@@ -4,10 +4,11 @@
 # If you connect up to 8 dacs, you can have 16 channels here
 # you can change the address bits with placing/removing 0ohm resistor (or solder bridge) on pins A0 and A1 to set address
 # just remove the 0 ohm resistor on A0 and it will appear at 88 (default is 89)
-from machine import Pin, I2C
+from machine import Pin
+import tulip
 import time
 
-i2c = I2C(0, freq=400000)
+i2c = tulip.grove_i2c()
 
 def set(volts, channel=0):
     val = int((volts/10.0) * 65535.0)

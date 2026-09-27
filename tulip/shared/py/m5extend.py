@@ -1,7 +1,8 @@
 # driver for m5stack extendIO
-from machine import Pin, I2C
+from machine import Pin
+import tulip
 
-i2c = I2C(0, freq=400000)
+i2c = tulip.grove_i2c()
 addr = 0x27
 INPUTPORT = 0x00
 OUTPUTPORT = 0x01

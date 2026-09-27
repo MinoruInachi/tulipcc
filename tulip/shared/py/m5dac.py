@@ -2,8 +2,9 @@
 # import m5dac
 # m5dac.set(volts) # 0-3.3V
 
-from machine import Pin, I2C
-i2c = I2C(0, freq=400000)
+from machine import Pin
+import tulip
+i2c = tulip.grove_i2c()
 
 def set(volts):
     value = int((volts / 3.3)*4095)

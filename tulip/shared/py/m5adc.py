@@ -1,9 +1,10 @@
 # driver for m5stack adc
 # import m5adc; m5adc.get() # returns volts 0-12V
-from machine import Pin, I2C
+from machine import Pin
+import tulip
 import time
 
-i2c = I2C(0, freq=400000)
+i2c = tulip.grove_i2c()
 
 def get():
     b = i2c.readfrom(0x48,3)

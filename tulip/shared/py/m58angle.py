@@ -2,9 +2,10 @@
 # returns the values of each knob
 # you can also adapt this to light LEDs and etc
 
-from machine import Pin, I2C
+from machine import Pin
+import tulip
 
-i2c = I2C(0, freq=400000)
+i2c = tulip.grove_i2c()
 
 def get(num):
     i2c.writeto(67, bytes([0x10 + num]))

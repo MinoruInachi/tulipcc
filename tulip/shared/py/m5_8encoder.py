@@ -2,10 +2,10 @@
 # MIT licensed
 # Examples at original repo
 
-from machine import I2C
+import tulip
 import struct
 
-i2c = I2C(0, freq=400000)
+i2c = tulip.grove_i2c()
 
 ENCODERS = const(8)
 LEDS = const(9)
