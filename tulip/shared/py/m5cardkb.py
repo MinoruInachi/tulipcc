@@ -14,8 +14,22 @@ i2c = tulip.grove_i2c()
 # are 258-261 (see keyscan.c), so without this they arrived as nothing at all.
 _KEYMAP = {0xB4: 260, 0xB5: 259, 0xB6: 258, 0xB7: 261}  # left, up, down, right
 
+# Frames left before looking for an unplugged CardKB again. An unplugged one
+# makes readfrom() raise OSError, and letting that out of a frame callback
+# printed it every frame; checking about twice a second instead also picks the
+# keyboard back up when it is plugged in again.
+_skip = 0
+
 def cardkb_callback(stuff):
-    b = i2c.readfrom(0x5f,1)
+    global _skip
+    if _skip:
+        _skip -= 1
+        return
+    try:
+        b = i2c.readfrom(0x5f,1)
+    except OSError:
+        _skip = 30
+        return
     if(len(b)):
         if b[0] != 0:
             tulip.key_send(_KEYMAP.get(b[0], b[0]))
