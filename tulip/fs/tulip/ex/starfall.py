@@ -7,7 +7,8 @@ borrows anyone's trademark.
 
 Arrows (or A / D) move, space (or Z) fires, ESC quits. On a touch screen, hold
 a finger along the bottom strip to steer -- the ship follows it -- and tap
-anywhere above the bunkers to fire.
+anywhere above the bunkers to fire. An M5Stack joystick unit on the Grove port
+(m5joy) steers too, and its button fires.
 
 Everything here is drawn on the BG plane; the sprite layer is not used at all.
 There are 55 invaders and Tulip only has 32 sprite handles, so the formation had
@@ -285,18 +286,41 @@ MARCH_NOTES = (36, 34, 32, 31)
 # ------------------------------------------------------------------ bitmaps
 
 
+_NATIVE = {}
+
+
+def _px(ink):
+    """Palette colour ink as the bytes of one BG pixel.
+
+    bg_bitmap() takes the plane's native pixels: one RGB332 byte on most
+    Tulips, but two bytes of RGB565 on a Tab5, where RGB332 art fails with
+    "bitmap length does not match rectangle". Rather than redo the palette
+    maths here, let bg_pixel() convert the index -- the same conversion
+    bg_rect() makes, so bitmaps and rects still match -- and read it back.
+    """
+    if ink not in _NATIVE:
+        was = tulip.bg_bitmap(0, 0, 1, 1)
+        if len(was) == 1:
+            _NATIVE[ink] = bytes([ink])
+        else:
+            tulip.bg_pixel(0, 0, ink)
+            _NATIVE[ink] = tulip.bg_bitmap(0, 0, 1, 1)
+            tulip.bg_bitmap(0, 0, 1, 1, was)
+    return _NATIVE[ink]
+
+
 def _bitmap(rows, ink, pad=0, scale=S):
-    """Blow ASCII art up into an RGB332 bitmap, scale x scale per art pixel.
+    """Blow ASCII art up into a BG bitmap, scale x scale per art pixel.
 
     The lines are kept as bytes rather than bytearrays: MicroPython will repeat
     bytes with *, but not a bytearray.
     """
-    edge = bytes(pad)
+    edge = _px(BLACK) * pad
     out = bytearray()
     for row in rows:
         line = edge
         for char in row:
-            line += bytes([BLACK if char == "." else ink]) * scale
+            line += _px(BLACK if char == "." else ink) * scale
         line += edge
         out += line * scale
     return bytes(out)
@@ -318,6 +342,17 @@ class Starfall:
         self.touch_fire = False
         self.quitting = False
         self.now = 0
+        # The Grove joystick, if this board has a Grove port at all. It is
+        # polled whether or not one is plugged in, so it can be plugged in
+        # mid-game; see _read_joy().
+        try:
+            import m5joy
+            self.joy = m5joy
+        except Exception:
+            self.joy = None
+        self.joy_last = (False, False, False)
+        self.joy_misses = 0
+        self.joy_skip = 0
 
     # ------------------------------------------------------------ lifecycle
 
@@ -367,7 +402,7 @@ class Starfall:
                        for frame in KINDS[kind]] for kind in range(len(KINDS))]
         self.splat_cells = [_bitmap(SPLAT, KIND_COLOR[kind], PAD)
                             for kind in range(len(KINDS))]
-        self.empty_cell = bytes(CELL_W * CELL_H)
+        self.empty_cell = _px(BLACK) * (CELL_W * CELL_H)
         self.bunker_art = _bitmap(BUNKER, GREEN, scale=CHUNK)
 
     def _start_sounds(self):
@@ -598,6 +633,33 @@ class Starfall:
                 quit = True
         return (left, right, fire, quit)
 
+    def _read_joy(self):
+        """(left, right, fire) from an M5Stack joystick unit (m5joy)."""
+        if self.joy is None:
+            return (False, False, False)
+        if self.joy_skip:
+            self.joy_skip -= 1
+            return (False, False, False)
+        try:
+            (x, y, button) = self.joy.get()
+        except OSError:
+            # The odd read fails even with the joystick plugged in, so keep
+            # the last reading through a miss or two. Only a run of them means
+            # it is not there, and then look again about once a second instead
+            # of paying for a failed read every frame.
+            self.joy_misses += 1
+            if self.joy_misses < 5:
+                return self.joy_last
+            self.joy_misses = 0
+            self.joy_skip = 40
+            self.joy_last = (False, False, False)
+            return self.joy_last
+        self.joy_misses = 0
+        # x rests near 0.5; a dead band keeps a slightly off-centre stick
+        # from drifting the ship.
+        self.joy_last = (x < 0.3, x > 0.7, button == 1)
+        return self.joy_last
+
     # ----------------------------------------------------------- frame loop
 
     def _tick(self, app):
@@ -629,7 +691,10 @@ class Starfall:
             tulip.defer(lambda app: app.quit(), self.app, 20)
             return
 
-        fire = fire or self.touch_fire
+        (joy_left, joy_right, joy_fire) = self._read_joy()
+        left = left or joy_left
+        right = right or joy_right
+        fire = fire or joy_fire or self.touch_fire
         self.touch_fire = False
 
         if self.state == "attract":
