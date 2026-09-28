@@ -33,7 +33,13 @@
 // this must be counted here or wTotalLength is short and enumeration breaks.
 #define CONFIG_TOTAL_LEN_MIDI  (TUD_CONFIG_DESC_LEN + TUD_MIDI_DESC_LEN + TUD_CDC_DESC_LEN + 8)
 
-#include "amyboard_usbd.h"
+// The stock header declares mp_usbd_builtin_desc_cfg sized for CDC alone.
+// Park that declaration under another name so the CDC + MIDI array below can
+// be defined with its real length.
+#define mp_usbd_builtin_desc_cfg mp_usbd_builtin_desc_cfg_cdc_only
+#include "shared/tinyusb/mp_usbd.h"
+#undef mp_usbd_builtin_desc_cfg
+#include "class/midi/midi_device.h"
 #include "tusb.h"
 #include "shared/tinyusb/mp_usbd_cdc.h"
 

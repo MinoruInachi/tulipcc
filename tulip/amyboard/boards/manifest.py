@@ -1,8 +1,8 @@
 # Just not _boot, we have our own
-freeze("$(PORT_DIR)/modules", "apa106.py")
-freeze("$(PORT_DIR)/modules", "inisetup.py")
-freeze("$(PORT_DIR)/modules", "espnow.py")
-freeze("$(PORT_DIR)/modules", "flashbdev.py")
+freeze("$(MPY_DIR)/../tulip/amyboard/modules", "apa106.py")
+freeze("$(MPY_DIR)/../tulip/amyboard/modules", "inisetup.py")
+freeze("$(MPY_DIR)/../tulip/amyboard/modules", "espnow.py")
+freeze("$(MPY_DIR)/../tulip/amyboard/modules", "flashbdev.py")
 
 include("$(MPY_DIR)/extmod/asyncio")
 
@@ -19,8 +19,8 @@ require("onewire")
 require("umqtt.robust")
 require("umqtt.simple")
 
-freeze("$(PORT_DIR)/../shared/py")
-freeze("$(PORT_DIR)/../shared/amyboard-py")
+freeze("$(MPY_DIR)/../tulip/shared/py")
+freeze("$(MPY_DIR)/../tulip/shared/amyboard-py")
 package("amy", base_path="$(MPY_DIR)/../amy")
 
 #freeze("$(MPY_DIR)/lib/micropython-lib/micropython/utarfile", "utarfile.py")
