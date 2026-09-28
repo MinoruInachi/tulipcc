@@ -1,0 +1,164 @@
+name: AMYStickS3 firmware release
+
+# Continuous AMYStickS3 (AMYboard on the M5Stack StickS3) release on push to
+# dev_tab5: build the STICKS3 board of tulip/amyboard and publish to the rolling
+# 'amysticks3' GitHub release.
+#
+# This is the fork's port (MinoruInachi/tulipcc), like tab5-release.yml, which
+# it is modelled on; it is not built by shorepine/tulipcc. The differences:
+#
+#  1. It builds tulip/amyboard (esp32s3) with MICROPY_BOARD=STICKS3, and
+#     amyboard_fs_create.py assembles the images: /sys, /user and the Gamma9001
+#     'drums' partition, merged into one 8MB image (build/amyboard.bin).
+#
+#  2. There is no OTA on this board (one factory app, so the drums fit in 8MB),
+#     so nothing on the device reads this release: the assets are for flashing
+#     with esptool. Their names are still kept stable, for the docs' links.
+#
+# As in tab5-release.yml, the release is kept NOT latest, the 'amysticks3' tag
+# is force-moved to each released commit, and publishing is gated on dev_tab5
+# (any other branch, or dry_run, only builds).
+#
+# tulip/amyboard/dependencies.lock is committed (negated back in .gitignore) for
+# the same reason as TAB5's: the component manager installs the versions the
+# board was built and tested with (IDF 5.5.4, tinyusb from micropython's fork)
+# instead of re-resolving. Regenerate it with a local build, never by deleting
+# it.
+
+on:
+  push:
+    branches: [ "dev_tab5" ]
+    paths:
+      - 'amy'
+      - 'micropython'
+      - 'ulab'
+      - 'tulip/amyboard/**'
+      - 'tulip/shared/**'
+      # STICKS3's sdkconfig list includes this.
+      - 'tulip/esp32s3/boards/sdkconfig.tulip'
+      # /sys is built from here.
+      - 'tulip/fs/amyboard/**'
+      - '.github/workflows/sticks3-release.yml'
+      - '.github/sticks3-release-notes.md'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build only; do not publish to the rolling amysticks3 release'
+        type: boolean
+        default: false
+
+concurrency:
+  group: sticks3-firmware-release   # serialize releases; never cancel a half-done one
+  cancel-in-progress: false
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write                # create + clobber the 'amysticks3' release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # amy, micropython (and its nested submodules) and ulab are needed to
+          # build; all are public, so the default GITHUB_TOKEN can clone them.
+          submodules: recursive
+
+      - name: Build STICKS3 firmware + assemble images
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          # Must match what the board is developed against (dependencies.lock).
+          esp_idf_version: v5.5.4
+          target: esp32s3
+          path: tulip/amyboard
+          # amyboard_fs_create.py reads the built partition table, builds the
+          # /sys and /user littlefs images, generates drums.bin from the amy
+          # submodule (stdlib-only, so the bare IDF python env runs it), and
+          # merges everything into build/amyboard.bin. The action wraps this
+          # whole string in single quotes, so it must not contain any.
+          command: >-
+            python -m pip install littlefs-python &&
+            idf.py -DMICROPY_BOARD=STICKS3 build &&
+            python amyboard_fs_create.py
+
+      - name: Stage release assets
+        # build/ is root-owned (created inside the esp-idf-ci-action container),
+        # so stage into RUNNER_TEMP and add the date-coded copy in one place.
+        id: stage
+        run: |
+          set -euo pipefail
+          DATE_CODE="$(date -u +%Y%m%d)"
+          echo "date_code=${DATE_CODE}" >> "$GITHUB_OUTPUT"
+          # amysticks3-full: everything, flashed at 0x0 (bootloader, partition
+          # table, app, drums, /sys, /user).
+          # amysticks3-firmware: the app only, for 0x10000.
+          cp tulip/amyboard/build/amyboard.bin "${RUNNER_TEMP}/amysticks3-full.bin"
+          cp tulip/amyboard/build/micropython.bin "${RUNNER_TEMP}/amysticks3-firmware.bin"
+          # Date-coded copy of the full image, so a downloaded file can be traced
+          # to a build. One dated copy lives on the release at a time.
+          cp tulip/amyboard/build/amyboard.bin \
+             "${RUNNER_TEMP}/amysticks3-full-${DATE_CODE}.bin"
+          # The full image is exactly the 8MB flash; anything else means the
+          # merge picked up the wrong partition table.
+          test "$(stat -c %s "${RUNNER_TEMP}/amysticks3-full.bin")" -eq 8388608
+          ls -l "${RUNNER_TEMP}"/amysticks3-*.bin
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: amysticks3-firmware
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/amysticks3-full.bin
+            ${{ runner.temp }}/amysticks3-firmware.bin
+
+      - name: Publish to the rolling 'amysticks3' release
+        if: github.ref == 'refs/heads/dev_tab5' && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DATE_CODE: ${{ steps.stage.outputs.date_code }}
+        run: |
+          set -euo pipefail
+          # Create the rolling release once, at the fixed tag 'amysticks3'. Kept
+          # non-latest -- see tab5-release.yml.
+          if ! gh release view amysticks3 >/dev/null 2>&1; then
+            gh release create amysticks3 \
+              --target "$GITHUB_SHA" \
+              --latest=false \
+              --title "AMYStickS3: AMYboard for M5Stack StickS3 (rolling)" \
+              --notes "Rolling AMYStickS3 build. Placeholder notes; the publish step rewrites this with the built commit."
+          fi
+          # Stable asset names: the docs' download links point at these.
+          gh release upload --clobber amysticks3 \
+            "${RUNNER_TEMP}/amysticks3-full.bin" \
+            "${RUNNER_TEMP}/amysticks3-firmware.bin"
+          # Prune older date codes, then upload today's. Same-day rebuilds clobber
+          # the same name.
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/amysticks3" --jq '.assets[].name' \
+            | { grep -E '^amysticks3-full-[0-9]{8}\.bin$' || true; } \
+            | { grep -v "${DATE_CODE}" || true; } \
+            | while read -r stale; do gh release delete-asset amysticks3 "$stale" --yes; done
+          gh release upload --clobber amysticks3 \
+            "${RUNNER_TEMP}/amysticks3-full-${DATE_CODE}.bin"
+          AMY_SHA="$(git -C amy rev-parse HEAD)"
+          MPY_SHA="$(git -C micropython rev-parse HEAD)"
+          # Notes live in .github/sticks3-release-notes.md; the @PLACEHOLDER@
+          # tokens are substituted here (every value is hex, digits or a URL with
+          # no '|', so '|' is a safe sed delimiter).
+          sed -e "s|@DATE_CODE@|${DATE_CODE}|g" \
+              -e "s|@COMMIT@|${GITHUB_SHA}|g" \
+              -e "s|@RUN_ID@|${GITHUB_RUN_ID}|g" \
+              -e "s|@RUN_URL@|${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}|g" \
+              -e "s|@AMY_SHA@|${AMY_SHA}|g" \
+              -e "s|@MPY_SHA@|${MPY_SHA}|g" \
+              .github/sticks3-release-notes.md > "${RUNNER_TEMP}/notes.md"
+          if grep -q '@[A-Z_]\+@' "${RUNNER_TEMP}/notes.md"; then
+            echo "::error::unsubstituted placeholder left in the release notes"
+            grep -n '@[A-Z_]\+@' "${RUNNER_TEMP}/notes.md"
+            exit 1
+          fi
+          # Move the rolling tag onto the commit just built, last, so the source
+          # archives are never ahead of the binaries (see tab5-release.yml for
+          # why this has to be the git refs API).
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/amysticks3" \
+            -f sha="$GITHUB_SHA" -F force=true --silent
+          gh release edit amysticks3 --latest=false --notes-file "${RUNNER_TEMP}/notes.md"

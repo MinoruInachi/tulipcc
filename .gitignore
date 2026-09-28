@@ -9,6 +9,9 @@ dependencies.lock
 # esp_lcd_dpi_panel_event_callbacks_t needs a field IDF v5.5.4 does not have.
 # Committing the lock is what Espressif recommends for applications anyway.
 !tulip/esp32p4/dependencies.lock
+# ...and AMYboard's, for the same reason: sticks3-release.yml builds against it
+# (tinyusb from micropython's fork, IDF v5.5.4).
+!tulip/amyboard/dependencies.lock
 tulip/esp32s3/dist
 tulip/esp32s3/build
 tulip/esp32s3/tulip-sys.bin
