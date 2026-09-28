@@ -284,6 +284,15 @@ soft_reset:
 
 soft_reset_exit:
 
+    // AMYboard: a soft reset rebuilds only the VM; the chip is not restarted,
+    // since with the REPL on native USB that drops the serial connection. AMY
+    // and USB keep running, so first cut AMY's tasks off from the Python
+    // objects about to be freed. _boot.py resets AMY's state next time round.
+    {
+        extern void amyboard_soft_reset(void);
+        amyboard_soft_reset();
+    }
+
     #if MICROPY_BLUETOOTH_NIMBLE
     mp_bluetooth_deinit();
     #endif
@@ -319,9 +328,6 @@ soft_reset_exit:
     esp_native_code_free_all();
 
     mp_hal_stdout_tx_str("MPY: soft reboot\r\n");
-    // AMYboard: AMY and its tasks can't be torn down and started again in
-    // place, so a soft reset is a full restart.
-    esp_restart();
 
     // deinitialise peripherals
     #if MICROPY_PY_MACHINE_PWM

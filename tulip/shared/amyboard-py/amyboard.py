@@ -540,7 +540,14 @@ def start_amy():
             print("Environment start failed:")
             sys.print_exception(e)
         return
-    if _STICKS3:
+    # After a soft reset (Ctrl-D) AMY is still running -- the chip was not
+    # restarted -- along with its I2S clocks and the codec it feeds. Leave the
+    # audio hardware alone then and just clear out the old session's state.
+    soft_reset = tulip.amy_running()
+    if soft_reset:
+        amy.send(reset=amy.RESET_EVENTS | amy.RESET_ALL_NOTES | amy.RESET_ALL_OSCS |
+                 amy.RESET_SEQUENCER | amy.RESET_PATCH | amy.RESET_TIMEBASE)
+    elif _STICKS3:
         init_sticks3_audio()
     else:
         init_pcm9211()
@@ -548,8 +555,8 @@ def start_amy():
     # AMY binds its MIDI UART TX to this pin at start; set_midi_type() right after is
     # the single MIDI OUT init sequence (it also holds the unused TRS leg high). It
     # needs AMY's UART driver, which amy_start() installs, so it must come second.
-    tulip.amyboard_start(_MIDI_OUT_PINS[_midi_type])
-    if _STICKS3:
+    tulip.amyboard_start(_MIDI_OUT_PINS[_midi_type])  # no-op after a soft reset
+    if _STICKS3 and not soft_reset:
         # Only now, with AMY's I2S clocks running into the codec.
         import sticks3
         sticks3.speaker_amp(get_i2c(), True)

@@ -382,7 +382,16 @@ static void mount_gamma9001_drums(void) {
 
 #if (defined AMYBOARD) || (defined TULIP)
 
+static uint8_t amy_running = 0;
+
+// True once run_amy() has started AMY. It stays running across a MicroPython
+// soft reset, so _boot.py asks this before starting it (or its codec) again.
+uint8_t amy_is_running(void) {
+    return amy_running;
+}
+
 void run_amy(uint8_t midi_out_pin) {
+    if (amy_running) return;
     amy_config_t amy_config = amy_default_config();
     amy_config.amy_external_midi_input_hook = tulip_midi_input_hook;
 #ifdef TULIP_USER_C_DSP
@@ -435,7 +444,29 @@ void run_amy(uint8_t midi_out_pin) {
     external_map = malloc_caps(amy_config.max_oscs, MALLOC_CAP_INTERNAL);
     for(uint16_t i=0;i<amy_config.max_oscs;i++) external_map[i] = 0;
     for(uint8_t i=0;i<MAX_CV_SYNTHS;i++) cv_synth_map[i] = 0;
+    amy_running = 1;
 }
+
+#ifdef AMYBOARD
+// MicroPython soft reset (Ctrl-D) on AMYboard. The chip is not restarted --
+// with the REPL on native USB that would drop the serial connection -- so AMY,
+// its tasks and USB keep running while the VM and its heap are rebuilt. Drop
+// every Python object AMY's tasks can reach, before the heap goes: the
+// sequencer/defer callbacks, the MIDI and overload callbacks, and the open
+// files of an in-flight transfer. Also forget the CV routing the old sketch
+// set up. _boot.py then resets AMY's own state (amyboard.start_amy()).
+void amyboard_soft_reset(void) {
+    extern void tsequencer_init();
+    MP_STATE_PORT(midi_callback) = NULL;
+    MP_STATE_PORT(amy_overload_callback) = NULL;
+    tsequencer_init();
+    for (uint32_t i = 0; i < MAX_OPEN_FILES; i++) g_files[i] = NULL;
+    if (external_map != NULL) {
+        for(uint16_t i=0;i<amy_global.config.max_oscs;i++) external_map[i] = 0;
+    }
+    for(uint8_t i=0;i<MAX_CV_SYNTHS;i++) cv_synth_map[i] = 0;
+}
+#endif
 
 #ifdef AMYBOARD
 // Set the MIDI OUT TRS standard (Type A = pin 14, Type B = pin 15). This is the single

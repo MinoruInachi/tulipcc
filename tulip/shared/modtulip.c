@@ -695,6 +695,14 @@ STATIC mp_obj_t tulip_amyboard_start(size_t n_args, const mp_obj_t *args) {
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_amyboard_start_obj, 1, 1, tulip_amyboard_start);
 
+// True when AMY is already running, i.e. this boot is a soft reset (Ctrl-D):
+// AMY, its I2S and the codec carried on through it. See amyboard.start_amy().
+extern uint8_t amy_is_running(void);
+STATIC mp_obj_t tulip_amy_running(void) {
+    return mp_obj_new_bool(amy_is_running());
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_0(tulip_amy_running_obj, tulip_amy_running);
+
 #if defined(AMYBOARD)
 // Switch the MIDI OUT TRS standard live (Type A = pin 14, Type B = pin 15). See
 // amyboard.set_midi_type() — AMY keeps running; only the UART TX line moves.
@@ -2008,6 +2016,7 @@ STATIC const mp_rom_map_elem_t tulip_module_globals_table[] = {
 #ifdef AMYBOARD
     { MP_ROM_QSTR(MP_QSTR_amyboard_send), MP_ROM_PTR(&tulip_amyboard_send_obj) },
     { MP_ROM_QSTR(MP_QSTR_amyboard_start), MP_ROM_PTR(&tulip_amyboard_start_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_running), MP_ROM_PTR(&tulip_amy_running_obj) },
     { MP_ROM_QSTR(MP_QSTR_amyboard_set_midi_out), MP_ROM_PTR(&tulip_amyboard_set_midi_out_obj) },
     { MP_ROM_QSTR(MP_QSTR_bootloader_mode), MP_ROM_PTR(&tulip_bootloader_mode_obj) },
 #ifdef ESP_PLATFORM
