@@ -396,6 +396,9 @@ void MICROPY_ESP_IDF_ENTRY(void) {
     idle_0_handle = xTaskGetIdleTaskHandleForCPU(0);
     idle_1_handle = xTaskGetIdleTaskHandleForCPU(1);
 
+#ifndef AMYBOARD_STICKS3
+    // The StickS3 has neither the I2C follower header nor the ADS1015 CV input,
+    // and its internal I2C bus carries the codec and PMIC instead.
     i2c_follower_init();
     xTaskCreatePinnedToCore(i2c_check_for_data, "i2c_check_for_data", 8192, NULL, 20, &i2c_check_for_data_handle, 0);
     fflush(stderr);
@@ -404,6 +407,7 @@ void MICROPY_ESP_IDF_ENTRY(void) {
     // Start the CV ADC reader task (reads ADS1015 over I2C, updates cached values)
     extern void cv_read_task(void *pvParameter);
     xTaskCreatePinnedToCore(cv_read_task, CV_READ_TASK_NAME, CV_READ_TASK_STACK_SIZE / sizeof(StackType_t), NULL, CV_READ_TASK_PRIORITY, &cv_read_handle, CV_READ_TASK_COREID);
+#endif
 
     fprintf(stderr,"Starting MicroPython on core %d\n", TULIP_MP_TASK_COREID);
     xTaskCreatePinnedToCore(mp_task, TULIP_MP_TASK_NAME, (TULIP_MP_TASK_STACK_SIZE) / sizeof(StackType_t), NULL, TULIP_MP_TASK_PRIORITY, &tulip_mp_handle, TULIP_MP_TASK_COREID);

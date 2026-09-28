@@ -454,9 +454,12 @@ void amyboard_set_midi_out(uint8_t midi_out_pin) {
     uart_set_pin(UART_NUM_1, midi_out_pin, MIDI_IN_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     // Disconnect the now-unused leg from the UART and hold it high (MIDI idle/source).
     // Driving it as a plain GPIO output stops it from mirroring the TX signal.
-    gpio_reset_pin(other_pin);
-    gpio_set_direction(other_pin, GPIO_MODE_OUTPUT);
-    gpio_set_level(other_pin, 1);
+    // Boards with a single MIDI OUT leg (StickS3: A == B) have no other leg.
+    if (other_pin != midi_out_pin) {
+        gpio_reset_pin(other_pin);
+        gpio_set_direction(other_pin, GPIO_MODE_OUTPUT);
+        gpio_set_level(other_pin, 1);
+    }
 }
 #endif
 

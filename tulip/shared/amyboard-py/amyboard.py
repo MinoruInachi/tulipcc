@@ -28,11 +28,26 @@ def _vcv():
     # AMYboard running inside the VCV Rack plugin (see tulip/vcvrack/).
     return (tulip.board()=="AMYBOARD_VCV")
 
+def _is_sticks3():
+    # The M5Stack StickS3 build (tulip/amyboard/boards/STICKS3) is AMYboard
+    # firmware, so board() is still "AMYBOARD"; only the board name differs.
+    try:
+        return tulip.board() == "AMYBOARD" and "StickS3" in os.uname().machine
+    except Exception:
+        return False
+
+_STICKS3 = _is_sticks3()
+
+def sticks3():
+    """True on the M5Stack StickS3: an ES8311 codec, M5PM1 PMIC and ST7789 LCD
+    where AMYboard has the PCM9211, the CV DAC/ADC and an OLED."""
+    return _STICKS3
+
 def cv_capable():
     """True on boards with AMYboard CV hardware. This module is also frozen
     into Tulip builds (so AMYboard World sketches run there via
     world.amyboard.download()); on Tulip the CV helpers below just no-op."""
-    return tulip.board() in ("AMYBOARD", "AMYBOARD_WEB", "AMYBOARD_VCV")
+    return tulip.board() in ("AMYBOARD", "AMYBOARD_WEB", "AMYBOARD_VCV") and not _STICKS3
 
 
 class _BGWriteI2C:
@@ -75,6 +90,8 @@ def _i2c_bg_drain(max_ms=500):
         max_ms -= 5
 
 
+_sticks3_lcd = None  # one LCD driver per boot; Display instances share it
+
 class Display:
     """Unified display interface for ssd1327, sh1107, and web framebuffer.
 
@@ -99,6 +116,19 @@ class Display:
             self._buf = bytearray(self.WIDTH * self.HEIGHT // 2)
             self._fb = framebuf.FrameBuffer(self._buf, self.WIDTH, self.HEIGHT, framebuf.GS4_HMSB)
         else:
+            if _STICKS3:
+                # The built-in LCD: a GS4 framebuffer like the OLED's, but
+                # 240x135 landscape, so WIDTH/HEIGHT follow the panel.
+                import sticks3
+                global _sticks3_lcd
+                if _sticks3_lcd is None:
+                    _sticks3_lcd = sticks3.LCD(get_i2c())
+                self._hw = _sticks3_lcd
+                self._buf = self._hw.buffer
+                self._fb = self._hw.framebuf
+                self.WIDTH = self._hw.WIDTH
+                self.HEIGHT = self._hw.HEIGHT
+                return
             if _i2c_bg_available():
                 # a previous Display instance may still have queued panel
                 # writes; let them finish before probing/re-initing
@@ -441,6 +471,8 @@ def environment_transfer_done(*_args):
 
 def mount_sd():
     # mount the SD card if given
+    if _STICKS3:
+        return  # no SD slot; and pins 11/12 are the StickS3's buttons
     import machine, uos
     try:
         sd = machine.SDCard(sck=12, miso=13, mosi=11, cs=10,slot=2)
@@ -455,6 +487,9 @@ def mount_sd():
 #   Type B -> pin 15 (GPIO14 held high)
 # Only MIDI OUT differs by type; MIDI IN works for both. Default is Type A.
 _MIDI_OUT_PINS = {'A': 14, 'B': 15}
+if _STICKS3:
+    # One MIDI OUT line, on the Grove port (pins.h): both types share it.
+    _MIDI_OUT_PINS = {'A': 9, 'B': 9}
 _midi_type = 'A'
 
 
@@ -505,12 +540,19 @@ def start_amy():
             print("Environment start failed:")
             sys.print_exception(e)
         return
-    init_pcm9211()
-    init_gp8413()  # newer GP8413 batches (v1.5 boards) power up half-scale
+    if _STICKS3:
+        init_sticks3_audio()
+    else:
+        init_pcm9211()
+        init_gp8413()  # newer GP8413 batches (v1.5 boards) power up half-scale
     # AMY binds its MIDI UART TX to this pin at start; set_midi_type() right after is
     # the single MIDI OUT init sequence (it also holds the unused TRS leg high). It
     # needs AMY's UART driver, which amy_start() installs, so it must come second.
     tulip.amyboard_start(_MIDI_OUT_PINS[_midi_type])
+    if _STICKS3:
+        # Only now, with AMY's I2S clocks running into the codec.
+        import sticks3
+        sticks3.speaker_amp(get_i2c(), True)
     set_midi_type(_midi_type)
     tulip.amy_overload_callback(_on_amy_overload)
     # Boot defaults so the board makes sound before (or without) a sketch:
@@ -527,8 +569,9 @@ def start_amy():
     from upysh import cd
     try:
         from machine import Pin
-        button = Pin(0, Pin.IN, Pin.PULL_UP)
-        if button.value() != 0:  # Skip sketch if boot button held
+        # Skip the sketch if the boot button (StickS3: the front KEY1) is held
+        button = Pin(11 if _STICKS3 else 0, Pin.IN, Pin.PULL_UP)
+        if button.value() != 0:
             run_sketch()
     except Exception as e:
         print("Environment start failed:")
@@ -780,7 +823,9 @@ def get_i2c():
     if(i2c is None):
         try:
             from machine import I2C
-            i2c = I2C(0, freq=400000)
+            # The StickS3's internal bus carries the M5PM1, which M5Stack
+            # drives at 100kHz.
+            i2c = I2C(0, freq=100000 if _STICKS3 else 400000)
         except Exception as e:
             # Ports without machine.I2C (Tulip Desktop, web): surface this as
             # OSError so every accessory helper's missing-hardware path treats
@@ -838,7 +883,7 @@ def display_refresh():
         display.show()
 
 def display_startup():
-    display.text("AMYboard!!!!", 0, 0, 255)
+    display.text("AMYStickS3" if _STICKS3 else "AMYboard!!!!", 0, 0, 255)
     display.text("TLP " + tulip.version(), 0, 12, 255)
     display.text("AMY " + amy.version, 0, 24, 255)
     display.show()
@@ -901,6 +946,19 @@ def init_pcm9211(addr=0x40):
             print("Write 0x%02x to 0x%02x OK" % (val, reg))
         else:
             print("Write 0x%02x to 0x%02x returned 0x%02x" % (val, reg, r))
+
+def init_sticks3_audio(mic_gain=0):
+    """StickS3: wake the PMIC, power the LCD, and set the ES8311 up for AMY's
+    I2S format. Runs before AMY starts the I2S clocks; start_amy() switches
+    the speaker amp on after them."""
+    import sticks3
+    sticks3.power_init(get_i2c())
+    sticks3.es8311_init(get_i2c(), mic_gain=mic_gain)
+
+def sticks3_volume(vol):
+    """StickS3 speaker level at the codec: 0 = mute, 191 = 0dB, 255 = +32dB."""
+    import sticks3
+    sticks3.es8311_volume(get_i2c(), vol)
 
 def init_gp8413(addr=88):
     """Select the CV DAC's 5V full-scale output range (register 0x01 = 0x11).
@@ -1682,7 +1740,7 @@ def monitor_encoders():
         width = read_encoder(encoder)
         top = bar_top + encoder * bar_space
         # Clear existing bar
-        display.fill_rect(0, top, 128, bar_space, 0)
+        display.fill_rect(0, top, display.WIDTH, bar_space, 0)
         # Draw new bar
         if width < 0:
             center = bar_center + width
@@ -1753,7 +1811,7 @@ def draw_waveform():
     waveform_top = 0
     waveform_left = 0
     waveform_height = 64
-    waveform_width = 128
+    waveform_width = display.WIDTH
     display.fill_rect(waveform_left, waveform_top,
                       waveform_width, waveform_height, 0)
     # center the largest sample

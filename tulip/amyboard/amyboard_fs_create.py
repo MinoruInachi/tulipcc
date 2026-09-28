@@ -68,11 +68,19 @@ fs = lfs.LFSFilesystem()
 lfs.format(fs, cfg)
 lfs.mount(fs, cfg)
 
+# Boards with an 8MB flash (StickS3) have a far smaller system partition than
+# AMYboard's 3MB. Leave out the big example samples there, keeping bcla3.wav,
+# which the bundled examples load.
+big_samples = []
+if sys_partition.size < 0x200000:
+    big_samples = ['ex/vlsa3.wav', 'ex/vlng3.wav']
+    print("small system partition: leaving out %s" % ', '.join(big_samples))
+
 for folder in folders:
     lfs.mkdir(fs,folder)
     for file in os.listdir(folder):
         file_part, ext = os.path.splitext(file)
-        if(ext.lower() in good_exts):
+        if(ext.lower() in good_exts and folder+'/'+file not in big_samples):
             copy_to_lfs(folder+'/'+file, folder+'/'+file)
 
 os.chdir(cur_dir)

@@ -1,0 +1,11 @@
+# Partition table for AMYboard on the M5Stack StickS3 (8MB flash).
+# One factory app, no OTA: flash updates go through the web flasher (esptool),
+# not amyboard.upgrade(). That frees room for the full Gamma9001 drum banks.
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x300000,
+# Gamma9001 drum banks (raw int16 PCM, mmapped by AMY; see amy pcm_gamma9001.h)
+drums,    data, undefined, 0x310000, 0x3a0000,
+system,   data, fat,     0x6b0000, 0xb0000,
+vfs,      data, fat,     0x760000, 0xa0000,
