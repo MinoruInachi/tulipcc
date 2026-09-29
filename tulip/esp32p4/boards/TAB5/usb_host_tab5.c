@@ -213,6 +213,22 @@ static void new_enumeration_config_fn(const usb_config_desc_t *config_desc,
 
 /* ------------------------------------------------------------------ MIDI in */
 
+// Buffers whose transfer failed and has to be resubmitted from the service
+// loop. It cannot be done in the callback, because clearing a halted endpoint
+// blocks on the very task the callback runs on.
+#define MIDI_IN_RETRY_MS 100
+static bool s_midi_in_retry[MIDI_IN_BUFFERS];
+static bool s_midi_in_halted;
+static int64_t s_midi_in_retry_at_ms;
+
+static void midi_in_mark_for_retry(usb_transfer_t *transfer)
+{
+    const int slot = (int)(intptr_t)transfer->context;
+    if (slot >= 0 && slot < MIDI_IN_BUFFERS) {
+        s_midi_in_retry[slot] = true;
+    }
+}
+
 // USB MIDI event packets are always 4 bytes: [CN<<4 | CIN][MIDI_0][MIDI_1][MIDI_2].
 // CN is the virtual cable, CIN classifies the 3 MIDI bytes (Table 4-1 of the
 // MIDI 1.0 spec at usb.org).
@@ -223,8 +239,18 @@ static void midi_transfer_cb(usb_transfer_t *transfer)
     }
     const bool in_xfer = (transfer->bEndpointAddress & USB_B_ENDPOINT_ADDRESS_EP_DIR_MASK) != 0;
     if (transfer->status != 0 || !in_xfer) {
-        if (transfer->status != USB_TRANSFER_STATUS_CANCELED) {
+        // CANCELED is teardown and NO_DEVICE means it is already gone; neither
+        // wants the buffer put back. Anything else is worth retrying, and has
+        // to be: this used to return without resubmitting, so an error retired
+        // that buffer for good. Eight of them and MIDI input was dead until the
+        // device was unplugged, with nothing on screen to say why.
+        if (transfer->status != USB_TRANSFER_STATUS_CANCELED &&
+            transfer->status != USB_TRANSFER_STATUS_NO_DEVICE) {
             s_midi_in_errors++;
+            if (transfer->status == USB_TRANSFER_STATUS_STALL) {
+                s_midi_in_halted = true;
+            }
+            midi_in_mark_for_retry(transfer);
             ESP_LOGW(TAG, "MIDI in transfer status %d", transfer->status);
         }
         return;
@@ -242,6 +268,9 @@ static void midi_transfer_cb(usb_transfer_t *transfer)
 
     const esp_err_t err = usb_host_transfer_submit(transfer);
     if (err != ESP_OK) {
+        // Same reasoning: a buffer that fails to go back in is one fewer for
+        // the rest of the connection, so hand it to the service loop.
+        midi_in_mark_for_retry(transfer);
         ESP_LOGW(TAG, "MIDI in resubmit failed: %s", esp_err_to_name(err));
     }
 }
@@ -966,6 +995,11 @@ static void release_midi(void)
     s_midi_claimed = s_midi_ready = s_midi_has_in = s_midi_has_out = false;
     s_sysex_out_active = 0;
     s_sysex_out_len = 0;
+    // A pending retry belongs to the device that is going away.
+    for (int i = 0; i < MIDI_IN_BUFFERS; i++) {
+        s_midi_in_retry[i] = false;
+    }
+    s_midi_in_halted = false;
 
     for (int i = 0; i < MIDI_IN_BUFFERS; i++) {
         free_transfer(&s_midi_in[i]);
@@ -1203,6 +1237,48 @@ static void usbh_poll_events(void)
     }
 }
 
+// Put failed MIDI IN buffers back in flight, clearing the endpoint halt first
+// if that is what stopped them. Rate-limited, so a device that stalls every
+// time is retried rather than spun on.
+static void resubmit_midi_in(int64_t now_ms)
+{
+    if (!s_midi_ready || now_ms < s_midi_in_retry_at_ms) {
+        return;
+    }
+    int pending = 0;
+    for (int i = 0; i < MIDI_IN_BUFFERS; i++) {
+        if (s_midi_in_retry[i] && s_midi_in[i] != NULL) {
+            pending++;
+        }
+    }
+    if (pending == 0) {
+        return;
+    }
+    s_midi_in_retry_at_ms = now_ms + MIDI_IN_RETRY_MS;
+
+    if (s_midi_in_halted) {
+        // Blocks, which is why this lives here and not in the callback.
+        const esp_err_t err = usb_host_endpoint_clear(s_dev_midi,
+                                                      s_midi_in[0]->bEndpointAddress);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "MIDI in endpoint clear failed: %s", esp_err_to_name(err));
+        }
+        s_midi_in_halted = false;
+    }
+
+    for (int i = 0; i < MIDI_IN_BUFFERS; i++) {
+        if (!s_midi_in_retry[i] || s_midi_in[i] == NULL) {
+            continue;
+        }
+        const esp_err_t err = usb_host_transfer_submit(s_midi_in[i]);
+        if (err == ESP_OK) {
+            s_midi_in_retry[i] = false;
+        } else {
+            ESP_LOGW(TAG, "MIDI in retry submit failed: %s", esp_err_to_name(err));
+        }
+    }
+}
+
 static void run_tab5_usb(void *params)
 {
     (void)params;
@@ -1218,6 +1294,7 @@ static void run_tab5_usb(void *params)
         const int64_t now_ms = esp_timer_get_time() / 1000;
 
         retry_enumeration_if_stuck(now_ms);
+        resubmit_midi_in(now_ms);
 
         // Auto-repeat. The HID keyboard keeps reporting the same scan code while
         // held, but decode_keyboard_report() only emits a key on the first one,
