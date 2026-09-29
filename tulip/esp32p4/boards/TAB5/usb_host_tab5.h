@@ -18,6 +18,16 @@ void tab5_usb_host_start(void);
 void send_usb_midi_out(uint8_t *data, uint16_t len);
 
 bool tab5_usb_midi_connected(void);
+
+// MIDI traffic counters, for telling "we never sent it" from "the device took
+// it and did nothing with it". out_last_status is the USB transfer status of
+// the most recent packet (0 is success), or -1 before anything was sent.
+uint32_t tab5_usb_midi_out_packets(void);
+uint32_t tab5_usb_midi_out_errors(void);
+uint32_t tab5_usb_midi_out_timeouts(void);
+uint32_t tab5_usb_midi_in_packets(void);
+uint32_t tab5_usb_midi_in_errors(void);
+int tab5_usb_midi_out_last_status(void);
 bool tab5_usb_keyboard_connected(void);
 bool tab5_usb_mouse_connected(void);
 

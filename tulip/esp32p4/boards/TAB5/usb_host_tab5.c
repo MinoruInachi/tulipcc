@@ -192,6 +192,16 @@ static uint32_t s_close_errors;
 static uint32_t s_free_errors;
 static uint32_t s_detach_count;
 static uint32_t s_unclaimed_count;
+// MIDI traffic, likewise: "the notes did not sound" has to be split into "we
+// never sent them", "the device NAKed them" and "the device heard them and did
+// nothing". The out counters are the only way to tell the first two apart,
+// because a failed bulk transfer still runs the completion callback.
+static uint32_t s_midi_out_packets;
+static uint32_t s_midi_out_errors;
+static uint32_t s_midi_out_timeouts;
+static uint32_t s_midi_in_packets;
+static uint32_t s_midi_in_errors;
+static int s_midi_out_last_status = -1;
 
 // Key auto-repeat, driven from the polling loop.
 static uint16_t s_held_key;
@@ -214,6 +224,7 @@ static void midi_transfer_cb(usb_transfer_t *transfer)
     const bool in_xfer = (transfer->bEndpointAddress & USB_B_ENDPOINT_ADDRESS_EP_DIR_MASK) != 0;
     if (transfer->status != 0 || !in_xfer) {
         if (transfer->status != USB_TRANSFER_STATUS_CANCELED) {
+            s_midi_in_errors++;
             ESP_LOGW(TAG, "MIDI in transfer status %d", transfer->status);
         }
         return;
@@ -224,6 +235,7 @@ static void midi_transfer_cb(usb_transfer_t *transfer)
         if ((p[i] + p[i + 1] + p[i + 2] + p[i + 3]) == 0) {
             break;
         }
+        s_midi_in_packets++;
         // Drop byte 0, the cable/CIN header; the rest is the MIDI message.
         convert_midi_bytes_to_messages((uint8_t *)(p + i + 1), 3, 1);
     }
@@ -238,7 +250,13 @@ static void midi_transfer_cb(usb_transfer_t *transfer)
 
 static void midi_out_transfer_cb(usb_transfer_t *transfer)
 {
-    (void)transfer;
+    // The callback runs whether the transfer succeeded or stalled, so the
+    // status is the only thing that says which -- without it a device that
+    // NAKs everything looks exactly like one that is playing the notes.
+    s_midi_out_last_status = (int)transfer->status;
+    if (transfer->status != USB_TRANSFER_STATUS_COMPLETED) {
+        s_midi_out_errors++;
+    }
     if (s_midi_out_done != NULL) {
         xSemaphoreGive(s_midi_out_done);
     }
@@ -255,10 +273,13 @@ static void midi_out_transfer(void)
     xSemaphoreTake(s_midi_out_done, 0); // drop a stale completion
     const esp_err_t err = usb_host_transfer_submit(s_midi_out);
     if (err != ESP_OK) {
+        s_midi_out_errors++;
         ESP_LOGW(TAG, "MIDI out submit failed: %s", esp_err_to_name(err));
         return;
     }
+    s_midi_out_packets += s_midi_out->num_bytes / 4;
     if (xSemaphoreTake(s_midi_out_done, pdMS_TO_TICKS(MIDI_OUT_TIMEOUT_MS)) != pdTRUE) {
+        s_midi_out_timeouts++;
         ESP_LOGW(TAG, "MIDI out timed out after %d ms", MIDI_OUT_TIMEOUT_MS);
     }
 }
@@ -359,14 +380,25 @@ void send_usb_midi_out(uint8_t *data, uint16_t len)
             continue;
         }
 
+        if (byte >= 0xF8) {
+            // System real time. MIDI lets these arrive *inside* another
+            // message -- between a status byte and its data -- so they get
+            // their own packet and must not touch the one being built, least
+            // of all the running status parked in packet[1].
+            const uint8_t realtime[4] = {0x05, byte, 0x00, 0x00};
+            send_single_midi_out_packet(realtime);
+            continue;
+        }
+
         if (byte & 0x80) { // status byte
             packet[1] = byte;
-            if (byte == 0xF4 || byte == 0xF5 || byte == 0xF6 || byte == 0xF8 ||
-                byte == 0xF9 || byte == 0xFA || byte == 0xFB || byte == 0xFC ||
-                byte == 0xFD || byte == 0xFE || byte == 0xFF) {
+            packet[2] = 0x00;
+            packet[3] = 0x00;
+            slot = 0;
+            if (byte == 0xF4 || byte == 0xF5 || byte == 0xF6) {
                 packet[0] = 0x05; // single-byte system common
                 send_single_midi_out_packet(packet);
-                return;
+                continue;
             }
             if (byte == 0xF0) {
                 s_sysex_out_len = 0;
@@ -393,16 +425,18 @@ void send_usb_midi_out(uint8_t *data, uint16_t len)
                 send_single_midi_out_packet(packet);
             }
         } else if (status == 0xC0 || status == 0xD0) {
-            // One data byte.
+            // One data byte. continue, not return: a buffer may carry more
+            // than one message, and returning here dropped everything after
+            // a program change.
             packet[0] = (status >> 4);
             packet[2] = byte;
+            packet[3] = 0x00;
             send_single_midi_out_packet(packet);
-            return;
         } else if (packet[1] == 0xF3 || packet[1] == 0xF1) {
             packet[0] = 0x02;
             packet[2] = byte;
+            packet[3] = 0x00;
             send_single_midi_out_packet(packet);
-            return;
         }
     }
 }
@@ -1287,6 +1321,12 @@ void tab5_usb_host_start(void)
 }
 
 bool tab5_usb_midi_connected(void) { return s_midi_ready; }
+uint32_t tab5_usb_midi_out_packets(void) { return s_midi_out_packets; }
+uint32_t tab5_usb_midi_out_errors(void) { return s_midi_out_errors; }
+uint32_t tab5_usb_midi_out_timeouts(void) { return s_midi_out_timeouts; }
+uint32_t tab5_usb_midi_in_packets(void) { return s_midi_in_packets; }
+uint32_t tab5_usb_midi_in_errors(void) { return s_midi_in_errors; }
+int tab5_usb_midi_out_last_status(void) { return s_midi_out_last_status; }
 bool tab5_usb_keyboard_connected(void) { return s_kb_ready; }
 bool tab5_usb_mouse_connected(void) { return s_mouse_ready; }
 
