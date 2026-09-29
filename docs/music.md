@@ -414,6 +414,46 @@ midi.add_default_synths()
 
 To send MIDI out, just use `tulip.midi_out(message)`, e.g. `tulip.midi_out([0x90, 0x40, 0x7F])` to send a note-on at velocity 127 and note 64 to the first MIDI channel.   You can, for example, use this to send a MIDI message out every sequencer tick on Tulip.
 
+`run('midi_out')` plays a tour of it -- notes, a chord, program change, modulation, pitch bend, clock and sysex, and finally AMY driving the far end instead of its own voices. Nothing in it makes a sound on Tulip, so you need something listening on the other end to hear it.
+
+A message is a list, a tuple or `bytes`, and one buffer can carry as many messages as you like:
+
+```python
+tulip.midi_out([0x90, 60, 100])                      # note on,  channel 1
+tulip.midi_out([0x80, 60, 0])                        # note off, channel 1
+tulip.midi_out([0xB0, 1, 64])                        # modulation wheel to 64
+tulip.midi_out([0xC0, 5, 0x90, 60, 100])             # program change, then a note on it
+tulip.midi_out([0xE0, 0x00, 0x40])                   # pitch bend centred (14-bit, low byte first)
+tulip.midi_out([0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7]) # sysex, sent whole
+tulip.midi_out([0xF8])                               # a clock tick -- 24 to the quarter note
+```
+
+Where "out" is depends on the board. Tulip CC and AMYboard send over their USB MIDI connection, and AMYboard also out its MIDI out jack. The Tab5 sends to a class-compliant USB MIDI device plugged into its USB-A host port -- with nothing plugged in, `midi_out` succeeds and the bytes go nowhere.
+
+On the Tab5, `tulip.usb_status()` tells you whether anything is listening and whether it is taking what you send:
+
+```python
+s = tulip.usb_status()
+s['midi']               # True once a USB MIDI device has attached
+s['midi_out_packets']   # USB-MIDI packets sent since boot
+s['midi_out_errors']    # ...and how many the device refused
+s['midi_out_timeouts']  # ...or never acknowledged
+s['midi_out_status']    # USB status of the last one; 0 is success
+```
+
+That distinction matters when nothing can be heard: packets climbing with errors, timeouts and status all at 0 means the bytes reached the device and it is the far end that is silent -- a wrong channel, a muted instrument, or a MIDI interface whose DIN out goes somewhere unexpected.
+
+To let an AMY synth play an external instrument rather than its own voices, give it a note output. A synth with no voices costs no oscillators and makes no sound on Tulip, so it is purely an interface:
+
+```python
+amy.send(synth=15, note_output='%d,1' % amy.NOTE_OUTPUT_MIDI_OUT)  # channel 1
+amy.send(synth=15, note=60, vel=0.8)     # goes out as 0x90 60 <vel>
+amy.send(synth=15, note=60, vel=0)
+amy.send(synth=15, note_output='%d' % amy.NOTE_OUTPUT_OFF)
+```
+
+A note output is *in addition* to the synth's own voices, so giving one voices layers the internal sound with the external one.
+
 ## Outputting CV signals to modular and analog synths
 
 Tulip can output CV signals instead of audio signals out a compatible DAC chip that you attach on the side "i2c" port. [You can get a DAC](https://github.com/shorepine/tulipcc/blob/main/docs/getting_started.md#dacs-or-adcs-for-modular-synths) and send any waveform out its port, even synced to a tempo or using sample & hold. I'd first recommend trying out the user-contributed `waves.py` app, which brings all this together using a GUI: 

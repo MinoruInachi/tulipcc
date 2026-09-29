@@ -415,6 +415,46 @@ midi.add_default_synths()
 
 MIDI を送出するには `tulip.midi_out(message)` を使います。たとえば `tulip.midi_out([0x90, 0x40, 0x7F])` は、最初の MIDI チャンネルにノート 64・ベロシティ 127 のノートオンを送ります。これを使えば、たとえば Tulip のシーケンサのティックごとに MIDI メッセージを送出する、といったこともできます。
 
+`run('midi_out')` で一通り試せます。単音、和音、プログラムチェンジ、モジュレーション、ピッチベンド、クロック、sysex、そして最後に AMY が自分の声ではなく外部機器を鳴らす例まで流れます。どれも Tulip 自身は音を出さないので、聴くには受け手の機器が必要です。
+
+メッセージはリスト、タプル、`bytes` のいずれでも渡せます。1 つのバッファに何メッセージ入れても構いません。
+
+```python
+tulip.midi_out([0x90, 60, 100])                      # ノートオン、チャンネル 1
+tulip.midi_out([0x80, 60, 0])                        # ノートオフ、チャンネル 1
+tulip.midi_out([0xB0, 1, 64])                        # モジュレーションホイールを 64 に
+tulip.midi_out([0xC0, 5, 0x90, 60, 100])             # プログラムチェンジと、その音色でのノート
+tulip.midi_out([0xE0, 0x00, 0x40])                   # ピッチベンド中央（14 ビット、下位バイトが先）
+tulip.midi_out([0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7]) # sysex はそのまま丸ごと渡します
+tulip.midi_out([0xF8])                               # クロック 1 ティック（4 分音符あたり 24）
+```
+
+送出先はボードによって違います。Tulip CC と AMYboard は USB MIDI 接続へ、AMYboard はさらに MIDI out ジャックへも送ります。Tab5 は USB-A ホストポートに挿したクラスコンプライアントな USB MIDI 機器へ送ります。何も挿さっていない場合、`midi_out` は成功しますがバイト列の行き先はありません。
+
+Tab5 では `tulip.usb_status()` で、受け手がいるか、そして送ったものを受け取っているかが分かります。
+
+```python
+s = tulip.usb_status()
+s['midi']               # USB MIDI 機器が接続されていれば True
+s['midi_out_packets']   # 起動してから送った USB-MIDI パケット数
+s['midi_out_errors']    # そのうち機器に拒否された数
+s['midi_out_timeouts']  # 応答がなかった数
+s['midi_out_status']    # 直近の USB 転送ステータス。0 が成功
+```
+
+この区別は、音が鳴らないときに効きます。パケット数が増えていてエラー・タイムアウト・ステータスがすべて 0 なら、バイト列は機器まで届いていて、無音の原因は**その先**です。チャンネル違い、音量、あるいは MIDI インターフェースの DIN out が思っていない場所に繋がっている、といったあたりを疑ってください。
+
+AMY のシンセに、自分の声ではなく外部の楽器を鳴らさせるには note output を設定します。ボイスを与えなければオシレータを消費せず Tulip 側では無音なので、純粋な出力インターフェースになります。
+
+```python
+amy.send(synth=15, note_output='%d,1' % amy.NOTE_OUTPUT_MIDI_OUT)  # チャンネル 1
+amy.send(synth=15, note=60, vel=0.8)     # 0x90 60 <vel> として送出されます
+amy.send(synth=15, note=60, vel=0)
+amy.send(synth=15, note_output='%d' % amy.NOTE_OUTPUT_OFF)
+```
+
+note output はシンセ自身のボイスに**加えて**動くので、ボイスを与えれば内部音と外部音を重ねられます。
+
 ## モジュラーやアナログシンセへの CV 信号出力
 
 Tulip は、側面の "i2c" ポートに接続した対応 DAC チップから、音声信号の代わりに CV 信号を出力できます。[DAC を入手すれば](https://github.com/shorepine/tulipcc/blob/main/docs/getting_started.md#dacs-or-adcs-for-modular-synths)、そのポートから任意の波形を送出でき、テンポに同期させたり、サンプル&ホールドを使ったりもできます。まずは、これらを GUI でまとめて扱えるユーザー提供のアプリ `waves.py` を試すのがおすすめです。
