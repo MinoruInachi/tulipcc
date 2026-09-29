@@ -1960,7 +1960,7 @@ static MP_DEFINE_CONST_FUN_OBJ_0(tulip_key_wait_obj, tulip_key_wait);
 // types into the same REPL as a USB one, so which keyboard produced a character
 // is otherwise a guess.
 static mp_obj_t tulip_usb_status(void) {
-    mp_obj_t dict = mp_obj_new_dict(24);
+    mp_obj_t dict = mp_obj_new_dict(27);
     #define TAB5_STATUS(name, value) \
         mp_obj_dict_store(dict, mp_obj_new_str(name, strlen(name)), value)
     TAB5_STATUS("attached", mp_obj_new_int(tab5_usb_attach_count()));
@@ -1974,6 +1974,9 @@ static mp_obj_t tulip_usb_status(void) {
     TAB5_STATUS("midi_out_packets", mp_obj_new_int(tab5_usb_midi_out_packets()));
     TAB5_STATUS("midi_out_errors", mp_obj_new_int(tab5_usb_midi_out_errors()));
     TAB5_STATUS("midi_out_timeouts", mp_obj_new_int(tab5_usb_midi_out_timeouts()));
+    TAB5_STATUS("midi_out_completions", mp_obj_new_int(tab5_usb_midi_out_completions()));
+    TAB5_STATUS("midi_out_dropped", mp_obj_new_int(tab5_usb_midi_out_dropped()));
+    TAB5_STATUS("midi_out_mps", mp_obj_new_int(tab5_usb_midi_out_mps()));
     TAB5_STATUS("midi_out_status", mp_obj_new_int(tab5_usb_midi_out_last_status()));
     TAB5_STATUS("midi_in_packets", mp_obj_new_int(tab5_usb_midi_in_packets()));
     TAB5_STATUS("midi_in_errors", mp_obj_new_int(tab5_usb_midi_in_errors()));

@@ -83,6 +83,7 @@ static const char *TAG = "TAB5-USB";
 
 #define MIDI_IN_BUFFERS 8
 #define MIDI_OUT_TIMEOUT_MS 100
+#define MIDI_OUT_LOCK_MS 50
 
 // How long the connector stays unpowered at startup before the host switches it
 // on. See the comment in tab5_usb_host_start() for where the number comes from.
@@ -145,6 +146,13 @@ static bool s_mouse_claimed, s_mouse_ready;
 static usb_transfer_t *s_midi_in[MIDI_IN_BUFFERS];
 static usb_transfer_t *s_midi_out;
 static SemaphoreHandle_t s_midi_out_done;
+// send_usb_midi_out() is reached from two tasks -- the MicroPython thread
+// through tulip.midi_out(), and AMY's render task through its external MIDI
+// output hook -- and they share one transfer object and one completion
+// semaphore. Without this they interleave: one submits while the other is
+// waiting, and both come back as timeouts.
+static SemaphoreHandle_t s_midi_out_lock;
+static uint32_t s_midi_out_dropped;
 
 static usb_transfer_t *s_kb_in;
 static uint16_t s_kb_bytes = KEYBOARD_BYTES;
@@ -202,6 +210,13 @@ static uint32_t s_midi_out_timeouts;
 static uint32_t s_midi_in_packets;
 static uint32_t s_midi_in_errors;
 static int s_midi_out_last_status = -1;
+// True while the host stack still owns the out buffer, so it must not be refilled.
+static volatile bool s_midi_out_inflight;
+static uint32_t s_midi_out_completions;
+// Set when a transfer never came back, so the service loop can unstick the pipe.
+#define MIDI_OUT_RECOVER_MS 250
+static volatile bool s_midi_out_stuck;
+static int64_t s_midi_out_recover_at_ms;
 
 // Key auto-repeat, driven from the polling loop.
 static uint16_t s_held_key;
@@ -286,6 +301,9 @@ static void midi_out_transfer_cb(usb_transfer_t *transfer)
     if (transfer->status != USB_TRANSFER_STATUS_COMPLETED) {
         s_midi_out_errors++;
     }
+    // The host stack has handed the buffer back, so it can be filled again.
+    s_midi_out_completions++;
+    s_midi_out_inflight = false;
     if (s_midi_out_done != NULL) {
         xSemaphoreGive(s_midi_out_done);
     }
@@ -299,16 +317,34 @@ static void midi_out_transfer(void)
     if (!s_midi_ready || s_midi_out == NULL || s_midi_out_done == NULL) {
         return;
     }
+    if (s_midi_out_inflight) {
+        // The last transfer timed out and the host stack still owns this
+        // buffer. Submitting it again in that state fails -- and went on
+        // failing for ever, because nothing ever waited for the old one to
+        // land: a single timeout took MIDI output out for the rest of the
+        // session. Give it another window instead.
+        if (xSemaphoreTake(s_midi_out_done, pdMS_TO_TICKS(MIDI_OUT_TIMEOUT_MS)) != pdTRUE) {
+            s_midi_out_timeouts++;
+            s_midi_out_stuck = true;
+            return; // dropped; the service loop will get the pipe back
+        }
+    }
+
     xSemaphoreTake(s_midi_out_done, 0); // drop a stale completion
+    s_midi_out_inflight = true;
     const esp_err_t err = usb_host_transfer_submit(s_midi_out);
     if (err != ESP_OK) {
+        s_midi_out_inflight = false;
         s_midi_out_errors++;
         ESP_LOGW(TAG, "MIDI out submit failed: %s", esp_err_to_name(err));
         return;
     }
     s_midi_out_packets += s_midi_out->num_bytes / 4;
     if (xSemaphoreTake(s_midi_out_done, pdMS_TO_TICKS(MIDI_OUT_TIMEOUT_MS)) != pdTRUE) {
+        // Leave s_midi_out_inflight set: the transfer is still queued, and the
+        // next call has to wait for it rather than trample it.
         s_midi_out_timeouts++;
+        s_midi_out_stuck = true;
         ESP_LOGW(TAG, "MIDI out timed out after %d ms", MIDI_OUT_TIMEOUT_MS);
     }
 }
@@ -329,57 +365,47 @@ static uint16_t s_sysex_out_len;
 static uint8_t s_sysex_out_active;
 
 // Sysex goes out as CIN 0x4 continuation packets with a 0x5/0x6/0x7 terminator
-// carrying the 1/2/3 trailing bytes, batched 16 packets (64 bytes) at a time.
+// carrying the 1/2/3 trailing bytes.
+//
+// One packet per transfer, not the 16-packet (64 byte) batches this used to
+// send. Batching wedged the out endpoint on a real interface: measured against
+// an M-Audio-class USB MIDI box, a transfer of exactly 8 bytes -- which is what
+// any 2-packet sysex produced -- was accepted and then nothing on that endpoint
+// ever completed again, while 4- and 12-byte transfers were fine. The cause is
+// on the device's side of the wire; 4 bytes at a time is the shape every other
+// message already uses, and it also drops this function's assumption that the
+// transfer buffer is at least 64 bytes, which is only true while the endpoint's
+// wMaxPacketSize is.
 static void usb_emit_sysex(void)
 {
     if (s_sysex_out_len == 0 || s_midi_out == NULL) {
         return;
     }
-    uint8_t data[64] = {0};
-    uint8_t packet_count = 0;
+    uint8_t packet[4];
     uint16_t i = 0;
 
-    while (i != s_sysex_out_len) {
-        if (s_sysex_out_len - i > 3) {
-            data[(packet_count * 4) + 0] = 0x04;
-            data[(packet_count * 4) + 1] = s_sysex_out[i++];
-            data[(packet_count * 4) + 2] = s_sysex_out[i++];
-            data[(packet_count * 4) + 3] = s_sysex_out[i++];
+    // One event per transfer, the same as every other message. The spec allows
+    // batching, and this used to pack 16 events into a 64-byte transfer, but a
+    // transfer of exactly 8 bytes -- two events -- is never completed by the
+    // interface here, and every transfer after it then times out too. Measured
+    // by sending sysex of each length with the port re-powered in between:
+    // 4 bytes and 12 bytes are fine, 8 bytes wedges it every time. Four-byte
+    // transfers have carried tens of thousands of packets without one.
+    while (i < s_sysex_out_len) {
+        const uint16_t left = s_sysex_out_len - i;
+        packet[1] = packet[2] = packet[3] = 0;
+        if (left > 3) {
+            packet[0] = 0x04;
+            packet[1] = s_sysex_out[i++];
+            packet[2] = s_sysex_out[i++];
+            packet[3] = s_sysex_out[i++];
         } else {
-            switch (s_sysex_out_len - i) {
-                case 1:
-                    data[(packet_count * 4) + 0] = 0x05;
-                    data[(packet_count * 4) + 1] = s_sysex_out[i++];
-                    break;
-                case 2:
-                    data[(packet_count * 4) + 0] = 0x06;
-                    data[(packet_count * 4) + 1] = s_sysex_out[i++];
-                    data[(packet_count * 4) + 2] = s_sysex_out[i++];
-                    break;
-                case 3:
-                    data[(packet_count * 4) + 0] = 0x07;
-                    data[(packet_count * 4) + 1] = s_sysex_out[i++];
-                    data[(packet_count * 4) + 2] = s_sysex_out[i++];
-                    data[(packet_count * 4) + 3] = s_sysex_out[i++];
-                    break;
-                default:
-                    break;
+            packet[0] = 0x04 + left;   // 0x5, 0x6 or 0x7: sysex ends with 1-3 bytes
+            for (uint16_t b = 0; b < left; b++) {
+                packet[1 + b] = s_sysex_out[i++];
             }
         }
-        packet_count++;
-        if (packet_count == 16) {
-            memcpy(s_midi_out->data_buffer, data, 64);
-            memset(data, 0, sizeof(data));
-            s_midi_out->num_bytes = 64;
-            midi_out_transfer();
-            packet_count = 0;
-        }
-    }
-
-    if (packet_count > 0) {
-        memcpy(s_midi_out->data_buffer, data, packet_count * 4);
-        s_midi_out->num_bytes = packet_count * 4;
-        midi_out_transfer();
+        send_single_midi_out_packet(packet);
     }
 }
 
@@ -388,6 +414,14 @@ static void usb_emit_sysex(void)
 void send_usb_midi_out(uint8_t *data, uint16_t len)
 {
     if (!s_midi_ready || !s_midi_has_out) {
+        return;
+    }
+    // A short wait, not an indefinite one: this runs on AMY's render task as
+    // well, and blocking that for the length of someone else's sysex would
+    // cost audio. A message that cannot get the lock is dropped and counted.
+    if (s_midi_out_lock != NULL &&
+        xSemaphoreTake(s_midi_out_lock, pdMS_TO_TICKS(MIDI_OUT_LOCK_MS)) != pdTRUE) {
+        s_midi_out_dropped++;
         return;
     }
 
@@ -467,6 +501,9 @@ void send_usb_midi_out(uint8_t *data, uint16_t len)
             packet[3] = 0x00;
             send_single_midi_out_packet(packet);
         }
+    }
+    if (s_midi_out_lock != NULL) {
+        xSemaphoreGive(s_midi_out_lock);
     }
 }
 
@@ -1000,6 +1037,8 @@ static void release_midi(void)
         s_midi_in_retry[i] = false;
     }
     s_midi_in_halted = false;
+    s_midi_out_inflight = false;
+    s_midi_out_stuck = false;
 
     for (int i = 0; i < MIDI_IN_BUFFERS; i++) {
         free_transfer(&s_midi_in[i]);
@@ -1279,6 +1318,37 @@ static void resubmit_midi_in(int64_t now_ms)
     }
 }
 
+// Get the out pipe back after a transfer that never completed. Halt, flush,
+// clear is the documented recovery: the flush retires the stuck transfer as
+// CANCELED, and its callback is what releases the buffer. Without this a
+// device that swallows one transfer takes MIDI output down until it is
+// unplugged.
+static void recover_midi_out(int64_t now_ms)
+{
+    if (!s_midi_out_stuck || !s_midi_ready || s_midi_out == NULL) {
+        return;
+    }
+    if (now_ms < s_midi_out_recover_at_ms) {
+        return;
+    }
+    s_midi_out_recover_at_ms = now_ms + MIDI_OUT_RECOVER_MS;
+    s_midi_out_stuck = false;
+
+    const uint8_t ep = s_midi_out->bEndpointAddress;
+    esp_err_t err = usb_host_endpoint_halt(s_dev_midi, ep);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "MIDI out halt: %s", esp_err_to_name(err));
+    }
+    err = usb_host_endpoint_flush(s_dev_midi, ep);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "MIDI out flush: %s", esp_err_to_name(err));
+    }
+    err = usb_host_endpoint_clear(s_dev_midi, ep);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "MIDI out clear: %s", esp_err_to_name(err));
+    }
+}
+
 static void run_tab5_usb(void *params)
 {
     (void)params;
@@ -1295,6 +1365,7 @@ static void run_tab5_usb(void *params)
 
         retry_enumeration_if_stuck(now_ms);
         resubmit_midi_in(now_ms);
+        recover_midi_out(now_ms);
 
         // Auto-repeat. The HID keyboard keeps reporting the same scan code while
         // held, but decode_keyboard_report() only emits a key on the first one,
@@ -1336,6 +1407,13 @@ void tab5_usb_host_start(void)
         s_midi_out_done = xSemaphoreCreateBinary();
         if (s_midi_out_done == NULL) {
             ESP_LOGE(TAG, "Failed to create MIDI out semaphore");
+            return;
+        }
+    }
+    if (s_midi_out_lock == NULL) {
+        s_midi_out_lock = xSemaphoreCreateMutex();
+        if (s_midi_out_lock == NULL) {
+            ESP_LOGE(TAG, "Failed to create MIDI out lock");
             return;
         }
     }
@@ -1401,6 +1479,9 @@ bool tab5_usb_midi_connected(void) { return s_midi_ready; }
 uint32_t tab5_usb_midi_out_packets(void) { return s_midi_out_packets; }
 uint32_t tab5_usb_midi_out_errors(void) { return s_midi_out_errors; }
 uint32_t tab5_usb_midi_out_timeouts(void) { return s_midi_out_timeouts; }
+uint32_t tab5_usb_midi_out_completions(void) { return s_midi_out_completions; }
+uint32_t tab5_usb_midi_out_dropped(void) { return s_midi_out_dropped; }
+uint32_t tab5_usb_midi_out_mps(void) { return s_midi_out ? s_midi_out->data_buffer_size : 0; }
 uint32_t tab5_usb_midi_in_packets(void) { return s_midi_in_packets; }
 uint32_t tab5_usb_midi_in_errors(void) { return s_midi_in_errors; }
 int tab5_usb_midi_out_last_status(void) { return s_midi_out_last_status; }
