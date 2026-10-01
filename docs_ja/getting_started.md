@@ -58,11 +58,16 @@ Tulip は省電力デバイスで、バッテリー駆動によるモバイル�
 
 **極性が正しいことを必ず確認してください。** バッテリーの赤いケーブルが、Tulip ボード上で + 記号が付いている側のコネクタに来るようにします。
 
-### 追加の Alles を 1 台、あるいは 5 台
+### 追加の Alles を 1 台、あるいは 5 台（現在は利用できません）
 
 <img src="https://raw.githubusercontent.com/shorepine/tulipcc/main/docs/pics/nicoboard-alles.jpg" width=400>
 
-Tulip は [Alles](http://github.com/shorepine/alles) を追加スピーカーとして使えます。AMY シンセサイザーを使って何十台ものスピーカーを無線で制御でき、Tulip 1 台だけで驚くようなマルチチャンネルのオーディオ構成が組めます。[Alles の PCB は仲間の Blinkinlabs から入手できます。](https://shop.blinkinlabs.com/products/alles-pcb)
+**メッシュモードは現在利用できません。** かつて Tulip は
+[Alles](http://github.com/shorepine/alles) を追加スピーカーとして使えました。AMY シンセサイザーを
+動かすスピーカーを何十台も無線で制御し、Tulip 1 台だけで驚くようなマルチチャンネルのオーディオ構成が
+組める仕組みです。これを運んでいた送信層は、Tulip が現在の AMY API へ移行した際に削除され、
+置き換えもされていません。詳しくは[音楽 / サウンド](tulip_api.md#音楽--サウンド)を参照してください。
+[Alles の PCB は今も仲間の Blinkinlabs から入手できます。](https://shop.blinkinlabs.com/products/alles-pcb)
 
 
 ## Tulip を使い始める

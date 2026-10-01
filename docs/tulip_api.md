@@ -708,13 +708,18 @@ tulip.defer(hello, 123, 1500) # will be called 1500ms later
 
 Tulip comes with the AMY synthesizer, a very full featured 250-oscillator synth that supports FM, PCM, subtractive and additive synthesis, partial synthesis, filters, and much more. See the [AMY documentation](https://github.com/shorepine/amy/blob/main/README.md) for more information, Tulip's version of AMY comes with stereo sound, chorus and reverb. It includes a "small" version of the PCM patch set (29 patches) alongside all the Juno-6 and DX7 patches. It also has support for loading WAVE files in Tulip as samples. 
 
-Once connected to Wi-Fi, Tulip can also control an [Alles mesh.](https://github.com/shorepine/alles/blob/main/README.md) Alles is a wrapper around AMY that lets you control the synthesizer over Wi-Fi to remote speakers, or other computers or Tulips. Connect any number of Alles speakers to the wifi to have instant surround sound! See the Alles [getting started tutorial](https://github.com/shorepine/alles/blob/main/getting-started.md) for more information and for more music examples.
+**Mesh mode is not currently available.** Tulip used to drive an
+[Alles](https://github.com/shorepine/alles/blob/main/README.md) mesh over Wi-Fi -- any
+number of remote speakers running AMY, all controlled from one Tulip -- through an
+`alles` module. The multicast transport that carried it lived in Tulip's own audio layer,
+and that layer was removed when Tulip moved onto AMY's current API; AMY itself has no
+mesh transport, so there is nothing left for the messages to travel over. The `alles`
+module is gone, `alles.mesh()` and `alles.map()` no longer exist, and while AMY still
+accepts a `client=` keyword it has no way to reach another machine.
 
 Tulip can also route AMY signals to CV outputs connected over Tulip CC's I2C port. You will need one or two [Mabee DACs](https://www.makerfabs.com/mabee-dac-gp8413.html) or similar GP8413 setup. This lets you send accurate LFOs over CV to modular or other older analog synthesizers.
 
 **See the [music tutorial](music.md) for a LOT more information on music in Tulip.**
-
-![With Alles](https://raw.githubusercontent.com/shorepine/tulipcc/main/docs/pics/nicoboard-alles.jpg)
 
 
 ### synth
@@ -774,17 +779,6 @@ amy.send(synth=1, patch=129, num_voices=1) # set up a DX7 patch on synth 1
 amy.send(synth=1, note=45, vel=1) # plays a tone
 amy.send(synth=1, pan=0) # set to the left channel
 amy.send(synth=1, pan=1) # set to the right channel
-
-# start mesh mode (control multiple speakers over wifi)
-# once mesh mode is set, you can't go back to local mode until you restart Tulip. 
-alles.mesh() # after turning on wifi. tulip itself will stop playing AMY messages.
-alles.mesh(local_ip='192.168.50.4') # useful for setting a network on Tulip Desktop
-
-alles.map() # returns booted Alles synths on the mesh
-
-amy.send(synth=1, patch=101, num_voices=1) # load a patch on every Alles speaker in the mesh
-amy.send(synth=1, note=50, vel=1) # all Alles speakers in a mesh will respond
-amy.send(synth=1, note=50, vel=1, client=2) # just a certain client
 ```
 
 **`amy.reset()` and the `amy.examples` demos clear every synth.** `amy.reset()` runs

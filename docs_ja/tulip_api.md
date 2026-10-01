@@ -695,13 +695,18 @@ tulip.defer(hello, 123, 1500) # 1500ms 後に呼ばれます
 
 Tulip には AMY シンセサイザーが付属しています。FM、PCM、減算合成、加算合成、部分音合成、フィルタなどをサポートする、非常に多機能な 250 オシレータのシンセです。詳しくは [AMY のドキュメント](https://github.com/shorepine/amy/blob/main/README.md)を参照してください。Tulip 版の AMY はステレオサウンド、コーラス、リバーブを備えています。Juno-6 と DX7 の全パッチに加えて、PCM パッチセットの「小さい」版（29 パッチ）を含みます。Tulip 上で WAVE ファイルをサンプルとして読み込むこともできます。
 
-Wi-Fi に接続すれば、Tulip は [Alles のメッシュ](https://github.com/shorepine/alles/blob/main/README.md)も制御できます。Alles は AMY のラッパーで、Wi-Fi 経由でリモートのスピーカーや他のコンピュータ、他の Tulip 上のシンセを制御できます。何台でも Alles スピーカーを wifi に接続すれば、すぐにサラウンドサウンドになります。詳細と音楽のサンプルは Alles の[使い始めのチュートリアル](https://github.com/shorepine/alles/blob/main/getting-started.md)を参照してください。
+**メッシュモードは現在利用できません。** かつて Tulip は `alles` モジュールを通じて
+[Alles](https://github.com/shorepine/alles/blob/main/README.md) のメッシュを Wi-Fi 経由で
+制御できました。AMY を動かすリモートスピーカーを何台でも、Tulip 1 台から鳴らせる仕組みです。
+これを運んでいたマルチキャストの送信層は Tulip 自身のオーディオ層にあり、Tulip が現在の AMY API へ
+移行した際に削除されました。AMY 本体はメッシュ用のトランスポートを持っていないため、
+メッセージの通り道が残っていません。`alles` モジュールは削除済みで、`alles.mesh()` と
+`alles.map()` は存在しません。`client=` キーワードは AMY が受け付けますが、他のマシンへ届く
+経路がありません。
 
 Tulip は、Tulip CC の I2C ポートに接続した CV 出力に AMY の信号をルーティングすることもできます。[Mabee DAC](https://www.makerfabs.com/mabee-dac-gp8413.html) 1〜2 台、あるいは同等の GP8413 構成が必要です。これにより、正確な LFO を CV 経由でモジュラーや古いアナログシンセに送れます。
 
 **Tulip での音楽について、さらに多くの情報は[音楽チュートリアル](music.md)を参照してください。**
-
-![With Alles](https://raw.githubusercontent.com/shorepine/tulipcc/main/docs/pics/nicoboard-alles.jpg)
 
 
 ### synth
@@ -761,17 +766,6 @@ amy.send(synth=1, patch=129, num_voices=1) # シンセ 1 に DX7 のパッチを
 amy.send(synth=1, note=45, vel=1) # 音を鳴らします
 amy.send(synth=1, pan=0) # 左チャンネルに設定
 amy.send(synth=1, pan=1) # 右チャンネルに設定
-
-# メッシュモードを開始（wifi 経由で複数のスピーカーを制御）
-# 一度メッシュモードにすると、Tulip を再起動するまでローカルモードには戻せません。
-alles.mesh() # wifi をオンにした後で実行。tulip 自身は AMY メッセージの再生を停止します。
-alles.mesh(local_ip='192.168.50.4') # Tulip Desktop でネットワークを指定するときに便利
-
-alles.map() # メッシュ上で起動している Alles シンセを返します
-
-amy.send(synth=1, patch=101, num_voices=1) # メッシュ内のすべての Alles スピーカーにパッチを読み込む
-amy.send(synth=1, note=50, vel=1) # メッシュ内のすべての Alles スピーカーが反応します
-amy.send(synth=1, note=50, vel=1, client=2) # 特定のクライアントだけ
 ```
 
 **`amy.reset()` と `amy.examples` のデモはシンセを全消去します。** `amy.reset()` は AMY の
