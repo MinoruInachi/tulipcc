@@ -57,6 +57,13 @@ bool my_get_glyph_dsc_cb(const lv_font_t * font, lv_font_glyph_dsc_t * dsc_out, 
     dsc_out->ofs_y = 0;
     dsc_out->format= LV_FONT_GLYPH_FORMAT_A1;
     dsc_out->gid.index = unicode_letter; 
+    // Every other lv_font backend sets this, and lv_font_get_glyph_dsc() never
+    // clears it -- the lv_font_glyph_dsc_t at each call site is uninitialized
+    // stack. Leaving it alone was invisible while these faces had no fallback
+    // (LVGL re-asked the same font and got the same answer), but with one set
+    // below a stale `true` would push a perfectly good ASCII glyph onto the
+    // fallback font.
+    dsc_out->is_placeholder = false;
     return true;                /*true: glyph found; false: glyph was not found*/
 }
 
@@ -64,6 +71,45 @@ const void * my_get_glyph_bitmap_cb(lv_font_glyph_dsc_t * g_dsc, lv_draw_buf_t *
 {
     memcpy(draw_buf->data, databuf, g_dsc->box_w*g_dsc->box_h);
     return draw_buf;
+}
+
+// LVGL draws its own symbols -- a dropdown's LV_SYMBOL_DOWN, a checkbox tick, a
+// message box's close -- from the FontAwesome private use area, and every u8g2
+// face in tulip_fonts[] is a `_tr`: U+0020..U+007E and nothing else. With no
+// fallback LVGL falls through to LV_USE_FONT_PLACEHOLDER and draws a hollow box,
+// which is the tofu that showed up where the Drums dropdowns' "v" should be.
+// The montserrat faces carry those codepoints and are all generated at --bpp 1
+// in this tree, so they stay crisp through the RGB565 -> palette step the same
+// way these bitmap faces do.
+//
+// Pick the largest enabled montserrat that still fits the face's own bbox
+// height, so the symbol never overflows the line box it is drawn into (and the
+// smallest available one for a face shorter than any of them). Enabling another
+// LV_FONT_MONTSERRAT_* size in lv_conf.h means adding it here too.
+static const lv_font_t * symbol_fallback_for_height(uint8_t height) {
+    const lv_font_t * f = NULL;
+#if LV_FONT_MONTSERRAT_8
+    if(f == NULL || height >= 8)  f = &lv_font_montserrat_8;
+#endif
+#if LV_FONT_MONTSERRAT_12
+    if(f == NULL || height >= 12) f = &lv_font_montserrat_12;
+#endif
+#if LV_FONT_MONTSERRAT_14
+    if(f == NULL || height >= 14) f = &lv_font_montserrat_14;
+#endif
+#if LV_FONT_MONTSERRAT_16
+    if(f == NULL || height >= 16) f = &lv_font_montserrat_16;
+#endif
+#if LV_FONT_MONTSERRAT_18
+    if(f == NULL || height >= 18) f = &lv_font_montserrat_18;
+#endif
+#if LV_FONT_MONTSERRAT_24
+    if(f == NULL || height >= 24) f = &lv_font_montserrat_24;
+#endif
+#if LV_FONT_MONTSERRAT_36
+    if(f == NULL || height >= 36) f = &lv_font_montserrat_36;
+#endif
+    return f;
 }
 
 void get_lvgl_font_from_tulip(uint32_t font_no, lv_font_t * outfont) {
@@ -81,7 +127,10 @@ void get_lvgl_font_from_tulip(uint32_t font_no, lv_font_t * outfont) {
     outfont->get_glyph_bitmap = my_get_glyph_bitmap_cb;  /*Set a callback to get bitmap of a glyph*/
     outfont->line_height = ufont.font_info.max_char_width;                       /*The real line height where any text fits*/
     outfont->base_line = 0;//abs(ufont.font_info.y_offset); // base_line;                      /*Base line measured from the top of line_height*/
-    //outfont->fallback = &lv_font_montserrat_12;
+    // max_char_height, not the max_char_width line_height is (wrongly, but
+    // load-bearingly -- every app's layout is measured against it) built from:
+    // byte 10 of the u8g2 header is the real bbox height.
+    outfont->fallback = symbol_fallback_for_height(ufont.font_info.max_char_height);
     void *ptr = malloc(sizeof(uint32_t));
     *((uint32_t*)ptr) = font_no;
     outfont->user_data = ptr;
