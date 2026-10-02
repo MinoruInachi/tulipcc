@@ -90,6 +90,7 @@ We ship a couple of game-like examples, check them out:
  * [`parallax`](https://github.com/shorepine/tulipcc/blob/main/tulip/fs/tulip/ex/parallax.py)
  * [`starfall`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/starfall.py) - a late-70s style fixed shooter, drawn entirely on the BG plane
  * [`geoglyph`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/geoglyph.py) - an early-80s style vertical scroller with separate air and ground targets, on a hardware-scrolled BG plane
+ * [`solitaire`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/solitaire.py) - Klondike patience; drag the cards with a finger, or play it in taps, and the board sizes itself to the screen
 
 The Tulip World BBS supports uploading and downloading packages as tar files: just `world.upload('package', username)` or `world.download('package')`. 
 
