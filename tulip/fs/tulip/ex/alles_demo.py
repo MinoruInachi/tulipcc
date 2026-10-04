@@ -332,8 +332,8 @@ def _begin(gen):
     _step = 0
     # Step 0 is stamped for a moment far enough ahead that its datagram is
     # already out when it comes due.
-    # In amy.millis(), because that is the clock the stamps are read in.
-    _t0 = amy.millis() + LOOKAHEAD_MS * 2
+    # In alles.host_ms(), because that is the clock the stamps are read in.
+    _t0 = alles.host_ms() + LOOKAHEAD_MS * 2
     print("alles_demo: %d bars, ~%d seconds. alles_demo.stop() to cut it short."
           % (LAST_BAR + 1, int((_last_step + 1) * STEP_MS / 1000)))
     _tick(gen)
@@ -344,7 +344,7 @@ def _tick(gen):
     if gen != _gen:
         return
     # Two clocks, deliberately: the stamp the nodes schedule against is in
-    # amy.millis(), while our own callback has to be timed in the clock
+    # alles.host_ms(), while our own callback has to be timed in the clock
     # tulip.defer() counts in. They tick at the same rate, so one offset
     # carries between them.
     due = _t0 + int(_step * STEP_MS)
@@ -359,7 +359,7 @@ def _tick(gen):
     # Timed from the start rather than from the previous callback, so defer's
     # jitter cannot accumulate; and sent LOOKAHEAD_MS early, since the stamp
     # decides when it sounds, not the arrival.
-    ahead = (_t0 + int(_step * STEP_MS) - LOOKAHEAD_MS) - amy.millis()
+    ahead = (_t0 + int(_step * STEP_MS) - LOOKAHEAD_MS) - alles.host_ms()
     tulip.defer(_tick, gen, max(1, ahead))
 
 

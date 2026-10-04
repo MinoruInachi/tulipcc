@@ -64,6 +64,36 @@ _local_ip = None
 _sync_index = 0
 
 
+_host_clock = None
+
+
+def host_ms():
+    """The clock the `t` stamps are in, resolved once and then called direct.
+
+    Which clock it is matters less than every sender agreeing on one, because
+    a node sets its offset from the first `t` it sees and keeps it. Feed it
+    stamps from two epochs and it schedules events at nonsense times.
+
+    Not amy.millis() per message, even though that is what the reference
+    stamps with: its implementation tries `import datetime` and swallows the
+    ImportError every single call, and on MicroPython a failing import
+    searches the whole path. Measured on a Tab5, 83.8 ms a call against
+    0.0091 ms for amy.ticks_ms() -- 9,000 times over, and enough to run this
+    piece 43% slow. So resolve the same choice amy.millis() would make, once:
+    ms since midnight where datetime exists (a desktop, where it is also
+    cheap, and where it survives a restart), ms since boot where it does not,
+    which is exactly what amy.millis() falls back to.
+    """
+    global _host_clock
+    if _host_clock is None:
+        try:
+            import datetime           # noqa: F401  -- probing, not using
+            _host_clock = amy.millis
+        except ImportError:
+            _host_clock = amy.ticks_ms
+    return _host_clock()
+
+
 def _pause(ms):
     if hasattr(_time, "sleep_ms"):
         _time.sleep_ms(ms)
@@ -108,8 +138,16 @@ def _outbound_ip():
     return ip
 
 
+_group = None
+
+
 def _group_addr():
-    return _socket.getaddrinfo(GROUP, PORT)[0][-1]
+    # Resolved once. Only 0.24 ms a call on a Tab5, but it is on the path of
+    # every message and the answer never changes.
+    global _group
+    if _group is None:
+        _group = _socket.getaddrinfo(GROUP, PORT)[0][-1]
+    return _group
 
 
 def _get_rx():
@@ -174,18 +212,12 @@ def _stamp(m, at_ms=None):
     Sequencer messages (`H`) are scheduled by tick instead and must not be
     stamped -- the reference alles.py makes the same exception.
 
-    The clock is amy.millis(), the same one the reference stamps with: ms
-    since boot on Tulip, ms since midnight on a desktop. Which clock it is
-    matters less than everything agreeing on one, because a node sets its
-    offset from the first `t` it sees and keeps it. Feed it stamps from two
-    different epochs and it schedules events at nonsense times -- far enough
-    out and they never fire, and a node can be left sounding with nothing
-    listening. amy.ticks_ms() is not a substitute: it reads 0 on a CPython
-    host that has not started AMY, which is exactly how this went wrong.
+    The clock is host_ms() -- see there for which one it is and why it is
+    not amy.millis() called per message.
     """
     if m.startswith("H"):
         return m
-    return "t%d" % (amy.millis() if at_ms is None else at_ms) + m
+    return "t%d" % (host_ms() if at_ms is None else at_ms) + m
 
 
 def _datagram(m, dest):
@@ -301,7 +333,7 @@ def send(retries=1, to=None, at_ms=None, **kwargs):
     reaches every node rather than one per node.
 
     at_ms is the host time the nodes should play this at, in the same clock as
-    amy.millis(). Leave it out for "as soon as you can"; give it a time a
+    host_ms(). Leave it out for "as soon as you can"; give it a time a
     little ahead to have several nodes sound together. Either way the node
     adds ALLES_LATENCY_MS on top.
     """
