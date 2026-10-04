@@ -709,14 +709,57 @@ tulip.defer(hello, 123, 1500) # will be called 1500ms later
 
 Tulip comes with the AMY synthesizer, a very full featured 250-oscillator synth that supports FM, PCM, subtractive and additive synthesis, partial synthesis, filters, and much more. See the [AMY documentation](https://github.com/shorepine/amy/blob/main/README.md) for more information, Tulip's version of AMY comes with stereo sound, chorus and reverb. It includes a "small" version of the PCM patch set (29 patches) alongside all the Juno-6 and DX7 patches. It also has support for loading WAVE files in Tulip as samples. 
 
-**Mesh mode is not currently available.** Tulip used to drive an
-[Alles](https://github.com/shorepine/alles/blob/main/README.md) mesh over Wi-Fi -- any
-number of remote speakers running AMY, all controlled from one Tulip -- through an
-`alles` module. The multicast transport that carried it lived in Tulip's own audio layer,
-and that layer was removed when Tulip moved onto AMY's current API; AMY itself has no
-mesh transport, so there is nothing left for the messages to travel over. The `alles`
-module is gone, `alles.mesh()` and `alles.map()` no longer exist, and while AMY still
-accepts a `client=` keyword it has no way to reach another machine.
+Tulip can drive an [Alles](https://github.com/shorepine/alles/blob/main/README.md)
+mesh over Wi-Fi -- any number of remote speakers running AMY, all controlled from one
+Tulip -- through the `alles` module. `alles.mesh()` redirects AMY's output to the mesh's
+multicast group, so everything that already makes sound here plays there instead: a
+sketch calling `amy.send()`, `synth.py`, the sequencer. Pass `local=False` to silence
+Tulip's own speaker and make it a pure controller -- worth doing for anything busy, since
+rendering here competes with the scheduler that is sending to the mesh. Measured on a
+Tab5 playing `alles_demo`: driving the speakers alone costs 0.02 render load and keeps
+exact time, while playing the same piece locally as well ran it a fifth slow, and at full
+polyphony it overran the render block and dragged to half speed.
+
+```python
+import alles
+alles.mesh()                  # also keeps playing locally; local=False for mesh only
+alles.map()                   # [(client, ip, clock_ms), ...] -- who is out there
+alles.send(client=1, osc=0, wave=amy.SINE, freq=440, vel=1)   # one node
+alles.send(osc=0, vel=0)      # no client= -> everyone
+alles.local(False)            # stop playing here, keep driving the mesh
+alles.sync()                  # {ip: {client, clock_ms, offset_ms, rtt_ms}}
+alles.off()                   # back to normal
+```
+
+There is a piece written for two of them in
+[`alles_demo`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/alles_demo.py)
+-- put the speakers apart, `import alles_demo`, and the melody comes off one wall and
+echoes back from the other. It addresses each speaker by client number and stamps
+every note with the moment it should sound, so the two stay together.
+
+A client number is a label the nodes negotiate between each other, so it is not a stable
+identity -- two nodes fresh out of a reboot will both answer as client 0 until they
+settle, which is why `alles.sync()` is keyed by address. Addressing is the node's own client
+number, the one it reports in `alles.map()`: `client=` rides the wire as `g`, and AMY's
+own parser does not read it at all -- the node firmware does, and the Alles firmware
+does. A `client=` above 255 was historically a group: a node joined if
+`client_id % (client - 255) == 0`. `to=` is there for firmware that does not read
+`client=`; it sends unicast to one address instead, at the cost of a datagram per node.
+
+The nodes play in step, and the module does that for you: every message carries a `t`
+prefix naming the host time it should sound at, and each node keeps an offset between
+that clock and its own and schedules against ours. AMY itself dropped the absolute time
+field (`parse.c` still carries the line "t no longer used (was time=)"), but the Alles
+firmware still reads `t`, which is what makes it work. Pass `at_ms=` to `alles.send()` to
+name the moment; leave it out for "as soon as you can".
+
+Everything a node is told to play happens `alles.ALLES_LATENCY_MS` (1 s) after the stamp.
+That is the budget the network has to deliver inside, so a packet a few milliseconds late
+still lands on the beat -- and it is why setting up takes a moment: a reset is scheduled
+against that latency while a patch load takes effect the moment it arrives, so defining
+instruments straight after a reset lets the reset land on top of them and the nodes lose
+their synths partway through. Wait the latency out first. `alles.sync()` reports each
+node's clock, offset and round trip if you want to see the skew for yourself.
 
 Tulip can also route AMY signals to CV outputs connected over Tulip CC's I2C port. You will need one or two [Mabee DACs](https://www.makerfabs.com/mabee-dac-gp8413.html) or similar GP8413 setup. This lets you send accurate LFOs over CV to modular or other older analog synthesizers.
 

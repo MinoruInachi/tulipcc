@@ -58,17 +58,16 @@ Larger batteries will work great and last longer, but you'll have to remove the 
 
 **Please make sure you have the polarity right!** The red cable on the battery should be going to the side of the connector with a + sign on the Tulip board. 
 
-### An extra Alles or five (not currently available)
+### An extra Alles or five
 
 <img src="https://raw.githubusercontent.com/shorepine/tulipcc/main/docs/pics/nicoboard-alles.jpg" width=400>
 
-**Mesh mode is not currently available.** Tulip used to support using
-[Alles](http://github.com/shorepine/alles) as extra speakers -- dozens of wireless
-speakers running the AMY synthesizer, all controlled from one Tulip, for amazing
-multi-channel audio setups. The transport that carried it was removed when Tulip moved
-onto AMY's current API and has not been replaced; see
-[Music / sound](tulip_api.md#music--sound) for the details.
-[Alles PCBs are still available from our friends at Blinkinlabs.](https://shop.blinkinlabs.com/products/alles-pcb)
+Tulip supports using [Alles](http://github.com/shorepine/alles) as extra speakers. You
+control up to dozens of other speakers wirelessly using the AMY synthesizer for amazing
+multi-channel audio setups, using only a Tulip to control them -- `import alles` and
+`alles.mesh()`. Playing in step across nodes is the one part that does not work yet; see
+[Music / sound](tulip_api.md#music--sound) for what the `alles` module does and does not
+do. [You can get Alles PCBs from our friends at Blinkinlabs.](https://shop.blinkinlabs.com/products/alles-pcb)
 
 
 ## Get started with Tulip

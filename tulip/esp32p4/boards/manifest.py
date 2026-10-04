@@ -23,6 +23,7 @@ require("umqtt.simple")
 freeze("$(MPY_DIR)/../tulip/shared/py", (
 	"_sx126x.py",
 	"ads1115.py",
+	"alles.py",
 	"arpegg.py",
 	"chunk.py",
 	"drums.py",
