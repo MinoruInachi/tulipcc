@@ -348,6 +348,11 @@ class EngineTests(unittest.TestCase):
     def offs(self):
         return [m for m in AMY.sent if m.get("vel") == 0 and m.get("note")]
 
+    def test_claim_output_resets_bus_volume(self):
+        # drumster9 quits with bus 0 at volume 15; activate() claims it back.
+        self.player.claim_output()
+        self.assertEqual(AMY.sent, [{"bus": 0, "volume": 1.0}])
+
     def test_rows_map_to_pitches_high_first(self):
         # Row 0 is the highest tone (pitch 6), row 5 the lowest (pitch 1).
         song = _song([{"tone": 0, "arpeggio": [[100], [], [], [], [], [100]], "loop_step": 0}])

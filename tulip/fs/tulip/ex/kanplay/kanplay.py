@@ -488,6 +488,9 @@ class KanPlay:
             self.closed = True
 
     def activate(self):
+        # Parts only sound while kanplay is in front (deactivate stops them),
+        # so taking the output back here covers every launch and return.
+        self.player.claim_output()
         self._layout_pads()
         self.inputs.start()
         tulip.touch_callback(self._touch)

@@ -44,6 +44,14 @@ TAGS = range(TAG_BASE, AUDITION_TAG + 1)
 SYNTH_BASE = 48
 # AMY sums every voice and clips at full scale.
 MASTER_GAIN = 0.6
+# Bus 0's mixdown volume and effect shapes are global AMY state that only
+# amy.reset() restores, and other apps leave them behind: drumster9 quits
+# with every bus at volume 15, and the song then clipped on every block. The
+# engine puts them back to AMY's boot values (amy.h) before it plays.
+BUS_VOLUME = 1.0
+REVERB_SHAPE = {"liveness": 0.85, "damping": 0.5, "xover_hz": 3000}
+CHORUS_SHAPE = {"max_delay": 512, "freq": 0.5, "amp": 0.5}
+ECHO_FILTER_COEF = 0
 PATTERN, SONG = "pattern", "song"
 
 
@@ -76,7 +84,7 @@ class Engine:
         self.pattern_index = 0
         tulip.seq_bpm(int(song.bpm))
         self.apply_sounds()
-        self.apply_fx()
+        self.claim_output()
 
     def _build(self, make):
         s = make()
@@ -117,8 +125,7 @@ class Engine:
             rebuild = getattr(s, "_rebuild_after_amy_reset", None)
             if rebuild:
                 rebuild()
-        self._fx = None
-        self.apply_fx()
+        self.claim_output()
 
     def _silence(self, s):
         """All notes off, as a velocity 0 with *no* note. Not
@@ -138,19 +145,28 @@ class Engine:
             except Exception:
                 pass
 
+    def claim_output(self):
+        """Take bus 0 back from whatever the last app left (see BUS_VOLUME)
+        and send every effect again."""
+        amy.send(bus=0, volume=BUS_VOLUME)
+        self._fx = None
+        self.apply_fx()
+
     def apply_fx(self):
         """Send the effect levels that changed. An effect at 0 is left off
-        entirely: each one costs render time on the Tab5 even when quiet."""
+        entirely: each one costs render time on the Tab5 even when quiet.
+        After claim_output() nothing is known, so all three go out."""
         s = self.song
         fx = (round(s.reverb, 2), round(s.chorus, 2), round(s.echo, 2))
-        old = self._fx or (0, 0, 0)
+        old = self._fx or (-1, -1, -1)
         if fx[0] != old[0]:
-            amy.reverb(fx[0])
+            amy.reverb(fx[0], **REVERB_SHAPE)
         if fx[1] != old[1]:
-            amy.chorus(fx[1])
+            amy.chorus(fx[1], **CHORUS_SHAPE)
         if fx[2] != old[2]:
             # A dotted eighth at the song tempo.
-            amy.echo(level=fx[2], delay_ms=int(45000 / max(40, s.bpm)), feedback=0.4)
+            amy.echo(level=fx[2], delay_ms=int(45000 / max(40, s.bpm)), feedback=0.4,
+                     filter_coef=ECHO_FILTER_COEF)
         self._fx = fx
 
     def set_bpm(self, bpm):
@@ -343,6 +359,7 @@ class Engine:
         if self.playing:
             return
         self.apply_sounds()
+        self.claim_output()
         self.playing = True
         self._steps = []
         self._sent = []

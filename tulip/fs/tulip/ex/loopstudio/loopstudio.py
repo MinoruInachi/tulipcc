@@ -351,6 +351,9 @@ class LoopStudio:
         self.active = True
         self.touching = False
         self.engine.lookahead_ms = ls_engine.LOOKAHEAD_MS
+        # The app that was in front may have moved bus 0's volume or effects
+        # (drumster9 leaves volume 15), even under a song still playing.
+        self.engine.claim_output()
         self.draw_all()
         tulip.touch_callback(self._touch)
         tulip.keyboard_callback(self._key)

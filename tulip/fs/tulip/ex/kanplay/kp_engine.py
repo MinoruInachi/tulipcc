@@ -48,6 +48,10 @@ MANUAL, AUTO = "manual", "auto"
 # six-string strum on four parts distorts at velocity 1. Each note is scaled
 # by MASTER_GAIN / sqrt(parts playing) -- see Player.mix_gain().
 MASTER_GAIN = 0.5
+# Bus 0's mixdown volume is global AMY state that only amy.reset() restores,
+# and other apps leave it behind: drumster9 quits with every bus at volume 15,
+# and every chord then clipped. AMY boots at 1.0; the Player puts it back.
+BUS_VOLUME = 1.0
 
 
 def ms_to_ticks(ms, bpm):
@@ -470,6 +474,11 @@ class Player:
         """Per-note gain that keeps the sum of the playing parts in range."""
         n = sum(1 for pp in self.parts if pp.synth is not None)
         return MASTER_GAIN / (max(1, n) ** 0.5)
+
+    def claim_output(self):
+        """Put bus 0's volume back from whatever the last app left (see
+        BUS_VOLUME). kanplay uses no effects, so it leaves those alone."""
+        amy.send(bus=0, volume=BUS_VOLUME)
 
     def _on_beat(self, tick, bpm):
         """Advance every part to its next on-beat step and play it at tick."""

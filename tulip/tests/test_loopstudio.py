@@ -537,13 +537,26 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(set(b - a for a, b in zip(ticks, ticks[1:])), {1, 11})
 
     def test_fx_sent_only_when_changed(self):
-        self.assertEqual(amy.fx, [])
+        # The engine starts by claiming bus 0: every effect goes out once,
+        # since another app may have left one on.
+        self.assertEqual(amy.fx, [("reverb", 0.0), ("chorus", 0.0), ("echo", 0.0)])
+        amy.fx.clear()
         self.song.reverb = 0.4
         self.engine.apply_fx()
         self.engine.apply_fx()
         self.assertEqual(amy.fx, [("reverb", 0.4)])
         self.engine.close()
         self.assertIn(("reverb", 0), amy.fx)
+
+    def test_bus_volume_claimed(self):
+        # drumster9 quits with bus 0 at volume 15; start and play put it back.
+        volumes = lambda: [m for m in amy.sent if "volume" in m]
+        self.assertEqual(volumes(), [{"bus": 0, "volume": 1.0}])
+        amy.sent.clear()
+        amy.fx.clear()
+        self.engine.play()
+        self.assertEqual(volumes(), [{"bus": 0, "volume": 1.0}])
+        self.assertEqual(len(amy.fx), 3)
 
     def test_audition(self):
         self.engine.audition(4, 50)
