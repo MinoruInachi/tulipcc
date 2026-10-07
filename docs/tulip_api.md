@@ -765,6 +765,67 @@ Tulip can also route AMY signals to CV outputs connected over Tulip CC's I2C por
 
 **See the [music tutorial](music.md) for a LOT more information on music in Tulip.**
 
+### Speaker volume, and what to do if the board resets while playing (Tab5 only)
+
+```python
+# The codec's output gain, 0-100. Full gain is the default.
+tulip.speaker_volume()      # read it
+tulip.speaker_volume(60)    # turn the amplifier down, and return the new value
+```
+
+This is a different knob from `amy.send(volume=...)`: that scales the signal AMY
+renders, while `tulip.speaker_volume()` is the gain the ES8388 and the class-D
+amplifier apply to it afterwards. Reach for it when you want the board quieter
+without touching the mix. It is not saved across a reboot -- the codec comes up
+at 100 every time -- so put the call in your `boot.py` if you want it to stick.
+
+**If a Tab5 resets while you play something loud, suspect the power supply before
+the code.** The symptom looks like a crash but is not one. Check the serial log:
+the board prints
+
+```
+E BOD: Brownout detector was triggered
+rst:0x3 (SW_SYS_RESET),boot:0x20c (SPI_FAST_FLASH_BOOT)
+```
+
+That line comes from the ESP32-P4's hardware brownout detector, which resets the
+chip when the 3.3 V rail falls below 2.6 V. A software fault looks nothing like
+it -- you would see `Guru Meditation` or `abort() was called at PC ...` with a
+register dump.
+
+What makes the rail fall is the current the speaker amplifier draws, so the
+variable is loudness, not the patch. Measured on a Tab5 (2026-10-07) running the
+dpwe piano (`patch=256`) with four voices and three fingers wandering the
+keyboard, two minutes per run: at AMY's default `volume=1.0` the board browned
+out five times out of five, while at 0.5, 0.25 and 0.05 it played clean every
+time. The piano is not special -- a Juno patch (`patch=0`) on eight voices runs
+clean at the default and browns out too once you push it to `volume=3.0`. The
+piano simply gets there first, because it is the densest patch we ship (25
+oscillators per voice against Juno's 6 and the DX7's 8) and already peaks at 89%
+of full scale on four voices at `volume=0.5` -- so at 1.0 it clips flat for long
+stretches, and a clipped waveform delivers far more power than its peak suggests.
+
+The supply is what decides whether that matters:
+
+- **USB-C through a hub to a PC is the case that fails.** A PC port gives
+  500-900 mA, shared between ports on a bus-powered hub.
+- **A fitted battery does not save you while USB is connected.** The board runs
+  from VBUS and *charges* the battery, so the battery never absorbs the load step,
+  and the charge current eats into the port's budget on top. Verified on hardware:
+  the same piece that reset every time over a hub played fine on battery alone.
+- **Battery only, an AC adapter, or a self-powered hub all fix it.**
+
+If you have to stay on a weak supply, turn one of the two volumes down. Either
+works, and they fix different things:
+
+- `tulip.speaker_volume(50)` stops the reset on its own. The same piece that
+  browned out five times out of five at the default gain played two minutes clean
+  at 50 *while still clipping the whole way* (`peak` 32767, `clipped_samples`
+  31678) -- which is the clearest evidence that what sags the rail is the current
+  the amplifier draws, not anything digital.
+- `amy.send(volume=0.5)` stops the clipping as well, so it is the one to use if
+  you also want the sound clean. Watch `tulip.audio_diag()[7]`
+  (`clipped_samples`) and keep it at 0.
 
 ### synth
 

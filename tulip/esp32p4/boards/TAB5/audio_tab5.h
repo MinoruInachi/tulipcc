@@ -18,5 +18,11 @@ typedef struct {
 
 void tab5_audio_init(void);
 bool tab5_audio_ready(void);
+// The codec's output gain, 0..100. What tulip.speaker_volume() reads and writes;
+// turning it down is how you keep a loud patch from browning the board out on a
+// current-limited supply. The value is clamped, and false means the codec is not
+// up (or refused it) -- nothing else reports a failure.
+bool tab5_audio_set_speaker_volume(int volume);
+int tab5_audio_get_speaker_volume(void);
 void tab5_audio_get_stats(tab5_audio_stats_t *stats);
 void tab5_audio_reset_stats(void);

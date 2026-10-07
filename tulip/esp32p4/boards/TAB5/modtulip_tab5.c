@@ -1493,6 +1493,29 @@ static mp_obj_t tulip_audio_diag(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_audio_diag_obj, 0, 1, tulip_audio_diag);
 
+// tulip.speaker_volume() -> the codec's output gain, 0..100
+// tulip.speaker_volume(v) -> set it, and return what it is now
+//
+// Separate from amy.send(volume=) on purpose: that scales the signal AMY renders,
+// this is the gain the ES8388 and the class-D amp apply afterwards. Of the two,
+// this is the one that cuts what the amp draws without changing the mix, which is
+// what you want when a loud patch browns the board out on a current-limited USB
+// supply (see docs/tulip_api.md).
+static mp_obj_t tulip_speaker_volume(size_t n_args, const mp_obj_t *args) {
+    if (n_args > 0) {
+        int volume = mp_obj_get_int(args[0]);
+        if (volume < 0 || volume > 100) {
+            mp_raise_ValueError(MP_ERROR_TEXT("speaker volume is 0-100"));
+        }
+        if (!tab5_audio_set_speaker_volume(volume)) {
+            mp_raise_msg(&mp_type_OSError,
+                         MP_ERROR_TEXT("could not set the speaker volume"));
+        }
+    }
+    return mp_obj_new_int(tab5_audio_get_speaker_volume());
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_speaker_volume_obj, 0, 1, tulip_speaker_volume);
+
 static mp_obj_t tulip_tfb_ready(void) {
     bool ready = (TFB != NULL) && (TFBf != NULL) && (TFBfg != NULL) && (TFBbg != NULL);
     return mp_obj_new_bool(ready);
@@ -3010,6 +3033,7 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_tab5_lcd_read), MP_ROM_PTR(&tulip_tab5_lcd_read_obj) },
     { MP_ROM_QSTR(MP_QSTR_tab5_lcd_errors), MP_ROM_PTR(&tulip_tab5_lcd_errors_obj) },
     { MP_ROM_QSTR(MP_QSTR_audio_diag), MP_ROM_PTR(&tulip_audio_diag_obj) },
+    { MP_ROM_QSTR(MP_QSTR_speaker_volume), MP_ROM_PTR(&tulip_speaker_volume_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_ready), MP_ROM_PTR(&tulip_tfb_ready_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_start), MP_ROM_PTR(&tulip_tfb_start_obj) },
     { MP_ROM_QSTR(MP_QSTR_term_start), MP_ROM_PTR(&tulip_term_start_obj) },

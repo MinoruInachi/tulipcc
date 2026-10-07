@@ -44,6 +44,13 @@ static volatile tab5_audio_stats_t s_audio_stats;
 // task watchdog) whenever AMY ran long. Core 0 only carries the display and touch
 // tasks, both of which are far lower priority and tolerate preemption.
 #define TAB5_AUDIO_TASK_CORE 0
+// Where the codec's output gain starts. Full gain plus a patch that reaches full
+// scale is what the class-D amp needs to sag the 3.3 V rail far enough to trip
+// the brownout detector (2.6 V) when the board is running off a current-limited
+// USB port -- measured 2026-10-07 with the dpwe piano, which clips at AMY's
+// default volume. Lowering this would cost every app its loudness, so the
+// default stays where it was and tulip.speaker_volume() lets a user who hits it
+// turn the amp down instead.
 #define TAB5_SPEAKER_VOLUME 100
 
 // The two mics are the two channels of AMY's external input block, so the
@@ -295,6 +302,32 @@ void tab5_audio_init(void)
 bool tab5_audio_ready(void)
 {
     return s_audio_ready;
+}
+
+bool tab5_audio_set_speaker_volume(int volume)
+{
+    if (s_speaker == NULL) {
+        return false;
+    }
+    if (volume < 0) volume = 0;
+    if (volume > 100) volume = 100;
+    int codec_result = esp_codec_dev_set_out_vol(s_speaker, volume);
+    if (codec_result != ESP_CODEC_DEV_OK) {
+        ESP_LOGW(TAG, "Speaker volume %d rejected: %d", volume, codec_result);
+        return false;
+    }
+    return true;
+}
+
+int tab5_audio_get_speaker_volume(void)
+{
+    // esp_codec_dev keeps the last value written (esp_codec_dev.c's get_out_vol
+    // returns dev->volume), so this reads back whatever was set, not the part.
+    int volume = TAB5_SPEAKER_VOLUME;
+    if (s_speaker != NULL && esp_codec_dev_get_out_vol(s_speaker, &volume) != ESP_CODEC_DEV_OK) {
+        volume = TAB5_SPEAKER_VOLUME;
+    }
+    return volume;
 }
 
 void tab5_audio_get_stats(tab5_audio_stats_t *stats)
