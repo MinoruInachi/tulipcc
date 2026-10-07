@@ -105,6 +105,19 @@ static void tab5_audio_task(void *ignored)
         }
         previous_block_start = block_start;
 
+        // The whole block under the render lock, the way AMY's own ESP render
+        // loop holds it (esp_fill_audio_buffer_task in amy/src/i2s.c). Each
+        // call below takes it internally anyway -- it is recursive per thread,
+        // so those are no-ops -- but the gaps between them were not covered,
+        // and they are what a teardown walks through: RESET_AMY runs
+        // amy_stop() + amy_start() on the sending thread, and oscs_deinit()
+        // frees fbl, per_osc_fb, every osc and the mic input block. AMY deletes
+        // its own render tasks before that free, but it has no idea this task
+        // exists, so it kept rendering straight into freed memory (a Load
+        // access fault in amy_render on a NULL fbl, 2026-10-07). Released
+        // before the codec write, as AMY's loop does, so an event flush from
+        // Python still gets in while we are parked on the DMA.
+        amy_grab_render_lock();
         tab5_feed_mic_to_amy();
         amy_execute_deltas();
         const int64_t deltas_done = esp_timer_get_time();
@@ -135,6 +148,9 @@ static void tab5_audio_task(void *ignored)
                 s_audio_stats.clipped_samples++;
             }
         }
+        // samples points into AMY's output block, so the scan above belongs
+        // inside the hold too.
+        amy_release_render_lock();
 
         int64_t write_start = esp_timer_get_time();
         int result = esp_codec_dev_write(
