@@ -37,6 +37,17 @@ keys are roots 1..7.
   the instruments (GM families plus every program with its own AMY patch;
   the last entry is the drum kit). "(-)" means the part has no pattern in
   this slot. **Save** writes the edited song to `/user/kanplay/<name>.json`.
+- **Step grid** (under the part panel): the slot's pattern, one lane per
+  part. Columns are the steps 0..`loop_step` (sub-steps included, so with
+  2/beat every other column is an on-beat and drawn a little lighter), rows
+  are the arpeggio rows -- highest chord tone at the top, lowest sixth, the
+  drum-only row last -- and a cell's brightness is its velocity (blue for a
+  pitched part, orange for drums, grey for a part that is off). The thin
+  strip below marks the stroke style of a step (green D, orange U, red M).
+  The column a part last played is framed in yellow, so you can watch the
+  position move as you tap; a lane left empty means the part has no pattern
+  in this slot. It is drawn on the BG plane, which is why the screen's own
+  background is see-through (`bg_plane`).
 - The top line shows AMY's render load; if it passes 0.9 turn a part off
   before the overload failsafe silences everything.
 - **Key** transposes live. The song's `base_key` and the slot's `key_offset`
@@ -78,6 +89,7 @@ M strokes), `stroke_speed`, `loop_step` / `anchor_step`, `volume`, `pan`,
 | `kp_song.py` | song JSON -> `Song`/`Slot`/`Part` with defaults and copies resolved. Pure Python. |
 | `kp_tones.py` | GM program -> AMY patch. |
 | `kp_input.py` | keyboard (`tulip.keys()` scan codes + `keyboard_callback`), touch pads and MIDI merged into one held-button set with press/release edges. |
+| `kp_grid.py` | The step grid: lane geometry from `loop_step` (down to 2 px columns for a 64-step part), velocity shades, and a `follow()` that repaints only the two columns a frame moved between. Pure Python over a `rect()` callback, so the tests draw into a list. |
 | `kp_engine.py` | KANTAN's manual-play model: press = on-beat, release = off-beat, off-beat auto fill, tempo-driven Auto mode, 5 s auto-release, loop/anchor semantics. Notes go to AMY at absolute ticks, one AMY tag per part so a new press cancels pending sub-steps. Strokes are `stroke_speed` ms apart rounded to the 48 PPQ grid (~10 ms at 120 BPM). |
 | `kanplay.py` | the LVGL screen and the app glue. |
 

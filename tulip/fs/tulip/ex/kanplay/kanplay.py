@@ -22,6 +22,7 @@ from ui import UIScreen, UIElement, UILabel, UIButton, pal_to_lv
 
 import kp_chords
 import kp_engine
+import kp_grid
 import kp_input
 import kp_song
 import kp_tones
@@ -191,6 +192,8 @@ class KanPlay:
         self.songs = self._find_songs()
         self.song_index = 0
         self.dirty = True
+        self.grid = None
+        self.grid_sig = None       # what the step grid shows (see refresh)
         self.closed = False
         self._build()
         self._load_song(0)
@@ -310,6 +313,19 @@ class KanPlay:
             s.add(cell, x=x0 + i * (cw + cgap), y=py)
             self.cells.append(cell)
 
+        # Step grid under the cells, one lane per part, on the BG plane (the
+        # screen is see-through for it, see run()). It takes what is left of
+        # the height: 16 px rows on the Tab5, 10 px on a 1024x600 panel.
+        gy = py + 84 + 8
+        row_h = min(16, (H - gy - 8 - 6) // 7)
+        self.grid = kp_grid.StepGrid(lambda x, y, w, h, c: tulip.bg_rect(x, y, w, h, c, 1),
+                                     x0, gy, cw, cgap, row_h)
+        # With the screen see-through, the theme's rounded corners on every
+        # element group are anti-aliased against the transparency key and
+        # show as faint arcs. Square corners draw nothing to blend.
+        for i in range(s.group.get_child_count()):
+            s.group.get_child(i).set_style_radius(0, lv.PART.MAIN)
+
     def _mark_dirty(self):
         self.dirty = True
 
@@ -346,6 +362,15 @@ class KanPlay:
         for cell, part, pp in zip(self.cells, p.slot.parts, p.parts):
             cell.show(part, pp.synth_voices, pp.wanted)
         self._show_status()
+        # The grid is redrawn (~50 ms for six 16-step lanes) only when what it
+        # shows changed: another slot or song, or a part edited. A press only
+        # moves the frames, which frame() does with two columns per part.
+        slot = p.slot
+        sig = (id(slot), slot.step_per_beat,
+               tuple((pt.enabled, pt.tone, pt.volume, pt.loop_step) for pt in slot.parts))
+        if sig != self.grid_sig:
+            self.grid_sig = sig
+            self.grid.show(slot, [pp.step for pp in p.parts])
 
     def _show_status(self):
         # The title spans the screen, so its redraw is the dearest (~16 ms):
@@ -486,12 +511,16 @@ class KanPlay:
             self.refresh()
         except lv.LvReferenceError:
             self.closed = True
+            return
+        if self.grid_sig is not None:
+            self.grid.follow([pp.step for pp in self.player.parts])
 
     def activate(self):
         # Parts only sound while kanplay is in front (deactivate stops them),
         # so taking the output back here covers every launch and return.
         self.player.claim_output()
         self._layout_pads()
+        self.grid_sig = None       # present() cleared the BG plane under the grid
         self.inputs.start()
         tulip.touch_callback(self._touch)
         tulip.frame_callback(self.frame, None)
@@ -535,5 +564,9 @@ def run(screen):
     screen.activate_callback = _activate
     screen.deactivate_callback = _deactivate
     screen.quit_callback = _quit
+    # The step grid is drawn on the BG plane; where LVGL is composited over
+    # it (the Tab5) the screen must leave its background transparent or it
+    # would cover the grid. UIScreen then paints bg_color on the BG instead.
+    screen.bg_plane = True
     app = KanPlay(screen)
     screen.present()

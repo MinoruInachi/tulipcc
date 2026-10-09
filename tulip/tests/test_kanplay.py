@@ -89,7 +89,7 @@ def install_stubs():
     sequencer.TulipSequence = TulipSequence
     for m in (amy, synth, tulip, sequencer):
         sys.modules[m.__name__] = m
-    for m in ("kp_chords", "kp_song", "kp_tones", "kp_input", "kp_engine"):
+    for m in ("kp_chords", "kp_song", "kp_tones", "kp_input", "kp_engine", "kp_grid"):
         sys.modules.pop(m, None)
     return amy, tulip
 
@@ -97,6 +97,7 @@ def install_stubs():
 AMY, TULIP = install_stubs()
 import kp_chords      # noqa: E402
 import kp_engine      # noqa: E402
+import kp_grid        # noqa: E402
 import kp_input       # noqa: E402
 import kp_song        # noqa: E402
 import kp_tones       # noqa: E402
@@ -316,6 +317,87 @@ class InputTests(unittest.TestCase):
         self.assertEqual(self.events[-1], ("1", False))
         self.assertIsNone(TULIP.state["kb_cb"])
         TULIP.state["keys"] = (0, 0, 0, 0, 0, 0, 0)
+
+
+# --- step grid ---------------------------------------------------------------
+
+class GridTests(unittest.TestCase):
+    def setUp(self):
+        self.rects = []
+        self.grid = kp_grid.StepGrid(lambda *a: self.rects.append(a), x=40, y=580,
+                                     lane_w=172, lane_gap=8, row_h=16)
+
+    def _slot(self, parts, step_per_beat=2):
+        return _song(parts, step_per_beat=step_per_beat).slots[0]
+
+    def cells(self, color):
+        return [r for r in self.rects if r[4] == color]
+
+    def test_geometry_follows_loop_step_and_lane(self):
+        slot = self._slot([{"tone": 0, "arpeggio": [[100] * 8], "loop_step": 7},
+                           {"tone": 128, "arpeggio": [[], [], [], [], [], [], [100] * 64], "loop_step": 63}])
+        self.grid.show(slot, [-1, -1])
+        self.assertEqual(self.grid.height, 7 * 16 + 6)
+        l0, l1 = self.grid.lanes[0], self.grid.lanes[1]
+        self.assertEqual((l0.x, l0.steps, l0.col_w, l0.inset), (40, 8, 172 // 8, 1))
+        self.assertEqual((l1.x, l1.steps, l1.col_w, l1.inset), (40 + 180, 64, 2, 0))
+        # every lane is cleared first, then its columns are painted inside it
+        bg = [r for r in self.rects if r[4] == kp_grid.COL_BG and r[2] == 172]
+        self.assertEqual(len(bg), kp_song.NUM_PARTS)
+        for x, y, w, h, c in self.rects:
+            self.assertGreaterEqual(x, 40)
+            self.assertGreaterEqual(y, 580)
+            self.assertLessEqual(y + h, 580 + self.grid.height)
+        # nothing is framed while no part is playing
+        self.assertEqual(self.cells(kp_grid.COL_PLAYHEAD), [])
+
+    def test_part_without_a_pattern_leaves_its_lane_blank(self):
+        slot = self._slot([{"tone": 0, "arpeggio": [[100]], "loop_step": 0},
+                           {"tone": 0, "arpeggio": [], "loop_step": 7}])
+        self.grid.show(slot, [0, -1])
+        self.assertIsNone(self.grid.lanes[1])
+        lane1 = [r for r in self.rects if r[0] >= 40 + 180 and r[0] < 40 + 360]
+        self.assertEqual(lane1, [(40 + 180, 580, 172, self.grid.height, kp_grid.COL_BG)])
+        self.rects = []
+        self.grid.follow([0, 3])                               # ignored: nothing to frame
+        self.assertEqual(self.rects, [])
+
+    def test_cell_colours(self):
+        slot = self._slot([{"tone": 0, "arpeggio": [[30, 0, 90, 127]], "loop_step": 3, "style": ["D", "", "U", "M"]},
+                           {"tone": 128, "arpeggio": [[], [], [], [], [], [], [100, 0]], "loop_step": 1},
+                           {"tone": 0, "arpeggio": [[100]], "loop_step": 0, "enabled": False}])
+        self.grid.show(slot, [-1, -1, -1])
+        l0, l1, l2 = self.grid.lanes[:3]
+        self.assertEqual([l0.cell_color(0, s) for s in range(4)],
+                         [kp_grid.SHADES_PITCH[0], kp_grid.COL_EMPTY, kp_grid.SHADES_PITCH[2], kp_grid.SHADES_PITCH[3]])
+        # an empty on-beat cell is lighter than an empty sub-step one
+        self.assertEqual(l0.cell_color(1, 0), kp_grid.COL_EMPTY_ONBEAT)
+        self.assertEqual(l0.cell_color(1, 1), kp_grid.COL_EMPTY)
+        self.assertEqual(l1.cell_color(6, 0), kp_grid.SHADES_DRUM[2])
+        self.assertEqual(l2.cell_color(0, 0), kp_grid.SHADES_OFF[2])      # part is off: grey
+        # the style strip: D, U and M marked, a plain step not
+        styles = [r for r in self.rects if r[4] in kp_grid.STYLE_COLORS.values()]
+        self.assertEqual(sorted(r[4] for r in styles),
+                         sorted([kp_grid.STYLE_COLORS["D"], kp_grid.STYLE_COLORS["U"], kp_grid.STYLE_COLORS["M"]]))
+        self.assertTrue(all(r[1] == 580 + 7 * 16 + 1 for r in styles))
+
+    def test_follow_repaints_only_the_moved_columns(self):
+        slot = self._slot([{"tone": 0, "arpeggio": [[100] * 8], "loop_step": 7}] * 2)
+        self.grid.show(slot, [0, 0])
+        self.assertEqual(len(self.cells(kp_grid.COL_PLAYHEAD)), 2)
+        self.rects = []
+        self.grid.follow([0, 0])
+        self.assertEqual(self.rects, [])                       # nothing moved
+        self.grid.follow([2, 0])
+        frames = self.cells(kp_grid.COL_PLAYHEAD)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][0], self.grid.lanes[0].col_x(2))
+        # two columns of one lane: 2 x (column + 7 cells), no style marks
+        self.assertEqual(len(self.rects), 2 * (1 + kp_song.NUM_ROWS))
+        self.rects = []
+        self.grid.follow([-1, 0])                              # part stopped: frame gone
+        self.assertEqual(self.cells(kp_grid.COL_PLAYHEAD), [])
+        self.assertEqual(len(self.rects), 1 + kp_song.NUM_ROWS)
 
 
 # --- engine ------------------------------------------------------------------
