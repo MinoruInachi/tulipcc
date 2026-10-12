@@ -18,6 +18,17 @@ void tulip_touch_isr(uint8_t up)
     tab5_schedule_touch_callback(up);
 }
 
+void tulip_touch_hold_isr(void)
+{
+    // Upstream split the held-finger samples out of tulip_touch_isr() so that
+    // shared/modtulip.c could coalesce them -- it queues one Python callback at a
+    // time instead of one per sample. TAB5 does not link that file, and
+    // tab5_schedule_touch_callback() already coalesces: it tells a hold from a
+    // transition by comparing against the last reported direction. So a hold here
+    // is still just a "finger down" sample.
+    tab5_schedule_touch_callback(0);
+}
+
 void esp_display_set_clock(uint8_t mhz)
 {
     (void)mhz;

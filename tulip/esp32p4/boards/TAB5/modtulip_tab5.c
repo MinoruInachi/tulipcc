@@ -96,12 +96,20 @@ static MP_DEFINE_CONST_FUN_OBJ_1(tab5_lv_task_handler_obj, tab5_lv_task_handler)
 static void tab5_touch_cb_kick(void);
 static void tab5_ui_hotkey_kick(void);
 
-void tulip_frame_isr(void) {
-    s_tab5_frame_callbacks++;
+// Ask for an LVGL pass. The frame interrupt calls this once a frame; shared/ui.c
+// also calls it on a touch down and a touch up, so LVGL's indev read sees the
+// event right away instead of at the next frame. Failing on a full scheduler
+// queue is fine -- the next frame asks again.
+void mp_schedule_lv(void) {
     if (s_tab5_lvgl_running &&
         mp_sched_schedule(MP_OBJ_FROM_PTR(&tab5_lv_task_handler_obj), mp_const_none)) {
         mp_hal_wake_main_task();
     }
+}
+
+void tulip_frame_isr(void) {
+    s_tab5_frame_callbacks++;
+    mp_schedule_lv();
     if (s_tab5_frame_cb != MP_OBJ_NULL && s_tab5_frame_cb != mp_const_none &&
         mp_sched_schedule(s_tab5_frame_cb, s_tab5_frame_arg)) {
         mp_hal_wake_main_task();
