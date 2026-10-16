@@ -4,6 +4,14 @@
 from _tulip import *
 from upysh import cd, pwd
 import amy
+# Imported here, not inside the functions that use it. An `import` statement
+# searches the filesystem even for a module that is already loaded, and on an
+# ESP a filesystem read is an esp_flash operation that freezes the core it runs
+# on for tens of milliseconds -- measured at 34ms for reads and 62ms for writes
+# on a Tab5. defer() and _process_defers() below are called once per frame and
+# per deferred callback, so a local import there put a flash access on the hot
+# path of every app that uses tulip.defer().
+import time
 
 if board() != 'AMYBOARD' and board() != "AMYBOARD_WEB" and board() != "AMYBOARD_VCV":
     from tulip_graphics import *
@@ -17,7 +25,6 @@ _c_defer = defer
 
 def defer(cb, arg, ms):
     if board() == 'TAB5':
-        import time
         _defer_queue.append((cb, arg, time.ticks_ms() + ms))
     else:
         _c_defer(cb, arg, ms)
@@ -25,7 +32,6 @@ def defer(cb, arg, ms):
 def _process_defers():
     if not _defer_queue:
         return
-    import time
     now = time.ticks_ms()
     i = 0
     while i < len(_defer_queue):
