@@ -52,6 +52,22 @@ MASTER_GAIN = 0.5
 # and other apps leave it behind: drumster9 quits with every bus at volume 15,
 # and every chord then clipped. AMY boots at 1.0; the Player puts it back.
 BUS_VOLUME = 1.0
+# An AMY patch can carry bus effects: every Juno patch ends with an `x` (eq)
+# and a `k` (chorus) command -- patch 47 is `x7,-3,-3k1,,0.83,0.5`, patch 73 is
+# `x-15,8,8k0`. Both are BUS settings, not per-voice ones, so whichever part's
+# patch loaded last re-voices the whole mix -- piano, vibes and drums included
+# -- and it outlives the part that brought it. Measured on bus 0 with a raw sine
+# on an osc no patch owns: `x7,-3,-3` is +7 dB at 120 Hz and -3 dB at 6 kHz, and
+# a patch's chorus adds another 6 dB on top of that. 99 of the 129 patches that
+# carry an eq set a non-flat one, and 63 of them switch the chorus on.
+#
+# kanplay puts six different instruments on one bus and wants none of it. The
+# eq half went unnoticed while AMY's EQ low band had a sign error (fixed in amy
+# 8163016d, whose own message names "the x7,-3,-3 default on most Juno
+# patches"); with the EQ working, slot 2 of 01_Simple_Piano came out +7/-3 dB
+# across everything.
+BUS_EQ = "0,0,0"
+BUS_CHORUS = 0
 
 
 def ms_to_ticks(ms, bpm):
@@ -380,6 +396,9 @@ class Player:
         voices = kp_tones.fit_voices(wanted, [part.tone for part in parts])
         for pp, part, v in zip(self.parts, parts, voices):
             pp.set_part(part, v)
+        # Building a part loads its patch, and a patch can leave a bus EQ
+        # behind (see BUS_EQ), so take bus 0 back after every one of them.
+        self.claim_output()
 
     def _apply_slot(self):
         self._apply_parts()
@@ -476,9 +495,10 @@ class Player:
         return MASTER_GAIN / (max(1, n) ** 0.5)
 
     def claim_output(self):
-        """Put bus 0's volume back from whatever the last app left (see
-        BUS_VOLUME). kanplay uses no effects, so it leaves those alone."""
-        amy.send(bus=0, volume=BUS_VOLUME)
+        """Put bus 0's volume and EQ back from whatever the last app -- or the
+        last patch a part loaded -- left (see BUS_VOLUME, BUS_EQ, BUS_CHORUS).
+        kanplay uses no other effects, so it leaves those alone."""
+        amy.send(bus=0, volume=BUS_VOLUME, eq=BUS_EQ, chorus=BUS_CHORUS)
 
     def _on_beat(self, tick, bpm):
         """Advance every part to its next on-beat step and play it at tick."""

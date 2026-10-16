@@ -49,6 +49,16 @@ MASTER_GAIN = 0.6
 # with every bus at volume 15, and the song then clipped on every block. The
 # engine puts them back to AMY's boot values (amy.h) before it plays.
 BUS_VOLUME = 1.0
+# A patch brings bus effects of its own: every Juno patch ends with an `x` (eq)
+# and a `k` (chorus) command, and both are per-BUS. So building a track's synth
+# re-voices the whole song -- measured on bus 0, patch 47's `x7,-3,-3` is +7 dB
+# at 120 Hz and -3 dB at 6 kHz on everything, patch 73's `x-15,8,8` is -13 dB at
+# 120 Hz, and a patch that switches the chorus on adds 6 dB more. The default
+# patch 33 happens to carry a flat eq, which is why this never showed; pick a
+# pad or a bass for a track and it does. claim_output() takes the eq back, and
+# apply_fx() re-sends the song's own chorus because claim_output() forgets what
+# it last sent.
+BUS_EQ = "0,0,0"
 REVERB_SHAPE = {"liveness": 0.85, "damping": 0.5, "xover_hz": 3000}
 CHORUS_SHAPE = {"max_delay": 512, "freq": 0.5, "amp": 0.5}
 ECHO_FILTER_COEF = 0
@@ -115,6 +125,10 @@ class Engine:
                     num_voices=c.voices, channel=SYNTH_BASE + 1 + i, patch=c.patch))
             self._built[i] = want
         self._amy_gen = getattr(amy, "instrument_generation", None)
+        # Loading a patch re-voices the bus (see BUS_EQ), so take it back here
+        # rather than at each call site -- ls_views changes a track's patch
+        # without going through set_song().
+        self.claim_output()
 
     def _recover(self):
         """Another app reset AMY underneath us (technopop's start does, and
@@ -146,9 +160,10 @@ class Engine:
                 pass
 
     def claim_output(self):
-        """Take bus 0 back from whatever the last app left (see BUS_VOLUME)
-        and send every effect again."""
-        amy.send(bus=0, volume=BUS_VOLUME)
+        """Take bus 0 back from whatever the last app -- or the last patch a
+        track loaded -- left (see BUS_VOLUME, BUS_EQ) and send every effect
+        again."""
+        amy.send(bus=0, volume=BUS_VOLUME, eq=BUS_EQ)
         self._fx = None
         self.apply_fx()
 

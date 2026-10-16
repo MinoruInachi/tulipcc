@@ -59,6 +59,21 @@ class MidiConfig:
             self.arpeggiator_per_channel[channel].synth = synth
         if hasattr(synth, 'deferred_init'):
             synth.deferred_init()
+        # Loading a patch can re-voice the whole mix. Every Juno patch ends with
+        # an `x` (eq) and a `k` (chorus) command, and both are per-BUS settings,
+        # not per-voice ones -- so the patch of whichever channel was configured
+        # last applies its eq to every other channel, and goes on applying it
+        # after that channel has been given a different patch. Measured on bus 0
+        # against a raw sine on an osc no patch owns, `x7,-3,-3` (what 70 of the
+        # patches carry) is +7 dB at 120 Hz and -3 dB at 6 kHz on everything, and
+        # `x-15,8,8` (19 of them) is -13 dB at 120 Hz.
+        #
+        # A MIDI config is a set of instruments sharing one bus, so the eq goes
+        # back to flat here. The chorus does not: it is switched on by 63 of the
+        # patches and off by 66, so it is part of how a patch was voiced rather
+        # than a generic shelf, and a single-channel setup should still sound
+        # like the patch. Set it per config if you need it pinned.
+        amy.send(bus=0, eq='0,0,0')
         # Return the newly-created synth object so client can tweak it.
         return synth
 
