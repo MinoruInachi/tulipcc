@@ -1093,6 +1093,55 @@ amy.send(osc=0, vel=1, freq=440) # このメッセージが SYSEX 経由で送�
 
 
 
+
+### Bluetooth MIDI（Tab5）
+
+Tab5 では MIDI を Bluetooth LE 経由で送受信できます。ESP32-P4 自体は無線を
+持っていません。BLE のコントローラはボード上の ESP32-C6 側にあり、Wi-Fi が
+すでに使っている ESP-HOSTED のリンクに HCI を多重化して P4 に届きます。
+ホストスタック（NimBLE）は P4 側で動きます。土台は素の MicroPython の
+`bluetooth` モジュールで、それを frozen モジュールの `blemidi` が包んでいます。
+方式は BLE MIDI（MMA/Bluetooth SIG の "MIDI over BLE" プロファイル。macOS、
+iOS、市販のワイヤレス MIDI キーボードが話すもの）です。C6 は BLE 専用なので、
+クラシック Bluetooth の経路はありません。
+
+どちらの役割でも動きます。
+
+```python
+import blemidi
+
+# Tulip を楽器側にする: Mac、iPad、iPhone から "Tulip Tab5" に接続して演奏する。
+# アドバタイズは継続し、相手が切断したあとも再開します。
+blemidi.peripheral()
+
+# Tulip をホスト側にする: BLE MIDI キーボード（CME WIDI、KORG microKEY Air、
+# Yamaha MD-BT01 など）を探して接続する。見つかれば名前、なければ None。
+blemidi.keyboard()
+
+blemidi.send((0x90, 60, 100))  # MIDI 出力。リンクの相手に送ります
+blemidi.status()               # アドバタイズ状況、接続数、パケット数
+blemidi.stop()                 # リンクを切り、アドバタイズを止めます
+```
+
+受信したメッセージは `tulip.midi_local()` に渡されます。これは AMY 自身の MIDI
+入力経路なので、Bluetooth のキーボードは USB のものとまったく同じように振る舞い
+ます。設定なしで音が鳴り、`midi.config` のチャンネル割り当ても効き、
+`midi.add_callback()` で登録したコールバックにもすべてのメッセージが届きます。
+BLE-MIDI のタイムスタンプバイトの除去、ランニングステータス、複数パケットに
+分割された sysex の扱いは `blemidi` が行います。
+
+知っておく価値のある点が 2 つあります。
+
+- リンクが切れたとき、`blemidi` は全 16 チャンネルにオールノートオフを送ります。
+  BLE MIDI の書き込みは応答を期待しない方式なので、ノートオフを書いた直後に切断
+  した相手ではその書き込みが失われます。これをしないとノートが鳴り続けます。
+- BLE スタックは 1 回の起動につき 1 度だけ立ち上がります。`blemidi.stop()` は
+  リンクとアドバタイズを止めますがスタックは動かしたままです。2 度目の起動は
+  Bluetooth のホストタスクをデッドロックさせるため、再起動は行いません。
+
+`blemidi` は Tab5 専用です。他の Tulip には Bluetooth の無線がないため、
+`import blemidi` は失敗します。
+
 ## グラフィックスシステム
 
 Tulip の GPU は 3 つのサブシステムで構成されており、描画順は次のとおりです。

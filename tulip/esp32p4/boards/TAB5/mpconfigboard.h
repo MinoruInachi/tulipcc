@@ -33,9 +33,13 @@ void tab5_board_startup(void);
 // bytes of C this adds.
 #define MICROPY_PY_CRYPTOLIB_CTR            (1)
 
-// Tab5 wireless connectivity is handled by the companion ESP32-C6.
+// Tab5 wireless connectivity is handled by the companion ESP32-C6: Wi-Fi and
+// the BLE controller both live there and reach us over the same ESP-HOSTED SDIO
+// link. BLE is the host (NimBLE) half of that -- see the Bluetooth block in
+// sdkconfig.board, which has the two settings this cannot work without, and
+// shared/py/blemidi.py, which is what uses it.
 #define MICROPY_PY_NETWORK_WLAN             (1)
-#define MICROPY_PY_BLUETOOTH                (0)
+#define MICROPY_PY_BLUETOOTH                (1)
 #define MICROPY_PY_ESPNOW                   (0)
 
 #define MICROPY_BOARD_STARTUP               tab5_board_startup

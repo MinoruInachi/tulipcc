@@ -1115,6 +1115,54 @@ Any connected AMY device (AMYboard, Tulip, Python on a computer) will respond to
 
 
 
+
+### Bluetooth MIDI (Tab5)
+
+On the Tab5, MIDI can also arrive and leave over Bluetooth LE. The ESP32-P4 has
+no radio of its own: the BLE controller lives on the board's ESP32-C6 and
+reaches the P4 as HCI multiplexed onto the same ESP-HOSTED link Wi-Fi already
+uses, with the host stack (NimBLE) running on the P4. Underneath it is plain
+MicroPython `bluetooth`, wrapped by the frozen `blemidi` module. This is BLE
+MIDI -- the MMA/Bluetooth SIG "MIDI over BLE" profile that macOS, iOS and every
+wireless MIDI keyboard speaks. The C6 is BLE-only, so there is no classic
+Bluetooth path.
+
+Both link roles work:
+
+```python
+import blemidi
+
+# Tulip as the instrument: a Mac, iPad or iPhone connects to "Tulip Tab5" and
+# plays it. It keeps advertising, and advertises again after a peer leaves.
+blemidi.peripheral()
+
+# Tulip as the host: find a BLE MIDI keyboard (CME WIDI, KORG microKEY Air,
+# Yamaha MD-BT01, ...) and connect to it. Returns its name, or None.
+blemidi.keyboard()
+
+blemidi.send((0x90, 60, 100))  # MIDI out, to whatever is on the other end
+blemidi.status()               # advertising, connected peers, packet counts
+blemidi.stop()                 # drop the link and stop advertising
+```
+
+Incoming messages are handed to `tulip.midi_local()`, which is AMY's own MIDI
+input path, so a Bluetooth keyboard behaves exactly like a USB one: notes play
+with no further setup, `midi.config` channel mappings apply, and every
+`midi.add_callback()` callback sees the message. `blemidi` strips the BLE-MIDI
+timestamp bytes and handles running status and sysex split across packets.
+
+Two things are worth knowing:
+
+- When a link drops, `blemidi` sends all-notes-off on all 16 channels. BLE MIDI
+  writes expect no response, so a peer that writes a note off and disconnects in
+  the same breath loses that write -- the note would otherwise hang forever.
+- The BLE stack comes up once per boot. `blemidi.stop()` drops the link and the
+  advertisement but leaves the stack running; bringing it up a second time
+  would deadlock the Bluetooth host task, so it is never restarted.
+
+`blemidi` is Tab5 only. On the other Tulips `import blemidi` fails, since no
+other board has a Bluetooth radio.
+
 ## Graphics system
 
 The Tulip GPU consists of 3 subsystems, in drawing order:

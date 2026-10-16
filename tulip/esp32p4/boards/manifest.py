@@ -25,6 +25,7 @@ freeze("$(MPY_DIR)/../tulip/shared/py", (
 	"ads1115.py",
 	"alles.py",
 	"arpegg.py",
+	"blemidi.py",
 	"chunk.py",
 	"drums.py",
 	"editor.py",

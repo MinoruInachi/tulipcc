@@ -504,3 +504,48 @@ documented deviations from upstream matplotlib, is in
 `tulip/shared/py/matplotlib/` and is named in this board's
 `boards/manifest.py`, which -- unlike the other ports -- lists its frozen
 files individually. It costs about 42 KB of app flash.
+
+## Bluetooth LE and BLE MIDI (current)
+
+Bluetooth works on this board, and it is BLE only: the P4 has no radio, the BLE
+controller is on the C6, and the C6 is not a classic-Bluetooth part. ESP-HOSTED
+carries HCI as one more interface type on the SDIO link Wi-Fi already uses
+("Hosted HCI over VHCI"), so there are no extra pins and nothing to wire -- the
+only thing this board adds is the host stack. NimBLE, not Bluedroid: Bluedroid's
+dual-mode half would be dead weight against a BLE-only controller.
+
+The firmware side is `MICROPY_PY_BLUETOOTH (1)` in `mpconfigboard.h` plus the
+Bluetooth block in `sdkconfig.board`. Two of those settings are not optional and
+both fail loudly:
+
+- `CONFIG_BT_CONTROLLER_DISABLED=y` -- a host-only build. There is no controller
+	on this chip to enable.
+- `CONFIG_BT_NIMBLE_STATIC_TO_DYNAMIC=n` -- with ESP-IDF 5.5's default (`y`),
+	`ble_hs_priv.h` redefines `ble_hs_max_attrs`, `ble_hs_max_services` and
+	`ble_hs_max_client_configs` as macros reaching through `ble_hs_state_ctx`,
+	which is NULL until `ble_hs_init()`. MicroPython's `nimble_reset_gatts_bss()`
+	writes all three *before* init, so `bluetooth.BLE().active(True)` panics
+	immediately (Store access fault, MTVAL=0x2). Upstream MicroPython's own
+	ESP32-P4 BLE variants hit this the same way on IDF 5.5.
+
+One run-time rule, enforced in `shared/py/blemidi.py` rather than by the C side:
+**never bring the stack up twice in one boot.** modbluetooth's `active(True)`
+always calls `mp_bluetooth_init()`, which deinits first, and tearing NimBLE down
+and back up over the hosted HCI link deadlocks the host task (Interrupt wdt
+timeout on CPU1) with no way back short of a reset.
+
+Costs, measured against the same tree without BLE: app image 4,442,480 ->
+4,577,952 bytes, so +132 KB -- 4.6 KB of that is the frozen blemidi.py -- with
+about 138 KB of the 0x480000 slot left; static RAM +720 B. NimBLE's pools are internal-heap allocations made when the stack
+starts (`BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL`); `..._EXTERNAL` moves them to PSRAM
+if internal RAM ever gets tight. The NimBLE host task pins to core 0 -- the
+audio core -- at priority 21 against the audio task's 24, so it only runs in the
+slack; the radio work itself is all on the C6.
+
+`shared/py/blemidi.py` is the BLE MIDI implementation (both link roles, frozen
+via this board's `boards/manifest.py`) and `docs/tulip_api.md` documents its
+API. Verified on hardware: 12 devices scanned; a Mac saw "Tulip Tab5"
+advertising the 03b80e5a-... MIDI service, connected, played a chord that AMY
+sounded, and received Tulip's own note-ons back as notifications with correct
+BLE-MIDI framing. Connecting as a central to a real BLE MIDI keyboard is the one
+path not yet tried on hardware.
