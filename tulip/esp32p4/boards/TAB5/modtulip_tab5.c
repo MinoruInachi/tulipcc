@@ -257,6 +257,26 @@ static mp_obj_t tulip_amy_render_load(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(tulip_amy_render_load_obj, tulip_amy_render_load);
 
+// tulip.amy_dual_core() -> how a block's oscillators are split across the cores
+// tulip.amy_dual_core(mode) -> set it, and return what it is now
+//
+//   0  off    -- the whole block renders on the audio task (core 0)
+//   1  on     -- always split, whatever it costs MicroPython
+//   2  auto   -- split only while the render is expensive enough to be worth
+//                taking core 1 from MicroPython (the default)
+//
+// This is not AMY's config.platform.multicore: that pins its helper to the core
+// this board already renders on, and splits at a fixed osc index. audio_tab5.c
+// does the split itself, on core 1 and at a boundary picked per block.
+// audio_diag()[11] counts the blocks that really used the helper and [12] is the
+// helper half's worst time, so a measurement can tell a split from a no-op.
+static mp_obj_t tulip_amy_dual_core(size_t n_args, const mp_obj_t *args) {
+    // mp_obj_get_int() takes True/False as 1/0, so the old boolean calls work.
+    if (n_args > 0) tab5_audio_set_dual_core(mp_obj_get_int(args[0]));
+    return mp_obj_new_int(tab5_audio_dual_core());
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_amy_dual_core_obj, 0, 1, tulip_amy_dual_core);
+
 static mp_obj_t tulip_amy_set_render_load_threshold(mp_obj_t threshold_obj) {
     amy_set_render_load_threshold(mp_obj_get_float(threshold_obj));
     return mp_const_none;
@@ -1496,6 +1516,11 @@ static mp_obj_t tulip_audio_diag(size_t n_args, const mp_obj_t *args) {
         mp_obj_new_int_from_uint(stats.peak_sample),
         mp_obj_new_int_from_uint(stats.max_deltas_us),
         mp_obj_new_int_from_uint(stats.max_dsp_us),
+        mp_obj_new_int_from_uint(stats.helper_blocks),
+        mp_obj_new_int_from_uint(stats.max_helper_us),
+        mp_obj_new_int_from_uint(stats.max_notify_us),
+        mp_obj_new_int_from_uint(stats.max_join_us),
+        mp_obj_new_int_from_uint(stats.helper_stalls),
     };
     return mp_obj_new_tuple(MP_ARRAY_SIZE(values), values);
 }
@@ -2958,6 +2983,7 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_sequencer_start), MP_ROM_PTR(&tulip_sequencer_start_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_get_synth_commands), MP_ROM_PTR(&tulip_amy_get_synth_commands_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_render_load), MP_ROM_PTR(&tulip_amy_render_load_obj) },
+    { MP_ROM_QSTR(MP_QSTR_amy_dual_core), MP_ROM_PTR(&tulip_amy_dual_core_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_set_render_load_threshold), MP_ROM_PTR(&tulip_amy_set_render_load_threshold_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_send), MP_ROM_PTR(&tulip_amy_send_obj) },
     { MP_ROM_QSTR(MP_QSTR_amy_message), MP_ROM_PTR(&tulip_amy_message_obj) },

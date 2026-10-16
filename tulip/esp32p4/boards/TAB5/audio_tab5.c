@@ -8,6 +8,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "bsp/m5stack_tab5.h"
@@ -30,14 +31,14 @@ static bool s_audio_ready;
 static volatile tab5_audio_stats_t s_audio_stats;
 
 #define TAB5_AUDIO_TASK_STACK_WORDS (16 * 1024 / sizeof(StackType_t))
-/* This task is the render half of AMY's multicore split: the other half runs in
- * AMY's own esp_render_task at ESP_TASK_PRIO_MAX - 1 on core 0, and
- * esp_render_on_cores() blocks until both halves finish. At tskIDLE_PRIORITY + 2
- * this half sat below nearly every IDF service task on core 1 (esp_timer,
- * esp-hosted, USB), so a block's render time was really "render time plus
- * whatever preempted us" -- which is where the multi-millisecond spikes and the
- * audible dropouts came from. AMY runs its equivalent loop at the same priority
- * used here; it is safe because the loop always blocks in the codec write. */
+/* This task owns a block: deltas, the render (one half of it when dual-core is
+ * on -- see "Two-core rendering" below), the mix and the codec write. At
+ * tskIDLE_PRIORITY + 2 it sat below nearly every IDF service task on its core
+ * (esp_timer, esp-hosted, USB), so a block's render time was really "render
+ * time plus whatever preempted us" -- which is where the multi-millisecond
+ * spikes and the audible dropouts came from. AMY runs its equivalent loop at
+ * the same priority used here; it is safe because the loop always blocks in the
+ * codec write. */
 #define TAB5_AUDIO_TASK_PRIORITY (ESP_TASK_PRIO_MAX - 1)
 // Core 0. Core 1 runs MicroPython, and this task sits at the top of the priority
 // range: leaving it there starved mp_task (and the idle task, which trips the
@@ -87,6 +88,303 @@ static void tab5_feed_mic_to_amy(void)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Two-core rendering
+//
+// AMY splits a block's oscillators across both cores on ESP
+// (esp_render_on_cores() in amy/src/i2s.c), and Tulip CC on the S3 ships that
+// way. Setting amy_config.platform.multicore here did not work, for two
+// reasons that are both about this board rather than about dual-core
+// rendering:
+//
+//  1. AMY pins its helper task to AMY_RENDER_TASK_COREID, which is core 0 --
+//     the core this audio task also runs on, because core 1 belongs to
+//     MicroPython and this task sits at the top of the priority range. So the
+//     two "halves" never ran in parallel: they time-sliced one core at equal
+//     priority and paid a task-notify round trip per block on top of that.
+//  2. AMY's split is the fixed range 0..max_oscs/2 against the rest. Tulip
+//     workloads pack their audible oscs into the low indices, so one half got
+//     all of the work and the other got none.
+//
+// So the split happens here instead: the helper sits on core 1, and the
+// boundary is chosen per block from where the audible oscs actually are. The
+// renderer is still AMY's -- amy_render(start, end, core) exists for exactly
+// this, fbl[]/per_osc_fb[]/core_max[] are allocated for both cores whatever
+// config.platform.multicore says (amy.c's oscs_init loops to AMY_CORES, which
+// is 2 on any ESP build), and amy_fill_buffer() sums the two. AMY's own
+// multicore stays off so it creates no task of its own.
+//
+// Measured on this board with sustained oscs packed from index 0, split against
+// not: 64 sine 3063 -> 2400 us worst block, 64 pulse 5735 -> 4032, 128 pulse
+// 13869 -> 8162, and the smoothed render load 0.43 -> 0.27, 0.91 -> 0.54,
+// 2.28 -> 1.28 -- about 1.75x the throughput, with the two halves finishing
+// within a few hundred microseconds of each other. xanadu.py's worst block went
+// 4647 -> 3013 us. A split block is bit-identical to a single-core one: AMY
+// mixes in fixed point, and one osc panned hard left on the helper with another
+// panned hard right on this task read 961 and 480 either way.
+//
+// The helper does not take the render lock: this task holds it across the whole
+// block and only releases it after joining, so the teardown that lock exists to
+// keep out (RESET_AMY freeing fbl and every osc) still cannot start underneath
+// either half. AMY's esp_render_task does the same.
+#define TAB5_RENDER_HELPER_CORE 1
+// Same priority as the audio task. It is only runnable between the notify and
+// the join -- well under a block -- so core 1's idle task still gets the rest
+// of every block and the task watchdog stays happy. Lower than this and an IDF
+// service task on core 1 would decide when our half of the audio finishes.
+#define TAB5_RENDER_HELPER_PRIORITY (ESP_TASK_PRIO_MAX - 1)
+#define TAB5_RENDER_HELPER_STACK_WORDS (12 * 1024 / sizeof(StackType_t))
+
+// What tulip.amy_dual_core() selects between. Auto is the default, because the
+// second core is not free: it is MicroPython's, and the helper takes it for as
+// long as its half of the render runs. Measured here against the same loop with
+// the split off, a counting loop in Python kept 47% of its throughput under 64
+// sustained pulse oscs and 10% under 128 -- at 128 the helper is busy longer
+// than a whole block. A Tab5 app usually has far more Python to run than audio
+// to render, so the split should only happen when it buys something: at 32
+// sine oscs, which one core renders in a quarter of a block, auto leaves core 1
+// alone and Python keeps all of it.
+#define TAB5_DUAL_CORE_OFF  0
+#define TAB5_DUAL_CORE_ON   1
+#define TAB5_DUAL_CORE_AUTO 2
+// Percentages of one block's time, for auto. Engage once a single core is half
+// spent: a chord can double the cost of a block, and the estimate below leads it
+// by a block or two at best. Release well below that, so a load sitting near the
+// line does not hand core 1 back and forth every other block.
+#define TAB5_DUAL_CORE_ON_PCT  50
+#define TAB5_DUAL_CORE_OFF_PCT 30
+// A flash operation freezes core 1. MicroPython reads and writes its file
+// system through esp_flash, which takes the flash lock and spins its own core
+// with interrupts off, so the helper -- the highest-priority task on that core
+// -- simply cannot be scheduled until the operation finishes. Measured on this
+// board with the split forced on and 64 pulse oscs sounding: a Python loop
+// reading a file held the helper off for 34 ms and one writing a file for
+// 62 ms, against 27-55 us while Python was only doing arithmetic, allocating,
+// or collecting garbage. Core 0 keeps running through all of it, which is why
+// the single-core path never saw this.
+//
+// One stall is as many late blocks as it is long, if we keep asking. So the
+// first one stands the split down and the audio goes back to being core 0's
+// alone for about a second -- where file I/O cannot reach it. Auto only: mode 1
+// means what it says, and is the mode that matches the S3's behaviour.
+//
+// The trigger is how long the helper took to START, not how long the join took.
+// A join is also long whenever the helper's half is simply the slower of the
+// two, which is ordinary imbalance and no reason to stand anything down; a
+// notify that takes more than a millisecond to be picked up by the
+// highest-priority task on its core is nothing but a stall.
+#define TAB5_DUAL_CORE_STALL_US 1000
+#define TAB5_DUAL_CORE_STALL_BLOCKS 175   /* about a second of blocks */
+
+static TaskHandle_t s_render_helper;
+static SemaphoreHandle_t s_render_helper_done;
+static volatile uint16_t s_helper_start;
+static volatile uint16_t s_helper_end;
+static volatile uint32_t s_helper_us;   // the last half the helper rendered
+static volatile int64_t s_helper_notified_at;  // when we asked for that half
+static volatile uint32_t s_helper_notify_us;  // how long it took to be picked up
+static volatile uint8_t s_dual_core_mode = TAB5_DUAL_CORE_AUTO;
+// Whether the last block really split. Also the hysteresis state for auto, and
+// what tells us fbl[1] needs clearing.
+static bool s_dual_core_active;
+// Smoothed cost of a block's rendering as a single core would have paid it: the
+// two halves added together when we split, the whole block when we did not.
+// Measuring it that way keeps the auto decision from chasing its own effect --
+// the measured block time nearly halves the moment the helper engages, which on
+// its own would release it again the next block. Rises most of the way at once
+// and falls by a thirty-second of the gap per block, so a chord gets the second
+// core almost immediately and a short gap does not give it up.
+static uint32_t s_render_cost_us;
+// Blocks left to render single-core after a stall (auto only).
+static uint32_t s_stall_cooldown;
+// Indices of this block's audible oscs, so the boundary costs one pass over
+// synth[] instead of two. Internal RAM: synth[] itself is in PSRAM and this is
+// walked once per block.
+static uint16_t *s_audible;
+static uint16_t s_audible_max;
+// s_cut_ok[i]: a boundary at i does not cut a group of oscs that has to render
+// on one core. See tab5_pick_split().
+static uint8_t *s_cut_ok;
+
+static void tab5_render_helper_task(void *ignored)
+{
+    (void)ignored;
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // from tab5_render_block()
+        int64_t t0 = esp_timer_get_time();
+        uint32_t notify_us = (uint32_t)(t0 - s_helper_notified_at);
+        s_helper_notify_us = notify_us;
+        if (notify_us > s_audio_stats.max_notify_us) {
+            s_audio_stats.max_notify_us = notify_us;
+        }
+        amy_render(s_helper_start, s_helper_end, 1);
+        uint32_t helper_us = (uint32_t)(esp_timer_get_time() - t0);
+        s_helper_us = helper_us;
+        if (helper_us > s_audio_stats.max_helper_us) {
+            s_audio_stats.max_helper_us = helper_us;
+        }
+        xSemaphoreGive(s_render_helper_done);  // to tab5_render_block()
+    }
+}
+
+// Two oscs that have to render on the same core: forbid every boundary between
+// them. A boundary b sends [0, b) to the helper, so it separates a and b's osc
+// exactly when it falls in (lo, hi].
+static void tab5_bind_oscs(uint16_t a, uint16_t b, uint16_t oscs)
+{
+    if (AMY_IS_UNSET(b) || b >= oscs) return;
+    const uint16_t lo = a < b ? a : b;
+    const uint16_t hi = a < b ? b : a;
+    for (uint16_t i = lo + 1; i <= hi; i++) s_cut_ok[i] = 0;
+}
+
+// Where to cut the osc range so both cores get half of this block's audible
+// oscs. Count, not cost: a PCM osc and a sine are not the same work, but the
+// count is what we can read without rendering, and it is already far better
+// than AMY's fixed midpoint. Returns 0 when there is no boundary worth or safe
+// to use, which the caller reads as "render it all here".
+//
+// Oscillators are not independent, so the boundary cannot fall just anywhere.
+// A Juno patch's voice is one chain -- osc 0 -> 2 -> 3 -> 4 -> 5, with osc 1 as
+// its LFO -- and render_osc_wave() renders a whole chain into the buffer of
+// whichever osc it reached first, guarding with synth[osc]->render_clock so the
+// rest is not rendered twice. amy_render() then mixes that buffer with THAT
+// osc's pan and level. Cut a chain in two and the guard becomes a race: the
+// core that reaches the tail first renders it into its own buffer under its own
+// pan, and the other core mixes silence instead, so the mix changes from block
+// to block. Measured by hand -- osc 0 panned hard left chained to osc 3 panned
+// hard right -- the right channel went from silent to a peak of 800 and the
+// left peak stopped being repeatable. That is what made 01_Simple_Piano slot 2
+// in kanplay (two Juno parts, patches 47 and 73) sound wrong.
+//
+// DX7 patches have the same problem through algo_source and anything with an
+// LFO through mod_source, so all three links are honoured, and so is voice
+// membership: AMY allocates a voice's oscs contiguously and osc_to_voice names
+// them, which covers patches whose oscs are related in ways not visible here.
+static uint16_t tab5_pick_split(void)
+{
+    const uint16_t oscs = AMY_OSCS < s_audible_max ? AMY_OSCS : s_audible_max;
+    uint16_t count = 0;
+    memset(s_cut_ok, 1, oscs);
+    for (uint16_t osc = 0; osc < oscs; osc++) {
+        const struct synthinfo *s = synth[osc];
+        if (s == NULL) continue;
+        if (s->status == SYNTH_AUDIBLE) s_audible[count++] = osc;
+        if (osc > 0 && osc_to_voice != NULL &&
+            AMY_IS_SET(osc_to_voice[osc]) && AMY_IS_SET(osc_to_voice[osc - 1]) &&
+            osc_to_voice[osc] == osc_to_voice[osc - 1]) {
+            s_cut_ok[osc] = 0;
+        }
+        tab5_bind_oscs(osc, s->chained_osc, oscs);
+        for (uint8_t i = 0; i < NUM_MOD_SOURCES; i++) {
+            tab5_bind_oscs(osc, s->mod_source[i], oscs);
+        }
+        for (uint8_t i = 0; i < MAX_ALGO_OPS; i++) {
+            // algo_source is int16 because -1 means "no osc", and its unset
+            // value (SHRT_MAX) is positive, so both have to be excluded.
+            const int16_t a = s->algo_source[i];
+            if (AMY_IS_SET(a) && a >= 0) tab5_bind_oscs(osc, (uint16_t)a, oscs);
+        }
+    }
+    if (count < 2) return 0;
+    // Nearest legal boundary to the median, in either direction, that still
+    // leaves both cores something to render. A patch whose voice spans every
+    // audible osc has none, and renders on one core.
+    const uint16_t median = s_audible[count / 2];
+    uint16_t up = median;
+    while (up < oscs && !s_cut_ok[up]) up++;
+    if (up >= oscs || up > s_audible[count - 1]) up = 0;
+    uint16_t down = median;
+    while (down > 0 && !s_cut_ok[down]) down--;
+    if (down <= s_audible[0]) down = 0;
+    if (up == 0) return down;
+    if (down == 0) return up;
+    return (median - down <= up - median) ? down : up;
+}
+
+static bool tab5_want_split(void)
+{
+    switch (s_dual_core_mode) {
+        case TAB5_DUAL_CORE_OFF: return false;
+        case TAB5_DUAL_CORE_ON:  return true;
+        default: {
+            if (s_stall_cooldown > 0) {
+                s_stall_cooldown--;
+                return false;
+            }
+            const uint32_t pct = s_dual_core_active ? TAB5_DUAL_CORE_OFF_PCT
+                                                    : TAB5_DUAL_CORE_ON_PCT;
+            return s_render_cost_us > (AMY_BLOCK_US * pct) / 100;
+        }
+    }
+}
+
+// What amy_render_audio()'s single-threaded branch does (amy/src/i2s.c), with
+// our own split in place of esp_render_on_cores(). Called with the render lock
+// already held.
+static int16_t *tab5_render_block(void)
+{
+    const int64_t t0 = esp_timer_get_time();
+    uint32_t cost_us;
+    uint16_t split = 0;
+    if (s_render_helper != NULL && tab5_want_split()) {
+        split = tab5_pick_split();
+    }
+    if (split > 0) {
+        s_helper_start = 0;
+        s_helper_end = split;
+        s_helper_us = 0;
+        s_helper_notify_us = 0;
+        const int64_t r0 = esp_timer_get_time();
+        s_helper_notified_at = r0;
+        xTaskNotifyGive(s_render_helper);        // to tab5_render_helper_task
+        amy_render(split, AMY_OSCS, 0);
+        const int64_t mine_done = esp_timer_get_time();
+        cost_us = (uint32_t)(mine_done - r0);
+        xSemaphoreTake(s_render_helper_done, portMAX_DELAY);
+        const uint32_t join_us = (uint32_t)(esp_timer_get_time() - mine_done);
+        if (join_us > s_audio_stats.max_join_us) s_audio_stats.max_join_us = join_us;
+        if (s_helper_notify_us > TAB5_DUAL_CORE_STALL_US) {
+            s_stall_cooldown = TAB5_DUAL_CORE_STALL_BLOCKS;
+            s_audio_stats.helper_stalls++;
+        }
+        cost_us += s_helper_us;   // what one core would have spent on the block
+        s_audio_stats.helper_blocks++;
+        s_dual_core_active = true;
+    } else {
+        const int64_t r0 = esp_timer_get_time();
+        amy_render(0, AMY_OSCS, 0);
+        cost_us = (uint32_t)(esp_timer_get_time() - r0);
+        // fbl[1] still holds whatever the helper rendered last, and
+        // amy_fill_buffer() sums it into fbl[0] unconditionally on a dual-core
+        // build -- so a block that skips the helper has to clear it or that
+        // half-block drones on under everything. An empty range is exactly the
+        // bzero, with no oscs to walk.
+        if (s_dual_core_active) {
+            amy_render(0, 0, 1);
+            s_dual_core_active = false;
+        }
+    }
+    if (cost_us > s_render_cost_us) s_render_cost_us += (cost_us - s_render_cost_us) >> 1;
+    else                            s_render_cost_us -= (s_render_cost_us - cost_us) >> 5;
+    int16_t *buf = amy_fill_buffer();
+    // AMY's CPU overload failsafe, which amy_render_audio() would have called.
+    amy_overload_check((uint32_t)(esp_timer_get_time() - t0));
+    return buf;
+}
+
+void tab5_audio_set_dual_core(int mode)
+{
+    if (mode < TAB5_DUAL_CORE_OFF) mode = TAB5_DUAL_CORE_OFF;
+    if (mode > TAB5_DUAL_CORE_AUTO) mode = TAB5_DUAL_CORE_AUTO;
+    s_dual_core_mode = (uint8_t)mode;
+}
+
+int tab5_audio_dual_core(void)
+{
+    return s_dual_core_mode;
+}
+
 static void tab5_audio_task(void *ignored)
 {
     (void)ignored;
@@ -121,7 +419,7 @@ static void tab5_audio_task(void *ignored)
         tab5_feed_mic_to_amy();
         amy_execute_deltas();
         const int64_t deltas_done = esp_timer_get_time();
-        int16_t *samples = amy_render_audio();
+        int16_t *samples = tab5_render_block();
         const int64_t dsp_done = esp_timer_get_time();
         // Split the two halves: event processing (voice allocation, patch
         // loading) behaves very differently from the per-block DSP, and only
@@ -228,13 +526,16 @@ void tab5_audio_init(void)
     amy_config_t amy_config = amy_default_config();
     amy_config.audio = AMY_AUDIO_IS_NONE;
     amy_config.midi = AMY_MIDI_IS_NONE;
-    // Measured on Tab5, not assumed: AMY's ESP multicore path splits rendering by
-    // a static osc index range (0..max_oscs/2 on core 0, the rest here) and blocks
-    // on a task notify round-trip every block. Typical Tulip workloads pack their
-    // audible oscs into the low indices, so core 0 does nearly all the work while
-    // this task waits -- and the handshake cost dwarfs anything it saves. With it
-    // off, 16 voices went from 2418us to 401us peak render, and xanadu.py's worst
-    // block from 26.4ms to 8.1ms (the block budget is 5.8ms).
+    // AMY's own multicore stays off, but the rendering is still split across
+    // both cores -- we do it ourselves, because AMY's version cannot work on
+    // this board: it pins its helper to core 0, where this audio task already
+    // runs, and it splits at the fixed osc index max_oscs/2 while Tulip packs
+    // its voices into the low ones. Measured here that way, 16 voices went from
+    // 401us to 2418us peak render and xanadu.py's worst block from 8.1ms to
+    // 26.4ms (the block budget is 5.8ms) -- two halves time-slicing one core,
+    // one of them with all the oscs, plus a task-notify round trip per block.
+    // See "Two-core rendering" above for what replaced it; multithread stays
+    // off because this task is the audio loop.
     amy_config.platform.multicore = 0;
     amy_config.platform.multithread = 0;
     amy_config.features.default_synths = 0;
@@ -296,6 +597,31 @@ void tab5_audio_init(void)
     amy_config.amy_external_render_hook = tulip_user_render_hook;
 #endif
     amy_start(amy_config);
+
+    // The core-1 render helper. Created before the audio task so that
+    // tab5_render_block() never sees a half-built one; if either allocation
+    // fails the handle stays NULL and every block renders on the audio task,
+    // which is just the single-core path.
+    s_audible_max = amy_config.max_oscs;
+    s_audible = heap_caps_malloc(sizeof(uint16_t) * s_audible_max, MALLOC_CAP_INTERNAL);
+    s_cut_ok = heap_caps_malloc(s_audible_max, MALLOC_CAP_INTERNAL);
+    s_render_helper_done = xSemaphoreCreateBinary();
+    if (s_audible == NULL || s_cut_ok == NULL || s_render_helper_done == NULL) {
+        ESP_LOGW(TAG, "No dual-core render: out of internal RAM");
+    } else if (xTaskCreatePinnedToCore(
+                   tab5_render_helper_task,
+                   "tab5_render1",
+                   TAB5_RENDER_HELPER_STACK_WORDS,
+                   NULL,
+                   TAB5_RENDER_HELPER_PRIORITY,
+                   &s_render_helper,
+                   TAB5_RENDER_HELPER_CORE) != pdPASS) {
+        s_render_helper = NULL;
+        ESP_LOGW(TAG, "No dual-core render: helper task would not start");
+    } else {
+        fprintf(stderr, "AMY render helper on core %d\n", TAB5_RENDER_HELPER_CORE);
+        fflush(stderr);
+    }
 
     BaseType_t task_result = xTaskCreatePinnedToCore(
         tab5_audio_task,
