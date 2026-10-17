@@ -63,8 +63,21 @@ jobs:
           # build; all are public, so the default GITHUB_TOKEN can clone them.
           submodules: recursive
 
+      # Fills MICROPY_GIT_TAG / MICROPY_GIT_HASH from the micropython submodule.
+      # Without it, actions/checkout's tagless shallow submodule clone makes the
+      # firmware boot as "MicroPython <hash>" instead of the full
+      # "MicroPython v1.30.0-preview.60.g<hash>" a local build shows.
+      - uses: ./.github/actions/micropython-version
+
       - name: Build STICKS3 firmware + assemble images
         uses: espressif/esp-idf-ci-action@v1
+        env:
+          # Set by ./.github/actions/micropython-version above -- the REPL
+          # banner, os.uname().version, the panic handler and
+          # tulip.build_strings() all come from these. Do not drop that step:
+          # an empty MICROPY_GIT_TAG makes py/makeversionhdr.py exit 1.
+          MICROPY_GIT_TAG: ${{ env.MICROPY_GIT_TAG }}
+          MICROPY_GIT_HASH: ${{ env.MICROPY_GIT_HASH }}
         with:
           # Must match what the board is developed against (dependencies.lock).
           esp_idf_version: v5.5.4

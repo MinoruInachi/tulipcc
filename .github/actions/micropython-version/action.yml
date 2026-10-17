@@ -1,0 +1,90 @@
+name: MicroPython version info
+description: >-
+  Export MICROPY_GIT_TAG / MICROPY_GIT_HASH so a shallow CI checkout produces
+  the same REPL banner as a local build. Run it after the submodules are
+  initialized and before the firmware build.
+
+# Why this exists: the banner (py/mpconfig.h MICROPY_BANNER_NAME_AND_VERSION,
+# also os.uname().version, the esp32 panic handler, and tulip.build_strings())
+# is MICROPY_GIT_TAG, which py/makeversionhdr.py fills from
+#
+#   git describe --tags --dirty --always --match 'v[1-9].*' --abbrev=10
+#
+# run inside the micropython submodule. actions/checkout clones submodules
+# shallow (--depth 1) and without tags, so `--tags` matches nothing, the
+# `--always` fallback kicks in, and CI firmware boots as
+#
+#   MicroPython dcb5a13f20 on 2026-10-16
+#
+# where the same commit built locally says
+#
+#   MicroPython v1.30.0-preview.60.gdcb5a13f20 on 2026-10-16
+#
+# A tag can only be described if its commit is in the history, so the depth-1
+# history has to be extended -- but only the *commits* are needed, not their
+# trees or blobs. `--filter=tree:0 --deepen` fetches exactly that: measured on
+# this pin, 4 s and +13 MB of .git (vs 22 s / +170 MB for a plain --deepen,
+# which drags in every tag's trees, and far more for --unshallow). The working
+# tree is untouched, so the build still compiles the pinned sources.
+#
+# The resolved values are also exported, so the version is computed here --
+# where the checkout and git config are known-good -- rather than depending on
+# git working inside the esp-idf-ci-action container. Both are always set to a
+# non-empty value: makeversionhdr.py treats an empty MICROPY_GIT_TAG as a fatal
+# error, not as "fall back to git".
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve micropython version
+      shell: bash
+      working-directory: micropython
+      run: |
+        set -euo pipefail
+
+        mp_describe() {
+          git describe --tags --dirty --always --match 'v[1-9].*' --abbrev=10 2>/dev/null || true
+        }
+
+        tag=$(mp_describe)
+        case "$tag" in
+          v*) ;;      # full clone (a local run, say) -- the tag is already here
+          *)
+            # Shallow CI checkout. Deepen (commits only) until the nearest v*
+            # tag is reachable; tags pointing into the fetched history are
+            # auto-followed, so no --tags is needed. The pin currently sits 60
+            # commits past v1.30.0-preview, so the first round normally wins.
+            for deepen in 256 1024 4096; do
+              git fetch --quiet --no-recurse-submodules --filter=tree:0 --deepen="$deepen" origin || break
+              tag=$(mp_describe)
+              case "$tag" in v*) break;; esac
+            done
+            ;;
+        esac
+
+        case "$tag" in
+          v*)
+            # Make it semver-compatible exactly as py/makeversionhdr.py does:
+            # keep the first '-', turn every later one into '.'
+            # (v1.30.0-preview-60-gdcb5a13f20 -> v1.30.0-preview.60.gdcb5a13f20)
+            head=${tag%%-*}
+            rest=${tag#*-}
+            [ "$head" = "$tag" ] || tag="$head-${rest//-/.}"
+            ;;
+          *)
+            # Could not reach a tag: keep today's behaviour rather than fail the
+            # build, but say so loudly in the job summary.
+            tag=$(git rev-parse --short=10 HEAD)
+            echo "::warning title=MicroPython version::no v* tag reachable in the micropython submodule; the banner will show the bare hash ($tag)"
+            ;;
+        esac
+
+        # Plain --short, like makeversionhdr.py's own get_hash_from_git(). Note
+        # git scales the abbreviation with the object count, so this is 8 chars
+        # on the trimmed CI clone and 9 on a full local one -- it is only
+        # tulip.build_strings()[1], not the banner.
+        hash=$(git rev-parse --short HEAD)
+
+        echo "MICROPY_GIT_TAG=$tag" >> "$GITHUB_ENV"
+        echo "MICROPY_GIT_HASH=$hash" >> "$GITHUB_ENV"
+        echo "micropython version: $tag ($hash)"
