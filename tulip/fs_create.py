@@ -54,7 +54,9 @@ SYSTEM_HOME = "../fs/%s" % (fs_source)
 # and .mid both match).
 # .z is the IME dictionary (fs/tulip/ime/jdic.z), a deflate stream rather than
 # anything readable -- see shared/gen_jdict.py.
-good_exts = [".txt", ".png", ".py", ".json", ".obj", ".wav", ".mid", ".z"]
+# .perf is a performance file (ex/perf.py): the notes of a piece, as text.
+good_exts = [".txt", ".png", ".py", ".json", ".obj", ".wav", ".mid", ".z",
+             ".perf"]
 # And these folders
 source_folders = ['app','ex','im']
 
