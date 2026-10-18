@@ -621,20 +621,22 @@ def _close_launcher():
     lv_launcher = None
     _repaint_repl_background()
 
-# Apps that ship as a folder in tulip/fs/tulip/ex rather than frozen into the
-# firmware: launcher label -> folder (and module) name.
-_launcher_ex_apps = {"Loopstudio": "loopstudio", "Kanplay": "kanplay"}
+# Apps that ship in tulip/fs/tulip/ex rather than frozen into the firmware:
+# launcher label -> module name, whether that is a folder or a single file.
+_launcher_ex_apps = {"Loopstudio": "loopstudio", "Kanplay": "kanplay",
+                     "Scope": "scope"}
 
 def _run_ex_app(name):
-    """Run a folder app from /user (a copy being worked on) or /sys/ex.
+    """Run an app from /user (a copy being worked on) or /sys/ex.
 
-    tulip.run(name) alone finds a folder app only in the current directory or
-    /sys/ex, so from the launcher it would depend on where the REPL was last
-    cd'd to. A path to the module file is unambiguous."""
+    tulip.run(name) alone finds one only in the current directory or /sys/ex,
+    so from the launcher it would depend on where the REPL was last cd'd to.
+    A path to the module file is unambiguous."""
     for base in (tulip.root_dir() + "user/", tulip.root_dir() + "sys/ex/"):
-        if tulip.exists(base + name + "/" + name + ".py"):
-            tulip.run(base + name + "/" + name)
-            return
+        for path in (base + name + "/" + name, base + name):
+            if tulip.exists(path + ".py"):
+                tulip.run(path)
+                return
     tulip.run(name)
 
 def launcher_cb(e):
@@ -695,8 +697,9 @@ def launcher(ignore=True):
     b_drums = lv_launcher.add_button(lv.SYMBOL.NEXT, "Drums")
     b_drums.add_event_cb(launcher_cb, lv.EVENT.CLICKED, None)
     if tulip.board() == "TAB5":
-        # Both are laid out for a touch screen; loopstudio needs all 1280 px.
-        for text in ("Loopstudio", "Kanplay"):
+        # All of these are laid out for a touch screen; loopstudio needs all
+        # 1280 px.
+        for text in ("Loopstudio", "Kanplay", "Scope"):
             b_ex = lv_launcher.add_button(lv.SYMBOL.AUDIO, text)
             b_ex.add_event_cb(launcher_cb, lv.EVENT.CLICKED, None)
     b_editor = lv_launcher.add_button(lv.SYMBOL.FILE, "Editor")
