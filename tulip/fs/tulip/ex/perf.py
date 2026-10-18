@@ -101,12 +101,13 @@ SUFFIX = ".perf"
 DIRS = ("/user/pieces", "/sys/ex/pieces", "/user")
 
 # General MIDI drum names, for the kit notes a piece is likely to use.
+# Six characters at most: these are read in a lane label beside the roll.
 GM_DRUMS = {
     35: "kick2", 36: "kick", 37: "stick", 38: "snare", 39: "clap",
-    40: "snare2", 41: "tom-lo", 42: "hat", 43: "tom-lo2", 44: "pedal",
-    45: "tom-mid", 46: "hat-open", 47: "tom-mid2", 48: "tom-hi",
-    49: "crash", 50: "tom-hi2", 51: "ride", 52: "china", 53: "bell",
-    54: "tamb", 55: "splash", 56: "cowbell", 57: "crash2", 59: "ride2",
+    40: "snare2", 41: "tom-l", 42: "hat", 43: "tom-l2", 44: "pedal",
+    45: "tom-m", 46: "hat-op", 47: "tom-m2", 48: "tom-h",
+    49: "crash", 50: "tom-h2", 51: "ride", 52: "china", 53: "bell",
+    54: "tamb", 55: "splash", 56: "cowbel", 57: "crash2", 59: "ride2",
 }
 
 # Used for a part whose file gives no colour, by part index.
@@ -214,6 +215,7 @@ class Performance:
         # (tick, part index, midi note, velocity 0..1, duration in ticks)
         self.notes = []
         self._open = {}                 # (part, note) -> index, while building
+        self._released = set()          # parts that were ever sent a note-off
 
     # ---------------------------------------------------------- building
     def add_part(self, part):
@@ -223,28 +225,42 @@ class Performance:
     def note_on(self, tick, part, note, vel):
         """Start a note. A second on for a pitch already sounding ends the
         first one, the way a synth voice behaves."""
-        self.note_off(tick, part, note)
+        self._close(tick, part, note)
         self._open[(part, note)] = len(self.notes)
         self.notes.append([tick, part, note, vel, 0])
 
     def note_off(self, tick, part, note):
+        # Only a real release marks the part. note_on() closes a pitch it is
+        # about to restrike through _close() instead, which must not count:
+        # the difference is exactly what finish() uses to tell a part that is
+        # released from one that is left to ring.
+        self._released.add(part)
+        self._close(tick, part, note)
+
+    def _close(self, tick, part, note):
         i = self._open.pop((part, note), None)
         if i is not None:
             n = self.notes[i]
             n[4] = max(1, tick - n[0])
 
     def finish(self, rebase=True):
-        """Close the piece: unmatched note-ons keep duration 0 (a drum hit),
+        """Close the piece: notes that were never released keep duration 0,
         ticks are rebased so the first note is at 0, and notes go in order."""
         self._open = {}
         if not self.notes:
             return self
-        # A drum part never gets a note-off -- AMY's kits ignore them, and the
-        # sound rings for as long as its sample does. Without this a repeated
-        # hi-hat would pick up a length from the hit that followed it, because
-        # note_on() ends a pitch that is already sounding.
+        # A part that was never sent a note-off is one whose notes ring on
+        # their own envelope -- every drum kit, and any synth patch that
+        # decays to zero while the note is still held. Giving those notes a
+        # length would make a Player release them, which the piece never did;
+        # and without this a repeated hi-hat would pick up a length from the
+        # hit that followed it, because note_on() ends a pitch already
+        # sounding. Drum parts are included whatever they were sent: AMY's
+        # kits ignore note-offs.
         for n in self.notes:
-            if n[1] < len(self.parts) and self.parts[n[1]].is_drum:
+            part = n[1]
+            if part not in self._released or (part < len(self.parts)
+                                              and self.parts[part].is_drum):
                 n[4] = 0
         if rebase:
             first = min(n[0] for n in self.notes)
@@ -655,10 +671,6 @@ class Recorder:
         self.by_synth = {}
         self._on = self._off = None
         self._started = False
-        # Parts that were ever sent a note-off. One that was not plays notes
-        # that ring on their own envelope, and giving them a length would make
-        # a Player release them -- which the piece never did.
-        self.released = set()
 
     def _part(self, s):
         key = s.synth
@@ -691,7 +703,6 @@ class Recorder:
         if on:
             self.perf.note_on(tick, part, note, vel)
         else:
-            self.released.add(part)
             self.perf.note_off(tick, part, note)
 
     def _tick(self, ticks):
@@ -731,10 +742,4 @@ class Recorder:
             self._on = self._off = None
         for i, part in enumerate(self.perf.parts):
             part.color = COLORS[i % len(COLORS)]
-        # note_on() ends a pitch that is already sounding, which is right for a
-        # part that is released and wrong for one that is not: there a repeated
-        # note would pick up a length from the strike after it.
-        for n in self.perf.notes:
-            if n[1] not in self.released:
-                n[4] = 0
         return self.perf.finish()

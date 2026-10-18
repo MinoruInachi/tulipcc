@@ -247,9 +247,9 @@ See some examples of more complex UIs using `UIScreen`:
  * [`voices`](https://github.com/shorepine/tulipcc/blob/main/tulip/shared/py/voices.py)
  * [`loopstudio`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/loopstudio/loopstudio.py) - an FL Studio Mobile style pattern workstation, built for the Tab5
  * [`kanplay`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/kanplay/kanplay.py) - a one-finger chord instrument after KANTAN Play
- * [`scope`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/scope.py) - plays a performance file and shows the score going by: a piece map, a level and the pitches sounding for each part, and a two-bar piano roll. Tap a part to mute it. It opens any `.perf` file it finds in `/user/pieces` or `/sys/ex/pieces`, and `/sys/ex/pieces/xanadu.perf` ships as a sample
+ * [`scope`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/scope.py) - plays a performance file and shows the score going by: a piece map, a level and the pitches sounding for each part, and a two-bar piano roll. Tap a part to mute it. It opens any `.perf` file it finds in `/user/pieces` or `/sys/ex/pieces`, and `xanadu.perf` and `technopop.perf` ship there as samples
 
-[`perf.py`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/perf.py) is the file format behind it, and reads and writes it: a piece as its parts and its notes, in text. `perf.Player` hands one to AMY a few beats at a time, and `perf.Recorder` captures whatever plays through `synth.py` -- a transcription module, a sequencer app, the MIDI input -- into the same file. `/sys/ex/pieces/xanadu.perf` was made that way from `ex/xanadu.py`:
+[`perf.py`](https://github.com/MinoruInachi/tulipcc/blob/dev_tab5/tulip/fs/tulip/ex/perf.py) is the file format behind it, and reads and writes it: a piece as its parts and its notes, in text. `perf.Player` hands one to AMY a few beats at a time, and `perf.Recorder` captures whatever plays through `synth.py` -- a transcription module, a sequencer app, the MIDI input -- into the same file. `xanadu.perf` was made that way from `ex/xanadu.py`, which has no score to read; `technopop.perf` was written straight out of `ex/technopop.py`'s own bar patterns instead, which is cheaper when a piece has them:
 
 ```python
 import perf

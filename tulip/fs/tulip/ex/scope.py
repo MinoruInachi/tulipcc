@@ -75,7 +75,8 @@ FONT_T, FONT_L, FONT_N, FONT_X = 18, 15, 15, 13     # title, label, number, tiny
 SW, SH = tulip.screen_size()
 MARGIN = 10
 TASK_BAR_W = 140            # the quit / switch buttons LVGL keeps at the top right
-RIGHT = SW - MARGIN - 44    # the pitch-label column runs from here to the edge
+LABEL_COL = 62              # wide enough for a six-character drum name
+RIGHT = SW - MARGIN - LABEL_COL     # the label column, to the right edge
 
 HEAD_Y, HEAD_H = 6, 48
 FILES_X, FILES_W = MARGIN + 8, 92           # the button back to the list
@@ -248,11 +249,17 @@ class Scope:
         lo, hi = p.pitch_range() or (60, 72)
         self.lo, self.hi = lo, hi
         # The drum lanes take the foot of the band, one per drum sound used.
+        # Each carries its name, so a kit that uses more sounds takes more
+        # room rather than squeezing the labels on top of each other -- an 808
+        # piece using six of them had them overlapping at the default height.
         drums = p.drum_notes()[:6]
         self.drum_lanes = drums
-        self.drums_h = DRUMS_H_MAX if drums else 0
-        self.lane_h = (self.drums_h // len(drums)) if drums else 0
-        self.drums_h = self.lane_h * len(drums)
+        if drums:
+            want = min(BAND_H // 3, max(DRUMS_H_MAX, 12 * len(drums)))
+            self.lane_h = want // len(drums)
+            self.drums_h = self.lane_h * len(drums)
+        else:
+            self.lane_h = self.drums_h = 0
         self.roll_box = BAND_H - self.drums_h - (4 if drums else 0)
         self.drums_y = BAND_Y + self.roll_box + 4
         rows = hi - lo + 1
@@ -536,10 +543,12 @@ class Scope:
                 y = self._row_y(note) + self.row_h - 1
                 tulip.bg_rect(ROLL_X, y, ROLL_W, 1, GRID, 1)
                 tulip.bg_str(perf.note_name(note), RIGHT, y - self.row_h, DIM,
-                             FONT_X, 44, self.row_h * 2)
-        for n, note in enumerate(self.drum_lanes):
-            tulip.bg_str(perf.drum_name(note), RIGHT,
-                         self.drums_y + n * self.lane_h, DIM, FONT_X, 44, self.lane_h)
+                             FONT_X, LABEL_COL, self.row_h * 2)
+        if self.lane_h >= 10:       # below that the names would collide
+            for n, note in enumerate(self.drum_lanes):
+                tulip.bg_str(perf.drum_name(note), RIGHT,
+                             self.drums_y + n * self.lane_h, DIM, FONT_X,
+                             LABEL_COL, self.lane_h)
         step = max(1, self.perf.ppq // 4)
         for t in range(0, self.page_ticks + 1, step):
             x = ROLL_X + int(t * self.px)
