@@ -95,9 +95,23 @@ fs = lfs.LFSFilesystem()
 lfs.format(fs, cfg)
 lfs.mount(fs, cfg)
 
+# Tulip CC's /sys is 3 MiB and the tree no longer fits it: ex/startrek.py took
+# the image 16 KB past the 768 blocks there. The Tab5 grew its partition to
+# 4 MiB instead (esp32p4/partitions-8MiBplus-ota.csv); a 3 MiB board -- Tulip
+# CC, or a Tab5 still on the old table -- ships without the game. Keyed on the
+# partition size, as amyboard_fs_create.py does for its big samples.
+left_out = []
+if fs_source == 'tulip' and sys_partition.size < 0x400000:
+    left_out = ['ex/startrek.py']
+    print("system partition under 4 MiB: leaving out %s" % ', '.join(left_out))
+
+def wanted_file(folder, file):
+    return (os.path.splitext(file)[1].lower() in good_exts
+            and folder + '/' + file not in left_out)
+
 def has_wanted_files(folder):
     for file in os.listdir(folder):
-        if(os.path.splitext(file)[1].lower() in good_exts):
+        if wanted_file(folder, file):
             return True
     return False
 
@@ -119,8 +133,7 @@ for folder in folders:
         continue
     lfs.mkdir(fs,folder)
     for file in os.listdir(folder):
-        file_part, ext = os.path.splitext(file)
-        if(ext.lower() in good_exts):
+        if wanted_file(folder, file):
             copy_to_lfs(folder+'/'+file, folder+'/'+file)
 
 os.chdir(cur_dir)
