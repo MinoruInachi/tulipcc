@@ -417,8 +417,20 @@ def upgrade(pr=None, repo=None, tag=None):
     if(do_system):
         try:
             write_size = sys_partition.info()[3]
-            print("Flashing /sys folder... ")
             r = urequests.get(latest_sys_url)
+            # A board on an older partition table can have a smaller 'system'
+            # than the image was built for (the Tab5's grew from 3 to 4 MiB).
+            # Writing it anyway would leave /sys cut off part-way, so refuse
+            # before the first block goes down.
+            length = 0
+            for (k, v) in getattr(r, 'headers', {}).items():
+                if k.lower() == 'content-length':
+                    length = int(v)
+            if length > write_size:
+                r.close()
+                raise ValueError("this /sys image is %d bytes but the system partition "
+                                 "is %d; reflash over USB" % (length, write_size))
+            print("Flashing /sys folder... ")
             block_c = 0
             for chunk in r.generate(chunk_size=sec_size):
                 if len(chunk) < sec_size:

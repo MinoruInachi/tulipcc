@@ -110,12 +110,14 @@ kick/snare/hihat/crash all sound.
   MIPI-DSI PHY uses LDO ch3, so no conflict). Verified on the v2 board with a
   32 GB FAT32 card: 1-bit and 4-bit, mount + read/write + statvfs, no reset.
 - The partition table is `esp32p4/partitions-8MiBplus-ota.csv`: two 4.5 MiB
-  app slots (`ota_0` at 0x10000, `ota_1` at 0x490000), a 3 MiB `system`
-  (/sys) at 0x910000 and a 3.94 MiB `vfs` (/user) at 0xc10000. The slots grew
+  app slots (`ota_0` at 0x10000, `ota_1` at 0x490000), a 4 MiB `system`
+  (/sys) at 0x910000 and a 2.94 MiB `vfs` (/user) at 0xd10000. The slots grew
   from 0x3f0000 in September 2026, when the camera stack left 72 KB of app
-  flash; `vfs` paid for it. A device on the old table has to be flashed whole
-  and its /user put back by hand, since the old littlefs sits at an offset the
-  new table does not know.
+  flash, and `system` from 3 MiB in October 2026, when the /sys image
+  outgrew it; `vfs` paid both times. A device on an older table has to be
+  flashed whole and its /user put back by hand, since the old littlefs sits at
+  an offset the new table does not know -- and `upgrade()` refuses a /sys image
+  bigger than the board's `system` partition rather than half-write it.
 
 ## Touch and revision policy (current)
 
