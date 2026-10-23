@@ -50,6 +50,7 @@ _GATTC_CHARACTERISTIC_RESULT = 11
 _GATTC_CHARACTERISTIC_DONE = 12
 _GATTC_DESCRIPTOR_RESULT = 13
 _GATTC_DESCRIPTOR_DONE = 14
+_GATTC_WRITE_DONE = 17
 _GATTC_NOTIFY = 18
 
 # An iOS central negotiates an MTU well past the 23-byte default and will send
@@ -94,13 +95,32 @@ class _Parser:
     def reset(self):
         self._running = 0
         self._in_sysex = False
+        self._partial = b''         # a message cut off at the end of a packet
 
     def feed(self, packet):
-        if not packet or len(packet) < 2:
+        if not packet:
             return b''
         out = bytearray()
-        i = 1                       # byte 0 is the header; its timestamp bits
-        n = len(packet)             # are all we would get, and we do not use them
+        n = len(packet)
+        partial = self._partial
+        self._partial = b''
+        if packet[0] & 0x80:
+            i = 1                   # byte 0 is the header; its timestamp bits
+            partial = b''           # are all we would get, and we do not use them
+        else:
+            # No header, so not a BLE-MIDI packet -- but the M-VAVE FM-1 sends
+            # these: when a chord overflows the 20-byte payload of the default
+            # MTU it cuts the packet at 20 bytes and sends the rest bare. Read
+            # it as the tail of the previous packet.
+            i = 0
+        if partial:
+            want = 1 + _data_len(partial[0]) - len(partial)
+            if want > n:
+                self._partial = partial + bytes(packet)
+                return b''
+            out += partial
+            out += packet[:want]
+            i = want
         while i < n:
             byte = packet[i]
             if self._in_sysex:
@@ -139,7 +159,9 @@ class _Parser:
                     self._running = 0    # other System Common cancels running status
                 want = _data_len(status)
                 if i + want > n:
-                    break               # truncated packet; drop the fragment
+                    # Truncated: keep the fragment in case a bare tail follows.
+                    self._partial = bytes((status,)) + bytes(packet[i:])
+                    break
                 out.append(status)
                 for k in range(want):
                     out.append(packet[i + k])
@@ -150,6 +172,7 @@ class _Parser:
                     continue
                 want = _data_len(self._running)
                 if i + want > n:
+                    self._partial = bytes((self._running,)) + bytes(packet[i:])
                     break
                 out.append(self._running)
                 for k in range(want):
@@ -411,6 +434,20 @@ class BLEMidi:
             if self._conn is not None and handle is not None:
                 try:
                     self._ble.gattc_write(self._conn, handle, b'\x01\x00', 1)
+                    self._cccd_written = handle
+                except OSError:
+                    pass
+
+        elif event == _GATTC_WRITE_DONE:
+            conn, handle, status = data
+            if handle == getattr(self, '_cccd_written', None):
+                self._cccd_written = None
+                # Ask for a bigger MTU, as a Mac or iPad does. At the default 23
+                # a keyboard has 20 bytes per packet, and a chord sent with
+                # running status does not fit. Done after subscribing, so a
+                # peer that never answers cannot hold up the notes.
+                try:
+                    self._ble.gattc_exchange_mtu(conn)
                 except OSError:
                     pass
 
