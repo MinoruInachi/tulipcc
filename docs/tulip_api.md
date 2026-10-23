@@ -1162,6 +1162,13 @@ with no further setup, `midi.config` channel mappings apply, and every
 `midi.add_callback()` callback sees the message. `blemidi` strips the BLE-MIDI
 timestamp bytes and handles running status and sysex split across packets.
 
+`blemidi.send()` takes what `tulip.midi_out()` takes: a list, tuple or `bytes`
+holding one or more whole messages, sysex included. It gives each message its
+own BLE-MIDI timestamp and splits what will not fit in a packet, so
+`blemidi.send([0xC0, 5, 0x90, 60, 100])` is a program change and a note, as it
+would be over USB. `run('ble_midi_out')` plays the same tour as
+`run('midi_out')`, over Bluetooth.
+
 Two things are worth knowing:
 
 - When a link drops, `blemidi` sends all-notes-off on all 16 channels. BLE MIDI

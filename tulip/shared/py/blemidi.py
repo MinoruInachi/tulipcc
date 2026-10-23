@@ -52,6 +52,7 @@ _GATTC_DESCRIPTOR_RESULT = 13
 _GATTC_DESCRIPTOR_DONE = 14
 _GATTC_WRITE_DONE = 17
 _GATTC_NOTIFY = 18
+_MTU_EXCHANGED = 21
 
 # An iOS central negotiates an MTU well past the 23-byte default and will send
 # several messages per packet, so the GATT server's receive buffer has to be
@@ -181,12 +182,92 @@ class _Parser:
         return bytes(out)
 
 
-def _pack(message, now_ms=None):
-    """Wrap one MIDI message as a BLE-MIDI packet (header + timestamp + bytes)."""
+def _messages(data):
+    """Split a plain MIDI byte stream into whole messages.
+
+    Running status is written back out in full, sysex is one message from F0
+    through F7, and a stray data byte with no status to belong to is dropped.
+    """
+    out = []
+    running = 0
+    i = 0
+    n = len(data)
+    while i < n:
+        byte = data[i]
+        if byte == 0xf0:
+            j = i + 1
+            while j < n and data[j] != 0xf7:
+                j += 1
+            out.append(bytes(data[i:j + 1]))
+            running = 0
+            i = j + 1
+            continue
+        if byte >= 0xf8:            # real-time: one byte, keeps running status
+            out.append(bytes((byte,)))
+            i += 1
+            continue
+        if byte & 0x80:
+            status = byte
+            running = status if status < 0xf0 else 0
+            i += 1
+        elif running:
+            status = running
+        else:
+            i += 1
+            continue
+        want = _data_len(status)
+        if i + want > n:
+            break                   # cut short; nothing whole to send
+        out.append(bytes((status,)) + bytes(data[i:i + want]))
+        i += want
+    return out
+
+
+def _packets(data, payload=20, now_ms=None):
+    """Turn a MIDI byte stream into BLE-MIDI packets of at most `payload` bytes.
+
+    Every message gets its own timestamp byte, which is what lets one buffer
+    hold several. A message never straddles two packets, except sysex: that
+    is split across as many as it needs, its continuation packets carrying
+    only a header, and the closing F7 gets a timestamp of its own.
+    """
     if now_ms is None:
         now_ms = time.ticks_ms()
     ts = now_ms & 0x1fff            # 13-bit millisecond timestamp
-    return bytes((0x80 | (ts >> 7), 0x80 | (ts & 0x7f))) + bytes(message)
+    head = 0x80 | (ts >> 7)
+    stamp = 0x80 | (ts & 0x7f)
+    packets = []
+    pkt = bytearray((head,))
+    for msg in _messages(bytes(data)):
+        if msg[0] == 0xf0:
+            closed = msg[-1] == 0xf7
+            body = bytearray((stamp,)) + (msg[:-1] if closed else msg)
+            if payload - len(pkt) < 3:      # keep the timestamp, F0 and a byte together
+                packets.append(bytes(pkt))
+                pkt = bytearray((head,))
+            k = 0
+            while k < len(body):
+                room = payload - len(pkt)
+                if room <= 0:
+                    packets.append(bytes(pkt))
+                    pkt = bytearray((head,))
+                    continue
+                pkt += body[k:k + room]
+                k += room
+            if closed:
+                if payload - len(pkt) < 2:
+                    packets.append(bytes(pkt))
+                    pkt = bytearray((head,))
+                pkt += bytes((stamp, 0xf7))
+            continue
+        if len(pkt) > 1 and len(pkt) + 1 + len(msg) > payload:
+            packets.append(bytes(pkt))
+            pkt = bytearray((head,))
+        pkt.append(stamp)
+        pkt += msg
+    if len(pkt) > 1:
+        packets.append(bytes(pkt))
+    return packets
 
 
 class BLEMidi:
@@ -217,8 +298,10 @@ class BLEMidi:
         self._scanning = False
 
         self._parsers = {}
+        self._mtu = {}              # conn -> negotiated MTU; 23 until exchanged
         self.messages = 0           # MIDI messages handed to AMY, for diagnosis
         self.packets = 0
+        self.sent = 0               # packets put on the air by send()
 
     # ---- shared ----
 
@@ -253,22 +336,34 @@ class BLEMidi:
             'connected_to': self._target,
             'packets': self.packets,
             'messages': self.messages,
+            'sent': self.sent,
         }
 
+    def _payload(self, conn):
+        return self._mtu.get(conn, 23) - 3
+
     def send(self, message):
-        """Send a MIDI message to whatever is on the other end of the link."""
-        packet = _pack(message)
+        """Send MIDI to whatever is on the other end of the link.
+
+        Takes what tulip.midi_out() takes: a list, tuple or bytes holding one
+        or more whole messages, sysex included.
+        """
+        now = time.ticks_ms()
         sent = False
         if self._handle is not None:
             for conn in tuple(self._centrals):
                 try:
-                    self._ble.gatts_notify(conn, self._handle, packet)
+                    for packet in _packets(message, self._payload(conn), now):
+                        self._ble.gatts_notify(conn, self._handle, packet)
+                        self.sent += 1
                     sent = True
                 except OSError:
                     self._centrals.discard(conn)
         if self._conn is not None and self._value_handle is not None:
             # Write without response: the spec forbids expecting one.
-            self._ble.gattc_write(self._conn, self._value_handle, packet, 0)
+            for packet in _packets(message, self._payload(self._conn), now):
+                self._ble.gattc_write(self._conn, self._value_handle, packet, 0)
+                self.sent += 1
             sent = True
         return sent
 
@@ -374,6 +469,7 @@ class BLEMidi:
             conn, _, _ = data
             self._centrals.discard(conn)
             self._parsers.pop(('c', conn), None)
+            self._mtu.pop(conn, None)
             self._all_notes_off()
             if self._advertising:
                 self.peripheral()       # go back to advertising for the next one
@@ -394,6 +490,7 @@ class BLEMidi:
 
         elif event == _PERIPHERAL_DISCONNECT:
             self._all_notes_off()
+            self._mtu.pop(self._conn, None)
             self._conn = None
             self._value_handle = None
             self._cccd_handle = None
@@ -450,6 +547,10 @@ class BLEMidi:
                     self._ble.gattc_exchange_mtu(conn)
                 except OSError:
                     pass
+
+        elif event == _MTU_EXCHANGED:
+            conn, mtu = data
+            self._mtu[conn] = mtu
 
         elif event == _GATTC_NOTIFY:
             conn, value_handle, notify_data = data

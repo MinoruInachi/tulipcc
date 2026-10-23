@@ -414,7 +414,7 @@ midi.add_default_synths()
 
 To send MIDI out, just use `tulip.midi_out(message)`, e.g. `tulip.midi_out([0x90, 0x40, 0x7F])` to send a note-on at velocity 127 and note 64 to the first MIDI channel.   You can, for example, use this to send a MIDI message out every sequencer tick on Tulip.
 
-`run('midi_out')` plays a tour of it -- notes, a chord, program change, modulation, pitch bend, clock and sysex, and finally AMY driving the far end instead of its own voices. Nothing in it makes a sound on Tulip, so you need something listening on the other end to hear it.
+`run('midi_out')` plays a tour of it -- notes, a chord, program change, modulation, pitch bend, clock and sysex, and finally AMY driving the far end instead of its own voices. Nothing in it makes a sound on Tulip, so you need something listening on the other end to hear it. On the Tab5, `run('ble_midi_out')` plays the same tour over Bluetooth MIDI instead -- see `blemidi` in the [API reference](tulip_api.md).
 
 A message is a list, a tuple or `bytes`, and one buffer can carry as many messages as you like:
 
