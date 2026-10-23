@@ -474,6 +474,9 @@ def upgrade(pr=None, repo=None, tag=None):
 # It's not incredibly accurate, but good enough for a "four-bar" battery indicator
 # Things should turn off around 3.1V
 def battery(n=5):
+    if(board()=='TAB5'):
+        # The INA226 across the 2S pack, not an ADC divider: ~6-8.4V, not ~3-4.2V.
+        return battery_status()['voltage'] or 0
     if(board()=='TULIP4_R11'):
         pin = 3
     elif(board()=='TDECK'):

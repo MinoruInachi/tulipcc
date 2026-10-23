@@ -44,5 +44,23 @@
 // out of reset. tab5_power_enable_ext5v() turns it on at boot.
 #define TAB5_EXT5V_EN_PIN       (IO_EXPANDER_PIN_NUM_2)
 
+// Battery charging, on IO expander 1 (0x44 -- bsp_io_expander1_init(), the one
+// that also carries BSP_WIFI_EN on P0 and BSP_USB_EN on P3). From M5Unified's
+// Tab5 table and M5Stack's Tab5 user-demo BSP, which agree: P7 CHG_EN enables
+// the IP2326 charger when high, P5 nCHG_QC_EN is active low. The esp_io_expander
+// driver resets the part when it opens it, leaving every pin an input with a
+// pull-down, so CHG_EN reads low and the battery does not charge until
+// tab5_power_set_charge(true) drives it.
+//
+// P6 CHG_STAT is an input, but it read 0 throughout with USB-C plugged, pulled,
+// charging and not (driver default pull-down), so nothing reads it; the
+// INA226's current says whether the pack is charging.
+#define TAB5_CHG_EN_PIN         (IO_EXPANDER_PIN_NUM_7)
+
+// INA226 on the internal bus, across the battery: bus voltage is the pack
+// (2S NP-F550, ~6-8.4V), the shunt is 5 mOhm. M5Unified opens it with no
+// address, so tab5_power_read_battery() finds it by its die ID.
+#define TAB5_INA226_SHUNT_OHMS  (0.005f)
+
 // Audio and storage are intentionally left unassigned here until the board
 // implementation is wired to the schematic and verified on hardware.

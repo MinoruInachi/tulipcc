@@ -1798,6 +1798,29 @@ pitch = math.degrees(math.atan2(ay, math.sqrt(ax*ax + az*az)))
 If the IMU can't be reached (e.g. a board without it populated) `imu()` raises
 `RuntimeError`.
 
+
+## Battery and charging (Tab5 only)
+
+The Tab5 charges its NP-F550 pack from USB-C through an IP2326 charger, which
+has its own enable line on an IO expander. That line is off out of reset, so
+Tulip turns it on at boot; `tulip.battery_charge()` reads it back and
+`tulip.battery_charge(False)` turns charging off (for example on a weak USB
+port, where the charge current competes with the audio for the port's budget).
+
+```python
+tulip.battery_status()
+# {'voltage': 8.18, 'current': 0.197, 'charge': True}
+tulip.battery()   # just the pack voltage, in V
+```
+
+`voltage` (V) and `current` (A) come from the INA226 across the pack, and are
+`None` if it can't be reached. `current` is positive while the pack charges and
+negative while it runs the board, so it is also the way to tell whether USB-C
+is charging: around +0.2 A on a nearly full pack, about -0.2 A on battery alone
+at idle, and 0 with charging turned off. After plugging in or turning charging
+back on, the charger takes 2-3 seconds to start. It is a 2S pack, so the voltage
+runs about 6-8.4 V, not the 3-4.2 V of a single cell.
+
 ## Gamma9001 drum banks (Tab5 only)
 
 Tab5 firmware bakes in AMY's TR-808 ROM sample set, so the GM drum synth on

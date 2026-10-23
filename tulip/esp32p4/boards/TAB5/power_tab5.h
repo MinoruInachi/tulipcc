@@ -2,6 +2,8 @@
 
 #include <stdbool.h>
 
+#include "esp_err.h"
+
 void tab5_power_init(void);
 void tab5_power_enable_display(void);
 void tab5_power_enable_usb_host(void);
@@ -19,3 +21,15 @@ void tab5_power_enable_wifi(void);
 // The BSP has no feature for it and it is off out of reset, so a Grove unit
 // that runs from 5V -- the CardKB, most M5 units -- is unpowered without this.
 void tab5_power_enable_ext5v(void);
+
+// The battery charger's enable (CHG_EN, P7 of IO expander 0x44). Off out of
+// reset, so the battery never charges from USB-C unless this is turned on.
+// get returns the last value written, for the same reason as the USB switch:
+// the expander's input register is no read-back of a pin it drives.
+// Both return false if the I2C transaction failed.
+bool tab5_power_set_charge(bool on);
+bool tab5_power_get_charge(bool *on);
+
+// Pack voltage (V) and current (A, positive while charging) from the INA226,
+// brought up on the first call. ESP_ERR_NOT_FOUND if no INA226 answers on the internal bus.
+esp_err_t tab5_power_read_battery(float *volts, float *amps);

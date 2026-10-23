@@ -2083,6 +2083,43 @@ static mp_obj_t tulip_usb_host_power(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_usb_host_power_obj, 0, 1, tulip_usb_host_power);
 
+// Turn the battery charger on or off, and read it back with no argument. It is
+// turned on at boot; the expander comes out of reset with it off, which left
+// the battery uncharged from USB-C.
+static mp_obj_t tulip_battery_charge(size_t n_args, const mp_obj_t *args) {
+    if (n_args > 0) {
+        if (!tab5_power_set_charge(mp_obj_is_true(args[0]))) {
+            mp_raise_msg(&mp_type_RuntimeError,
+                         MP_ERROR_TEXT("could not reach the charge enable"));
+        }
+        return mp_const_none;
+    }
+    bool on = false;
+    tab5_power_get_charge(&on);
+    return mp_obj_new_bool(on);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_battery_charge_obj, 0, 1, tulip_battery_charge);
+
+// What the battery and its charger are doing: "charge" is the enable this side
+// drives, "voltage"/"current" the INA226 across the pack (None if it can't be
+// reached). current is positive while the pack charges, negative while it runs
+// the board.
+static mp_obj_t tulip_battery_status(void) {
+    mp_obj_t dict = mp_obj_new_dict(3);
+    #define TAB5_STATUS(name, value) \
+        mp_obj_dict_store(dict, mp_obj_new_str(name, strlen(name)), value)
+    bool on = false;
+    tab5_power_get_charge(&on);
+    TAB5_STATUS("charge", mp_obj_new_bool(on));
+    float volts = 0.0f, amps = 0.0f;
+    bool have = tab5_power_read_battery(&volts, &amps) == ESP_OK;
+    TAB5_STATUS("voltage", have ? mp_obj_new_float(volts) : mp_const_none);
+    TAB5_STATUS("current", have ? mp_obj_new_float(amps) : mp_const_none);
+    #undef TAB5_STATUS
+    return dict;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(tulip_battery_status_obj, tulip_battery_status);
+
 // Wi-Fi regulatory domain, set with no wifi country code and read back with
 // none. MicroPython's network.country() is not this: it only stores two bytes
 // that extmod/network_cyw43.c reads, and nothing in the ESP-IDF path ever looks
@@ -3103,6 +3140,8 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_key_wait), MP_ROM_PTR(&tulip_key_wait_obj) },
     { MP_ROM_QSTR(MP_QSTR_usb_status), MP_ROM_PTR(&tulip_usb_status_obj) },
     { MP_ROM_QSTR(MP_QSTR_usb_host_power), MP_ROM_PTR(&tulip_usb_host_power_obj) },
+    { MP_ROM_QSTR(MP_QSTR_battery_charge), MP_ROM_PTR(&tulip_battery_charge_obj) },
+    { MP_ROM_QSTR(MP_QSTR_battery_status), MP_ROM_PTR(&tulip_battery_status_obj) },
     { MP_ROM_QSTR(MP_QSTR_wifi_country), MP_ROM_PTR(&tulip_wifi_country_obj) },
     // Camera
     { MP_ROM_QSTR(MP_QSTR_camera_start), MP_ROM_PTR(&tulip_camera_start_obj) },
