@@ -488,6 +488,14 @@ void editor_open_file(const char *filename) {
         //if(text[bytes_read-1]!='\n') { new_lines = 0; dbg("adding n\n"); text[bytes_read] = '\n'; bytes_read++; }
 		text[bytes_read] = 0; // end
 
+		// Promote the console to the Japanese face here, on the whole file,
+		// rather than leaving display_tfb_place_str() to do it at the first row
+		// that needs it. The two fonts can differ in geometry, and EDITOR_ROWS
+		// and EDITOR_COLS read that geometry: a promotion partway through
+		// paint_tfb() would re-lay the screen under a paint that had already
+		// placed its status row somewhere else.
+		display_tfb_promote_for_str(text);
+
 		// #580: expand tab characters to spaces so files saved with tabs (e.g.
 		// from the web editors) are editable here. The editor stores indentation
 		// as spaces (Tab inserts EDITOR_TAB_SPACES spaces), so a literal tab

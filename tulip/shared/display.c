@@ -2395,6 +2395,25 @@ static uint8_t esc_feed(unsigned char c) {
     return 1;
 }
 
+// Switch the console to the Japanese face and re-lay it at that font's
+// geometry -- which, where there is a Japanese font at the same cell size, is
+// the geometry it already had. Returns 1 if the font changed. A font the user
+// chose out loud is never second-guessed, and neither is one that can already
+// hold the codepoint.
+static uint8_t tfb_promote_for_unicode(void) {
+    if(tfb_font_is_unicode() || tfb_font_user_set || !jpfont_available()) return 0;
+    uint8_t was = tfb_font;
+    tfb_font = tfb_font_japanese_for_current();
+    uint8_t cols = display_tfb_visible_cols();
+    uint8_t rows = display_tfb_visible_rows();
+    if(cols == 0 || rows == 0) { tfb_font = was; return 0; }
+    if(tfb_x_col >= cols) tfb_x_col = cols - 1;
+    if(tfb_y_row >= rows) tfb_y_row = rows - 1;
+    if(term_mode && term_bot > rows-1) term_bot = rows-1;
+    display_tfb_update(-1);
+    return 1;
+}
+
 void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, tulip_px_t fg_color, tulip_px_t bg_color) {
     if(TFB == NULL || TFBf == NULL || TFBfg == NULL || TFBbg == NULL) {
         return;
@@ -2444,19 +2463,12 @@ void display_tfb_str(unsigned char*str, uint16_t len, uint8_t format, tulip_px_t
                 continue;
             }
             uint8_t cp437 = convert_uc16_to_cp437(ucs);
-            if(cp437 == 0 && !tfb_font_is_unicode() && !tfb_font_user_set && jpfont_available()) {
-                // Nothing in the current font can draw this. Switch to the one
-                // that can, and re-lay the console at its geometry -- which,
-                // where there is a Japanese font at the same cell size, is the
-                // geometry it already had.
-                tfb_font = tfb_font_japanese_for_current();
+            if(cp437 == 0 && tfb_promote_for_unicode()) {
+                // Nothing in the old font could draw this. The new one has its
+                // own geometry, so this write's bounds are stale.
                 visible_cols = display_tfb_visible_cols();
                 visible_rows = display_tfb_visible_rows();
                 if(visible_cols == 0 || visible_rows == 0) return;
-                if(tfb_x_col >= visible_cols) tfb_x_col = visible_cols - 1;
-                if(tfb_y_row >= visible_rows) tfb_y_row = visible_rows - 1;
-                if(term_mode && term_bot > visible_rows-1) term_bot = visible_rows-1;
-                display_tfb_update(-1);
             }
             ch = tfb_font_is_unicode() ? ucs : cp437;
             if(ch == 0) continue;   // no font here can draw it
@@ -2572,12 +2584,32 @@ uint8_t display_tfb_char_cells(const char *s, uint8_t *bytes, uint16_t *cp) {
     return (tfb_font_is_unicode() && jpfont_cell_width(got) > 8) ? 2 : 1;
 }
 
+// Everything that reaches the screen through display_tfb_str() gets the console
+// promoted to the Japanese face on the first codepoint CP437 cannot hold. The
+// editor, tulip.tfb_str() and the UI do not: they place cells directly, and
+// display_tfb_char_cells() folds to CP437 while the font is not Unicode, so a
+// Japanese character was dropped on the way into the TFB rather than drawn
+// blank -- and therefore did not come back when the font was promoted later.
+// Scan first, place after: promoting halfway through a string would leave the
+// cells already written in the old font's encoding.
+uint8_t display_tfb_promote_for_str(const char *str) {
+    if(str == NULL || tfb_font_is_unicode() || tfb_font_user_set || !jpfont_available()) return 0;
+    uint32_t esc = 0;
+    uint16_t cp = 0;
+    for(const unsigned char *p = (const unsigned char *)str; *p; p++) {
+        if(!convert_utf8_to_ucs(*p, &esc, &cp)) continue;
+        if(cp > 127 && convert_uc16_to_cp437(cp) == 0) return tfb_promote_for_unicode();
+    }
+    return 0;
+}
+
 // Place a UTF-8 string starting at (x,y). Returns the number of cells written,
 // which is not strlen(): a fullwidth Japanese character is one codepoint, several
 // UTF-8 bytes and two cells. Attributes are the caller's business -- it applies
 // them across the range this returns.
 uint16_t display_tfb_place_str(const char *str, uint16_t x, uint16_t y) {
     if(TFB == NULL || y >= TFB_ROWS || x >= TFB_COLS) return 0;
+    display_tfb_promote_for_str(str);
     uint16_t col = x;
     for(const char *p = str; *p; ) {
         uint8_t bytes = 0;

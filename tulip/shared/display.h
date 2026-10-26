@@ -116,6 +116,12 @@ uint8_t display_term_flags(void);
 uint8_t display_term_take_reply(char *out, uint8_t max);
 #define TERM_REPLY_BUF 40
 uint8_t display_tfb_char_cells(const char *s, uint8_t *bytes, uint16_t *cp);
+// Promote the console to the Japanese face if str holds a character the current
+// font cannot store, exactly as display_tfb_str() does on its way to the screen.
+// Returns 1 if the font changed. Callers that place text straight into the TFB
+// need this: a character the font cannot hold is dropped at placement, not at
+// draw time, so promoting afterwards does not bring it back.
+uint8_t display_tfb_promote_for_str(const char *str);
 uint16_t display_tfb_place_str(const char *str, uint16_t x, uint16_t y);
 uint16_t display_tfb_read_char(uint16_t x, uint16_t y, char *out);
 
