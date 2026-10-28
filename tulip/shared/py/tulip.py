@@ -8,42 +8,14 @@ import amy
 # searches the filesystem even for a module that is already loaded, and on an
 # ESP a filesystem read is an esp_flash operation that freezes the core it runs
 # on for tens of milliseconds -- measured at 34ms for reads and 62ms for writes
-# on a Tab5. defer() and _process_defers() below are called once per frame and
-# per deferred callback, so a local import there put a flash access on the hot
-# path of every app that uses tulip.defer().
+# on a Tab5. Nothing on a hot path is left here now that defer() is C on every
+# board, but wifi() and upgrade() below still read it out of the module scope.
 import time
 
 if board() != 'AMYBOARD' and board() != "AMYBOARD_WEB" and board() != "AMYBOARD_VCV":
     from tulip_graphics import *
     from ui import *
     from editor import edit
-
-# Python-side defer for boards where C defer is a no-op stub (e.g. TAB5 bring-up).
-# On all other boards the imported C defer is used directly.
-_defer_queue = []
-_c_defer = defer
-
-def defer(cb, arg, ms):
-    if board() == 'TAB5':
-        _defer_queue.append((cb, arg, time.ticks_ms() + ms))
-    else:
-        _c_defer(cb, arg, ms)
-
-def _process_defers():
-    if not _defer_queue:
-        return
-    now = time.ticks_ms()
-    i = 0
-    while i < len(_defer_queue):
-        (cb, arg, at_ms) = _defer_queue[i]
-        if time.ticks_diff(at_ms, now) <= 0:
-            _defer_queue.pop(i)
-            try:
-                cb(arg)
-            except Exception as e:
-                print("defer cb err:", e)
-        else:
-            i += 1
 
 def sys():
     return root_dir()+"sys/"

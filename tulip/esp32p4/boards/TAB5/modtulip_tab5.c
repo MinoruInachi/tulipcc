@@ -43,7 +43,6 @@ static bool s_tab5_lvgl_running = false;
 static volatile uint32_t s_tab5_frame_callbacks = 0;
 static volatile uint32_t s_tab5_lvgl_handlers = 0;
 
-MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_process_defers_cb);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_frame_cb);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_frame_arg);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_touch_cb);
@@ -54,7 +53,6 @@ MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_amy_overload_cb);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_ui_quit_cb);
 MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_ui_switch_cb);
 
-#define s_tab5_process_defers_cb MP_STATE_PORT(tab5_process_defers_cb)
 #define s_tab5_frame_cb MP_STATE_PORT(tab5_frame_cb)
 #define s_tab5_frame_arg MP_STATE_PORT(tab5_frame_arg)
 #define s_tab5_touch_cb MP_STATE_PORT(tab5_touch_cb)
@@ -65,30 +63,10 @@ MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_ui_switch_cb);
 #define s_tab5_ui_quit_cb MP_STATE_PORT(tab5_ui_quit_cb)
 #define s_tab5_ui_switch_cb MP_STATE_PORT(tab5_ui_switch_cb)
 
-static void tab5_process_python_defers(void) {
-    nlr_buf_t nlr;
-    if (nlr_push(&nlr) == 0) {
-        if (s_tab5_process_defers_cb == MP_OBJ_NULL) {
-            mp_obj_t module_name = mp_obj_new_str("tulip", 5);
-            mp_obj_t callback_name = mp_obj_new_str("_process_defers", 15);
-            qstr q_module = mp_obj_str_get_qstr(module_name);
-            qstr q_callback = mp_obj_str_get_qstr(callback_name);
-            mp_obj_t module = mp_import_name(q_module, mp_const_none, MP_OBJ_NEW_SMALL_INT(0));
-            s_tab5_process_defers_cb = mp_load_attr(module, q_callback);
-        }
-        mp_call_function_0(s_tab5_process_defers_cb);
-        nlr_pop();
-    } else {
-        s_tab5_process_defers_cb = MP_OBJ_NULL;
-        mp_obj_print_exception(&mp_plat_print, MP_OBJ_FROM_PTR(nlr.ret_val));
-    }
-}
-
 static mp_obj_t tab5_lv_task_handler(mp_obj_t ignored) {
     (void)ignored;
     s_tab5_lvgl_handlers++;
     lv_task_handler();
-    tab5_process_python_defers();
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(tab5_lv_task_handler_obj, tab5_lv_task_handler);
@@ -1650,10 +1628,13 @@ static mp_obj_t tulip_set_screen_as_repl(mp_obj_t on_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(tulip_set_screen_as_repl_obj, tulip_set_screen_as_repl);
 
+// tulip.defer(cb, arg, ms). The table and the drain are in tsequencer_tab5.c,
+// next to the hook that reads them: the audio task runs that hook, so the order
+// the fields are written in is part of how the table works.
 static mp_obj_t tulip_defer(mp_obj_t cb_obj, mp_obj_t arg_obj, mp_obj_t delay_obj) {
-    (void)cb_obj;
-    (void)arg_obj;
-    (void)delay_obj;
+    if (tab5_defer_add(cb_obj, arg_obj, mp_obj_get_int(delay_obj)) < 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("No more defer slots available"));
+    }
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_3(tulip_defer_obj, tulip_defer);

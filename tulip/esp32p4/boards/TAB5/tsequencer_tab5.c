@@ -1,11 +1,15 @@
 // TAB5's replacement for tulip/shared/tsequencer.c.
 //
-// The shared file is not compiled on this board: it also carries the C defer
-// queue, which TAB5 replaces with the Python-side one in tulip.py, and it is
-// written against the ESP32-S3 port's task layout. What Python actually needs
-// from it is the sequencer callback table -- what sequencer.py's TulipSequence
-// is built on, and what drums.py uses to walk its beat LEDs -- so that is what
-// lives here, bound into the _tulip module by modtulip_tab5.c.
+// The shared file is not compiled on this board -- it is written against the
+// ESP32-S3 port's task layout -- so what Python needs from it is reimplemented
+// here against this one: the sequencer callback table (what sequencer.py's
+// TulipSequence is built on, and what drums.py uses to walk its beat LEDs) and
+// the defer queue behind tulip.defer(). Both are bound into the _tulip module
+// by modtulip_tab5.c.
+//
+// Both tables are read from tab5_audio_task on core 0 and written from the
+// MicroPython task on core 1, so both follow the same two rules: publish the
+// field the hook tests last, and never allocate from the MicroPython heap.
 
 #include "py/runtime.h"
 #include "py/smallint.h"     // MP_SMALL_INT_MAX, for the hook's tick argument
@@ -13,6 +17,7 @@
 
 #include "../../../../amy/src/amy.h"
 #include "../../../../amy/src/sequencer.h"
+#include "../../../shared/polyfills.h"   // get_time_ms(), the defer deadline clock
 
 #include "tsequencer_tab5.h"
 
@@ -39,8 +44,69 @@ static volatile uint32_t s_tab5_seq_tick[TAB5_SEQUENCER_SLOTS];
 // callback has actually been registered from Python.
 static volatile uint8_t s_tab5_seq_armed = 0;
 
+// tulip.defer(cb, arg, ms). Slots, not a list: the hook that drains them runs on
+// the audio task and cannot allocate, so the table has to be a fixed one.
+// The registration is scanned out of this file as text, so the size has to be a
+// literal; this is what keeps it and TAB5_DEFER_SLOTS from drifting apart.
+MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_defer_callbacks[32]);
+MP_REGISTER_ROOT_POINTER(mp_obj_t tab5_defer_args[32]);
+MP_STATIC_ASSERT(TAB5_DEFER_SLOTS == 32);
+#define s_tab5_defer_callbacks MP_STATE_PORT(tab5_defer_callbacks)
+#define s_tab5_defer_args MP_STATE_PORT(tab5_defer_args)
+// 64-bit absolute deadline from get_time_ms(), and the slot's own "taken" flag:
+// zero is free. The shared file kept this in a uint32_t off the 32-bit tick,
+// which made a defer straddling the 49.7-day rollover either fire instantly or
+// wait another 49.7 days.
+static volatile int64_t s_tab5_defer_sysclock[TAB5_DEFER_SLOTS];
+// Non-zero once Python has registered a defer, which is also the first moment
+// the root pointers above are safe to read: the hook runs on the audio task
+// from the moment AMY starts, which is before mp_init() has zeroed them. It
+// doubles as the skip for a board that never defers at all.
+static volatile uint8_t s_tab5_defer_armed = 0;
+
+int8_t tab5_defer_add(mp_obj_t cb, mp_obj_t arg, int32_t ms) {
+    int64_t at_ms = get_time_ms() + ms;
+    // Zero is how a free slot reads, so a deadline that lands on it (a defer of
+    // 0ms in the first millisecond of a boot) would be a slot that never fires.
+    if (at_ms < 1) at_ms = 1;
+    for (uint8_t slot = 0; slot < TAB5_DEFER_SLOTS; slot++) {
+        if (s_tab5_defer_sysclock[slot] != 0) continue;
+        s_tab5_defer_callbacks[slot] = cb;
+        s_tab5_defer_args[slot] = arg;
+        // Deadline last: it is what the hook tests, so the slot is not live
+        // until the callback and argument it needs are both in place.
+        s_tab5_defer_sysclock[slot] = at_ms;
+        s_tab5_defer_armed = 1;
+        return (int8_t)slot;
+    }
+    return -1;
+}
+
 // Called by AMY from tab5_audio_task (core 0) once per sequencer tick.
 void tulip_amy_sequencer_hook(uint32_t tick_count) {
+    if (s_tab5_defer_armed) {
+        const int64_t now = get_time_ms();
+        for (uint8_t i = 0; i < TAB5_DEFER_SLOTS; i++) {
+            const int64_t at = s_tab5_defer_sysclock[i];
+            if (at == 0 || now <= at) continue;
+            mp_obj_t cb = s_tab5_defer_callbacks[i];
+            if (cb == MP_OBJ_NULL || cb == mp_const_none) { s_tab5_defer_sysclock[i] = 0; continue; }
+            // Only free the slot once the callback is actually on the scheduler
+            // queue. mp_sched_schedule() fails when that queue is full, and the
+            // shared file frees the slot regardless, which drops the callback;
+            // leaving it armed costs a tick and retries instead.
+            if (mp_sched_schedule(cb, s_tab5_defer_args[i])) {
+                s_tab5_defer_callbacks[i] = MP_OBJ_NULL;
+                s_tab5_defer_args[i] = MP_OBJ_NULL;
+                // Last again, and for the same reason read from the other side:
+                // the MicroPython task may already be running the callback, and
+                // a callback that defers again must not be handed this slot
+                // before we have finished clearing it.
+                s_tab5_defer_sysclock[i] = 0;
+                mp_hal_wake_main_task();
+            }
+        }
+    }
     if (!s_tab5_seq_armed) return;
     for (uint8_t i = 0; i < TAB5_SEQUENCER_SLOTS; i++) {
         uint32_t period = s_tab5_seq_period[i];

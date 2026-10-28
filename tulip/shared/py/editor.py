@@ -17,8 +17,8 @@ def draw(screen):
     fire before edit() has assigned `editor` at all. Both buttons are also
     legitimately None -- alttab only exists while more than one app is
     running, and neither is made before draw_task_bar() has run. Either way
-    the AttributeError landed inside the defer queue, which prints and
-    swallows it, so the buttons quietly never got redrawn.
+    the AttributeError came out of a deferred call, which at the time printed
+    and swallowed it, so the buttons quietly never got redrawn.
     """
     for button in (screen.alttab_button, screen.quit_button):
         if button is not None:
