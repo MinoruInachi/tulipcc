@@ -436,14 +436,32 @@ static void tab5_audio_task(void *ignored)
             s_audio_stats.render_overruns++;
         }
 
-        for (size_t sample = 0; sample < AMY_BLOCK_SIZE * AMY_NCHANS; sample++) {
-            int32_t value = samples[sample];
-            uint32_t magnitude = (uint32_t)(value < 0 ? -value : value);
-            if (magnitude > s_audio_stats.peak_sample) {
-                s_audio_stats.peak_sample = magnitude;
-            }
-            if (value == INT16_MIN || value == INT16_MAX) {
-                s_audio_stats.clipped_samples++;
+        // The board's two output channels are crossed: an osc at pan=0, which
+        // AMY mixes into channel 0 alone, comes out of the right earpiece.
+        // AMY's buffer is not what is wrong -- rendering the same send() on a
+        // host fills channel 0 and leaves channel 1 silent -- and nothing
+        // between amy_fill_buffer() and the codec write reorders it, so the
+        // crossing is in the wiring to the ES8388 (whose own mixer registers
+        // the driver sets are the plain L->L, R->R pair). Undo it here, inside
+        // the scan that already walks every sample, so it costs a register
+        // shuffle rather than a second pass. In place is safe: we hold the
+        // render lock, amy_fill_buffer() is done with the block, and the next
+        // block overwrites the whole thing.
+        _Static_assert(AMY_NCHANS == 2, "the output swap below assumes stereo");
+        for (size_t frame = 0; frame < AMY_BLOCK_SIZE; frame++) {
+            int16_t *pair = &samples[frame * AMY_NCHANS];
+            const int16_t left = pair[0];
+            pair[0] = pair[1];
+            pair[1] = left;
+            for (size_t c = 0; c < AMY_NCHANS; c++) {
+                int32_t value = pair[c];
+                uint32_t magnitude = (uint32_t)(value < 0 ? -value : value);
+                if (magnitude > s_audio_stats.peak_sample) {
+                    s_audio_stats.peak_sample = magnitude;
+                }
+                if (value == INT16_MIN || value == INT16_MAX) {
+                    s_audio_stats.clipped_samples++;
+                }
             }
         }
         // samples points into AMY's output block, so the scan above belongs
