@@ -679,6 +679,58 @@ bool tab5_audio_set_speaker_volume(int volume)
     return true;
 }
 
+// The 3.5mm jack's insert-detect contact. The jack is 4-pole: tip and ring 1
+// carry HPOUT_L/HPOUT_R from the ES8388, ring 2 carries a headset mic into the
+// ES7210's MIC4 (wired, but impossible to read back -- the microphone section
+// of docs/tulip_api.md has the why), and the detect contact reaches P7 of the first
+// IO expander (PI4IOE5V6408 at 0x43 -- the same part the BSP uses for the
+// speaker, LCD and camera enables) through the R49/R85 divider.
+//
+// Two things about that pin had to be measured, neither of them guessable from
+// the BSP, and the line reads 0 forever if either is missed. First, the
+// expander driver's reset() leaves *every* pin an output (it writes DIR 0xff,
+// whose comment says "all inputs" but whose part reads 1 as output), so P7 has
+// to be claimed back as an input. Second, that same reset turns the internal
+// pull-down on for every pin, and the board only drives this line hard in one
+// direction: empty, it sits at ground; with a plug in, it is pulled up through
+// the R49/R85 divider, weakly enough that the expander's own pull-down wins and
+// the pin still reads 0. Disabling the pull is what makes the plug visible.
+#define TAB5_HP_DET_PIN IO_EXPANDER_PIN_NUM_7
+
+bool tab5_audio_jack_level(bool *level)
+{
+    static bool configured;
+    esp_io_expander_handle_t io = bsp_io_expander_init();
+    if (io == NULL) {
+        return false;
+    }
+    if (!configured) {
+        if (esp_io_expander_set_dir(io, TAB5_HP_DET_PIN, IO_EXPANDER_INPUT) != ESP_OK ||
+            esp_io_expander_set_pullupdown(io, TAB5_HP_DET_PIN, IO_EXPANDER_PULL_NONE) != ESP_OK) {
+            return false;
+        }
+        // The divider needs a moment to take the pin wherever it is going once
+        // the internal pull lets go of it.
+        vTaskDelay(pdMS_TO_TICKS(5));
+        configured = true;
+    }
+    uint32_t mask = 0;
+    if (esp_io_expander_get_level(io, TAB5_HP_DET_PIN, &mask) != ESP_OK) {
+        return false;
+    }
+    *level = (mask & TAB5_HP_DET_PIN) != 0;
+    return true;
+}
+
+bool tab5_audio_jack_present(void)
+{
+    bool level = false;
+    if (!tab5_audio_jack_level(&level)) {
+        return false;
+    }
+    return level;
+}
+
 int tab5_audio_get_speaker_volume(void)
 {
     // esp_codec_dev keeps the last value written (esp_codec_dev.c's get_out_vol

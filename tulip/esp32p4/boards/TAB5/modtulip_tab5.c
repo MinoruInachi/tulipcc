@@ -1527,6 +1527,29 @@ static mp_obj_t tulip_speaker_volume(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(tulip_speaker_volume_obj, 0, 1, tulip_speaker_volume);
 
+// audio_jack(): True while something is plugged into the 3.5mm jack.
+// audio_jack(raw=True) returns the detect line's logic level (1 plugged in,
+// 0 empty) instead, or None if the IO expander could not be read -- which is
+// how that sense was measured against a real plug in the first place. Nothing
+// in the firmware acts on this: the speaker is not muted by a plug.
+static mp_obj_t tulip_audio_jack(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum { ARG_raw };
+    static const mp_arg_t allowed[] = {
+        { MP_QSTR_raw, MP_ARG_BOOL, {.u_bool = false} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
+    if (!args[ARG_raw].u_bool) {
+        return mp_obj_new_bool(tab5_audio_jack_present());
+    }
+    bool level = false;
+    if (!tab5_audio_jack_level(&level)) {
+        return mp_const_none;
+    }
+    return mp_obj_new_int(level ? 1 : 0);
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(tulip_audio_jack_obj, 0, tulip_audio_jack);
+
 static mp_obj_t tulip_tfb_ready(void) {
     bool ready = (TFB != NULL) && (TFBf != NULL) && (TFBfg != NULL) && (TFBbg != NULL);
     return mp_obj_new_bool(ready);
@@ -3086,6 +3109,7 @@ static const mp_rom_map_elem_t tulip_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_tab5_lcd_errors), MP_ROM_PTR(&tulip_tab5_lcd_errors_obj) },
     { MP_ROM_QSTR(MP_QSTR_audio_diag), MP_ROM_PTR(&tulip_audio_diag_obj) },
     { MP_ROM_QSTR(MP_QSTR_speaker_volume), MP_ROM_PTR(&tulip_speaker_volume_obj) },
+    { MP_ROM_QSTR(MP_QSTR_audio_jack), MP_ROM_PTR(&tulip_audio_jack_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_ready), MP_ROM_PTR(&tulip_tfb_ready_obj) },
     { MP_ROM_QSTR(MP_QSTR_tfb_start), MP_ROM_PTR(&tulip_tfb_start_obj) },
     { MP_ROM_QSTR(MP_QSTR_term_start), MP_ROM_PTR(&tulip_term_start_obj) },

@@ -29,6 +29,14 @@ bool tab5_audio_ready(void);
 // up (or refused it) -- nothing else reports a failure.
 bool tab5_audio_set_speaker_volume(int volume);
 int tab5_audio_get_speaker_volume(void);
+// Is something plugged into the 3.5mm jack? Read from the board's
+// headphone-detect line; see audio_tab5.c for where that line comes from and
+// what had to be measured to read it. A line that cannot be read at all reports
+// as "nothing plugged in"; tab5_audio_jack_level() is the pin itself, and
+// returns false in that case instead.
+bool tab5_audio_jack_present(void);
+bool tab5_audio_jack_level(bool *level);
+
 void tab5_audio_get_stats(tab5_audio_stats_t *stats);
 void tab5_audio_reset_stats(void);
 

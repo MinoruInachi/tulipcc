@@ -1712,6 +1712,37 @@ tulip.mic_stop()
 The rate is fixed, so for a lower-rate file (voice memos, speech recognition)
 decimate a copy in Python -- e.g. take every third frame for ~14.7 kHz.
 
+### The mic of a headset in the 3.5mm jack does not work -- and cannot
+
+The jack is 4-pole, and its mic contact really is wired: the board biases it and
+AC-couples it into the ES7210's MIC4 input. It still cannot be recorded, and the
+reason is in the ADC's data pins rather than anywhere in software. The ES7210
+routes its four inputs to two output pins, and its `SDOUT_MODE` field (register
+0x12) offers only `ADC12 -> SDOUT1, ADC34 -> SDOUT2` or one of three TDM modes.
+The Tab5 wires SDOUT1 to the ESP32-P4 and leaves SDOUT2 unconnected, so outside
+TDM the two I2S slots can only ever carry the two built-in mics. Selecting MIC4
+on a real board gives two silent slots, which is what you would predict. The
+same goes for MIC3, where the board taps the speaker output for echo
+cancellation.
+
+TDM on SDOUT1 would reach them, but it needs more clocks per frame than the
+2-slot 16-bit frame the ADC shares with ES8388 playback -- so it is a change to
+the shared I2S and the speaker path, not to the microphone code.
+
+### Headphone detect
+
+```python
+tulip.audio_jack()              # True while something is plugged into the 3.5mm jack
+tulip.audio_jack(raw=True)      # the detect line itself: 1 plugged in, 0 empty
+```
+
+The line is P7 of the IO expander at 0x43. Nothing in the BSP reads it, and two
+things about it had to be measured: the expander's driver resets every pin to an
+*output*, so P7 must be claimed back as an input before it says anything, and
+its internal pull-down then has to be turned off, or it beats the weak pull-up a
+plug produces and the pin reads 0 whatever you do. Plugging in does not mute the
+speaker; nothing in the firmware acts on this yet.
+
 ### Playing the mics through AMY
 
 While the mic is running, AMY also gets the newest block of it, so an
