@@ -1563,6 +1563,21 @@ p.load("me.png", 32, 32)
 p.joy_move() # will update the position based on the joystick
 ```
 
+## Sprite editor
+
+`run('spriteedit')` is a sprite editor drawn on the BG plane. It has the usual tools (pen, eraser, fill, eyedropper, line, rectangle, box, oval, disc, move), mirrored drawing, onion skin, undo, a 32 colour palette with RGB sliders, and animation frames with a live preview made of real sprites. It takes touch, a mouse or a keyboard. A Tulip CC does not ship with it, as its `/sys` is too small; copy `spriteedit.py` to `/user` to use it there.
+
+It saves to `/user` as a PNG with the frames stacked top to bottom. Stacked, each frame is one contiguous run of sprite RAM once loaded, so a frame is a `mem_pos`:
+
+```python
+(w, h, _) = tulip.sprite_png("hero.png", 0)
+frame_h = 16                    # what you drew at; frames = h // frame_h
+tulip.sprite_register(5, 0 + frame * w * frame_h, w, frame_h)
+tulip.sprite_on(5)
+```
+
+The editor caps the number of frames at what fits in sprite RAM, so a file it saved can always be loaded this way -- seven frames at 64x64, thirty-one at 32x32. Quitting with unsaved work keeps it in `/user/spriteedit_recover.png`. It opens other PNGs too, up to 64 pixels wide: an image a whole number of squares tall is taken as a strip of them, anything else as one frame.
+
 ## Camera (Tab5 only)
 
 The Tab5 has a 2 megapixel camera on its front (an SC2356 on the ESP32-P4's
@@ -1881,7 +1896,6 @@ See `planet_boing` in `/sys/ex/` for a fleshed out example of using the `Game` a
 
 Things we've thought of we'd love your help on:
 
- * Sprite editor in Tulip
  * Tile / Map editor in Tulip
 
  [![shore pine sound systems discord](https://raw.githubusercontent.com/shorepine/tulipcc/main/docs/pics/shorepine100.png) **Chat about Tulip on our Discord!**](https://discord.gg/TzBFkUb8pG)

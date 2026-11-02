@@ -1516,6 +1516,21 @@ p.joy_move() # ジョイスティックの入力に応じて位置を更新し�
 
 `Game` クラスと `Sprite` クラスを使った本格的な例としては、`/sys/ex/` の `planet_boing` を参照してください。
 
+## スプライトエディタ
+
+`run('spriteedit')` は BG プレーン上に描画されるスプライトエディタです。一般的なツール（ペン、消しゴム、塗りつぶし、スポイト、直線、矩形、塗りつぶし矩形、楕円、塗りつぶし楕円、移動）、ミラー描画、オニオンスキン、アンドゥ、RGB スライダー付きの 32 色パレット、本物のスプライトによるライブプレビュー付きのアニメーションフレームを備えています。タッチ、マウス、キーボードで操作できます。Tulip CC は `/sys` の容量が足りないため同梱していません。使う場合は `spriteedit.py` を `/user` にコピーしてください。
+
+保存先は `/user` で、フレームを上から下へ積み重ねた PNG になります。積み重ねてあるので、読み込むと各フレームがスプライト RAM 上で連続した領域になり、フレームの指定は `mem_pos` だけで済みます。
+
+```python
+(w, h, _) = tulip.sprite_png("hero.png", 0)
+frame_h = 16                    # 描いたときの高さ。フレーム数は h // frame_h
+tulip.sprite_register(5, 0 + frame * w * frame_h, w, frame_h)
+tulip.sprite_on(5)
+```
+
+フレーム数はスプライト RAM に収まる数（64x64 なら 7、32x32 なら 31）までに制限されるので、エディタで保存したファイルは必ずこの方法で読み込めます。未保存のまま終了すると、内容は `/user/spriteedit_recover.png` に残ります。他のツールで作った幅 64 ピクセルまでの PNG も開けます。高さが幅の整数倍の画像は正方形フレームの連なりとして、それ以外は 1 フレームとして扱います。
+
 ## カメラ（Tab5 のみ）
 
 Tab5 の前面には 2 メガピクセルのカメラ（ESP32-P4 の MIPI-CSI ポートにつながった
@@ -1771,7 +1786,6 @@ amy.send(osc=0, wave=amy.PCM, preset=256, note=60, vel=1)   # 909 のバスド�
 
 私たちが考えている、協力していただけると嬉しいことです。
 
- * Tulip 上のスプライトエディタ
  * Tulip 上のタイル / マップエディタ
 
  [![shore pine sound systems discord](https://raw.githubusercontent.com/shorepine/tulipcc/main/docs/pics/shorepine100.png) **Discord で Tulip について語り合いましょう。**](https://discord.gg/TzBFkUb8pG)

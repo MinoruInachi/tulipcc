@@ -99,10 +99,11 @@ lfs.mount(fs, cfg)
 # the image 16 KB past the 768 blocks there. The Tab5 grew its partition to
 # 4 MiB instead (esp32p4/partitions-8MiBplus-ota.csv); a 3 MiB board -- Tulip
 # CC, or a Tab5 still on the old table -- ships without the game. Keyed on the
-# partition size, as amyboard_fs_create.py does for its big samples.
+# partition size, as amyboard_fs_create.py does for its big samples. The same goes
+# for ex/spriteedit.py, which on its own is 4 blocks too many for those 768.
 left_out = []
 if fs_source == 'tulip' and sys_partition.size < 0x400000:
-    left_out = ['ex/startrek.py']
+    left_out = ['ex/startrek.py', 'ex/spriteedit.py']
     print("system partition under 4 MiB: leaving out %s" % ', '.join(left_out))
 
 def wanted_file(folder, file):
