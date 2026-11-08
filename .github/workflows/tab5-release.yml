@@ -112,7 +112,20 @@ jobs:
           # not in the espressif/idf image, so install it when it is missing --
           # guarded, in case a future image ships one. The action wraps this
           # whole string in single quotes, so it must not contain any.
+          #
+          # IDF_COMPONENT_CHECK_NEW_VERSION=0 turns off the component manager's
+          # "new versions available" check. That check solves the dependencies
+          # again without dependencies.lock, and in this image it also registers
+          # the Kconfig conditions of the newest versions it finds. Since
+          # espressif/esp_hosted 3.1.0 (2026-11-05), which makes four USB deps
+          # conditional on ESP_HOSTED_HOST_USB_*_MANIFEST, every build stopped at
+          # "Missing required kconfig option after retry": the locked 2.7.0
+          # defines none of those options. The build only uses the locked
+          # versions, so the check has nothing to offer CI. It is exported in
+          # the command because the action passes only IDF_TARGET into the
+          # container, not this step's env:.
           command: >-
+            export IDF_COMPONENT_CHECK_NEW_VERSION=0 &&
             if ! command -v clang > /dev/null; then
             apt-get update && apt-get install -y --no-install-recommends clang;
             fi &&
