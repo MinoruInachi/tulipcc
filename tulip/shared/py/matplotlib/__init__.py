@@ -21,7 +21,7 @@ __version__ = "0.1.0+tulip"
 # the same contract as upstream rcParams minus the validation.  Colors accept
 # anything matplotlib.colors.to_pal() understands.
 #
-# Where upstream takes a point size we take a Tulip font number (0-18, see
+# Where upstream takes a point size we take a Tulip font number (0-19, see
 # `tulip.bg_str`).  Point sizes are meaningless here: the fonts are bitmaps at
 # fixed sizes, not scalable outlines.  The keys keep their upstream names so
 # that rcParams.update() calls copied from a desktop script still land

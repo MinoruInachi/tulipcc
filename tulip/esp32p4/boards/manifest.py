@@ -72,6 +72,8 @@ freeze("$(MPY_DIR)/../tulip/shared/py", (
 # shared/py with a bare freeze(<dir>), which walks subdirectories and picks
 # this up on its own; only this board lists its frozen files individually.
 package("matplotlib", base_path="$(MPY_DIR)/../tulip/shared/py")
+# Its 3-D axes, under the upstream import path (mpl_toolkits.mplot3d).
+package("mpl_toolkits", base_path="$(MPY_DIR)/../tulip/shared/py")
 
 # AMYboard's python module, so Tulip can run AMYboard World sketches
 # (world.amyboard.download). CV helpers no-op on Tulip; I2C accessories work.

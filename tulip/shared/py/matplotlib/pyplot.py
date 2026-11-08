@@ -15,6 +15,8 @@
 #             grid, legend, text, annotate, axis, tight_layout
 #   scales    xscale, yscale, semilogx, semilogy, loglog
 #   output    show, draw, savefig, pause
+#   3-D       add_subplot(projection='3d'): scatter and plot, in
+#             mpl_toolkits/mplot3d/axes3d.py
 #
 # ---------------------------------------------------------------------------
 # Where it deviates from upstream, and why
@@ -24,7 +26,9 @@
 #     plot(); show()` accumulates.  Call `clf()` (or `figure()`) to start over.
 #   * `alpha=` is accepted and ignored.  The background layer is one byte per
 #     pixel with no blending.
-#   * Font sizes are Tulip font numbers (0-18), not points.  See rcParams.
+#   * Font sizes are Tulip font numbers (0-19), not points.  See rcParams.
+#     A string with any non-ASCII character in it is drawn in font 19, the
+#     Japanese one, whatever font was asked for -- the others are ASCII only.
 #   * `ylabel` is drawn as a column of upright characters rather than rotated
 #     text; Tulip's text renderer draws left to right only.
 #   * `imshow` defaults to `aspect='auto'` (fill the axes box) rather than
@@ -84,7 +88,10 @@ _FONT_METRICS = (
     (26, 18),  # 16 osb18
     (35, 24),  # 17 logisoso24
     (34, 25),  # 18 lubB24
+    (16, 10),  # 19 efont b16, Japanese (missing on ESP32-S3 builds)
 )
+
+_JP_FONT = 19
 
 # Dash patterns in pixels, on/off alternating.  '-' is solid and skips the
 # dash walker entirely.
@@ -133,7 +140,18 @@ def _seq(a):
         return []
     if isinstance(a, (int, float)):
         return [float(a)]
-    return [float(v) for v in a]
+    try:
+        return [float(v) for v in a]
+    except (TypeError, ValueError):
+        # Two-dimensional input -- a ulab meshgrid, a list of rows -- is
+        # flattened row-major, which is what upstream's scatter does.  Only
+        # when the rows really are sequences: a bad string must still raise.
+        if not any(_is_seq(v) for v in a):
+            raise
+        out = []
+        for row in a:
+            out.extend(_seq(row))
+        return out
 
 
 def _bounds1(vals):
@@ -185,6 +203,7 @@ def _text_w(s, font):
     global _scratch
     if not s:
         return 0
+    font = _pick_font(s, font)
     if _scratch is None:
         # OFFSCREEN_X_PX is at least 128 on every Tulip panel, and no single
         # glyph in the built-in fonts is anywhere near that wide.
@@ -198,6 +217,48 @@ def _text_w(s, font):
             _char_w[key] = w
         total += w
     return total
+
+
+_jp = None
+
+
+def _has_jp():
+    """Whether this build carries the Japanese bg_str font.
+
+    A missing font is a NULL entry, and bg_str then returns the x it was given
+    instead of an advance width -- so a width that is not a plausible glyph
+    width means there is no font.  Drawn into the offscreen columns, like
+    _text_w's measurements.
+    """
+    global _jp
+    if _jp is None:
+        x = _screen()[0] + 4
+        w = tulip.bg_str("\u3042", x, 20, 0, _JP_FONT)
+        _jp = 0 < w < 64
+    return _jp
+
+
+def _pick_font(s, font):
+    """Font 19 for any string the ASCII-only fonts cannot draw."""
+    if font != _JP_FONT:
+        for ch in s:
+            if ord(ch) > 127:
+                return _JP_FONT if _has_jp() else font
+    return font
+
+
+def _font_arg(v, default):
+    """A fontsize=/size= argument as a Tulip font number, else `default`.
+
+    Upstream takes points or names ('large'); a font number is all that means
+    anything here, so anything that is not one -- a desktop script's size=20,
+    say -- falls back to the default rather than raising.
+    """
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        n = int(v)
+        if 0 <= n < len(_FONT_METRICS):
+            return n
+    return default
 
 
 def _font_h(font):
@@ -216,6 +277,7 @@ def _draw_text(s, x, y, color, font, ha="left", va="baseline"):
     """
     if not s:
         return
+    font = _pick_font(s, font)
     if ha != "left":
         w = _text_w(s, font)
         if ha == "center":
@@ -1220,6 +1282,7 @@ class Axes:
         self.title = None
         self.xlabel = None
         self.ylabel = None
+        self._text_kw = {}
         self._xlim = None
         self._ylim = None
         self._xscale = "linear"
@@ -1246,6 +1309,22 @@ class Axes:
         return self
 
     # ---------------------------------------------------------------- style
+
+    def _label_style(self, which, s):
+        """(font, palette color) for the title or an axis label.
+
+        The fontsize=/size=/color= given to set_title() and friends win over
+        rcParams, and Japanese text switches to the font that can draw it.
+        """
+        kw = self._text_kw.get(which) or {}
+        if which == "title":
+            font = rcParams["axes.titlesize"]
+            color = rcParams["axes.titlecolor"]
+        else:
+            font = rcParams["axes.labelsize"]
+            color = rcParams["axes.labelcolor"]
+        font = _font_arg(kw.get("fontsize", kw.get("size")), font)
+        return _pick_font(s or "", font), to_pal(kw.get("color", color))
 
     def _next_color(self):
         cyc = rcParams["axes.prop_cycle"]
@@ -1412,8 +1491,9 @@ class Axes:
 
         xfont = rcParams["xtick.labelsize"]
         yfont = rcParams["ytick.labelsize"]
-        lfont = rcParams["axes.labelsize"]
-        tfont = rcParams["axes.titlesize"]
+        xlfont = self._label_style("xlabel", self.xlabel)[0]
+        ylfont = self._label_style("ylabel", self.ylabel)[0]
+        tfont = self._label_style("title", self.title)[0]
 
         pad = 6
         left = right = top = bottom = pad
@@ -1440,14 +1520,14 @@ class Axes:
 
         self._xlabel_h = 0
         if self.xlabel:
-            self._xlabel_h = _font_h(lfont) + 2
+            self._xlabel_h = _font_h(xlfont) + 2
             bottom += self._xlabel_h
         self._ylabel_w = 0
         if self.ylabel:
             # Drawn as a column of upright characters, so it is only as wide as
             # its widest glyph.
             for ch in self.ylabel:
-                v = _text_w(ch, lfont)
+                v = _text_w(ch, ylfont)
                 if v > self._ylabel_w:
                     self._ylabel_w = v
             self._ylabel_w += 3
@@ -1590,15 +1670,15 @@ class Axes:
     def _draw_labels(self):
         bx, by, bw, bh = self._box
         if self.title:
+            font, color = self._label_style("title", self.title)
             _draw_text(self.title, bx + bw // 2, self._title_base,
-                       to_pal(rcParams["axes.titlecolor"]),
-                       rcParams["axes.titlesize"], "center")
-        color = to_pal(rcParams["axes.labelcolor"])
-        font = rcParams["axes.labelsize"]
+                       color, font, "center")
         if self.xlabel:
+            font, color = self._label_style("xlabel", self.xlabel)
             _draw_text(self.xlabel, bx + bw // 2, self._xlabel_base,
                        color, font, "center")
         if self.ylabel:
+            font, color = self._label_style("ylabel", self.ylabel)
             # Upright characters stacked downward.  Tulip draws left to right
             # only, and a column reads better than a horizontal label crammed
             # in above the axis.
@@ -2138,14 +2218,17 @@ class Axes:
 
     def set_title(self, s, **kw):
         self.title = None if s is None else str(s)
+        self._text_kw["title"] = kw
         return self.title
 
     def set_xlabel(self, s, **kw):
         self.xlabel = None if s is None else str(s)
+        self._text_kw["xlabel"] = kw
         return self.xlabel
 
     def set_ylabel(self, s, **kw):
         self.ylabel = None if s is None else str(s)
+        self._text_kw["ylabel"] = kw
         return self.ylabel
 
     def set_xlim(self, left=None, right=None):
@@ -2295,26 +2378,33 @@ class Figure:
 
     # ---------------------------------------------------------------- axes
 
-    def add_axes(self, rect):
-        ax = Axes(self, tuple(float(v) for v in rect))
+    def add_axes(self, rect, projection=None, **kw):
+        ax = _axes_class(projection)(self, tuple(float(v) for v in rect))
         self.axes.append(ax)
         self._current = ax
         return ax
 
-    def add_subplot(self, *args):
+    def add_subplot(self, *args, projection=None, **kw):
         nrows, ncols, index = _subplot_spec(args)
         rect = _subplot_rect(nrows, ncols, index)
-        # Re-selecting the same cell returns the existing axes, as upstream.
-        for ax in self.axes:
+        cls = _axes_class(projection)
+        # Re-selecting the same cell returns the existing axes, as upstream --
+        # unless it asks for another projection, which replaces it.
+        for i in range(len(self.axes)):
+            ax = self.axes[i]
             if ax._rect == rect:
+                if type(ax) is not cls:
+                    ax = cls(self, rect)
+                    self.axes[i] = ax
                 self._current = ax
                 return ax
-        return self.add_axes(rect)
+        return self.add_axes(rect, projection)
 
-    def subplots(self, nrows=1, ncols=1, **kw):
+    def subplots(self, nrows=1, ncols=1, subplot_kw=None, **kw):
+        skw = subplot_kw or {}
         grid = []
         for r in range(nrows):
-            row = [self.add_subplot(nrows, ncols, r * ncols + c + 1)
+            row = [self.add_subplot(nrows, ncols, r * ncols + c + 1, **skw)
                    for c in range(ncols)]
             grid.append(row)
         self._current = grid[0][0]
@@ -2369,6 +2459,19 @@ class Figure:
         x, y, w, h = self._rect
         tulip.int_screenshot(str(fname), x, y, w, h)
         return fname
+
+
+def _axes_class(projection):
+    """Axes for projection=None, Axes3D for '3d'.
+
+    Imported on demand so a 2-D plot never pays for loading the 3-D code.
+    """
+    if projection is None or projection == "rectilinear":
+        return Axes
+    if projection == "3d":
+        from mpl_toolkits.mplot3d.axes3d import Axes3D
+        return Axes3D
+    raise ValueError("unknown projection %r" % (projection,))
 
 
 def _subplot_spec(args):
@@ -2460,17 +2563,17 @@ def sca(ax):
 
 
 def subplot(*args, **kw):
-    return gcf().add_subplot(*args)
+    return gcf().add_subplot(*args, projection=kw.get("projection"))
 
 
 def subplots(nrows=1, ncols=1, **kw):
     fig = figure(**{k: v for k, v in kw.items()
                     if k in ("num", "figsize", "facecolor", "rect")})
-    return fig, fig.subplots(nrows, ncols)
+    return fig, fig.subplots(nrows, ncols, kw.get("subplot_kw"))
 
 
-def axes(rect=None):
-    return gcf().add_axes(rect if rect else (0.0, 0.0, 1.0, 1.0))
+def axes(rect=None, projection=None, **kw):
+    return gcf().add_axes(rect if rect else (0.0, 0.0, 1.0, 1.0), projection)
 
 
 def clf():
