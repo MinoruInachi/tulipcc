@@ -515,7 +515,11 @@ void fillTriangle ( short x0, short y0,
     dx02 = x2 - x0,
     dy02 = y2 - y0,
     dx12 = x2 - x1,
-    dy12 = y2 - y1,
+    dy12 = y2 - y1;
+  // The running numerators are dx * dy, which passes 32767 once a triangle is
+  // much over 180 pixels on a side; as shorts they wrapped and the spans shot
+  // off across the whole plane.
+  int32_t
     sa   = 0,
     sb   = 0;
 
